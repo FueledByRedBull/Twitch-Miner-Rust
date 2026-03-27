@@ -35,10 +35,11 @@ const DEFAULT_USER_AGENT: &str =
 const READ_ONLY_FILE_SYSTEM_ERROR: i32 = 30;
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
 const SPADE_URL_TTL: Duration = Duration::from_secs(15 * 60);
+const SESSION_SUMMARY_INDENT: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TimezoneOverride {
-    Applied(String),
+enum TimezoneValidation {
+    Valid(String),
     Invalid(String),
 }
 
@@ -64,6 +65,18 @@ struct CachedSpadeUrl {
     fetched_at: StdInstant,
 }
 
+#[derive(Debug, Clone)]
+enum SpadeCacheEntry {
+    Ready(CachedSpadeUrl),
+    Refreshing(Arc<tokio::sync::Notify>),
+}
+
+enum SpadeResolveAction {
+    Use(String),
+    Wait(Arc<tokio::sync::Notify>),
+    Fetch(Arc<tokio::sync::Notify>),
+}
+
 struct BackgroundTaskParams<'a> {
     config: &'a ConfigFile,
     stop_rx: tokio::sync::watch::Receiver<bool>,
@@ -71,7 +84,7 @@ struct BackgroundTaskParams<'a> {
     twitch: &'a Arc<TwitchClient>,
     auth_token: &'a str,
     user_id: Option<&'a String>,
-    tracked_streamers: &'a [Streamer],
+    initial_streamers: &'a [Streamer],
     observability: &'a AppObservability,
 }
 
@@ -192,7 +205,7 @@ async fn main() -> Result<()> {
     clear_console();
 
     let (config, config_path) = load_config_with_fallback(&paths, has_override)?;
-    let timezone_override = apply_timezone_override(config.timezone.as_deref());
+    let timezone_validation = validate_timezone_override(config.timezone.as_deref());
 
     init_tracing(&TracingInitOptions {
         settings: build_logger_settings(&config),
@@ -200,7 +213,7 @@ async fn main() -> Result<()> {
         username: config.username.clone(),
         timezone: config.timezone.clone(),
     })?;
-    log_timezone_override(timezone_override.as_ref());
+    log_timezone_validation(timezone_validation.as_ref());
 
     if run_auto_update_if_enabled(&config).await? {
         return Ok(());
@@ -234,7 +247,7 @@ async fn main() -> Result<()> {
     .await?;
     claim_startup_drops_if_enabled(&config, &state.streamers, &twitch, &observability).await?;
     let runtime = tm_runtime::spawn_runtime_state(state);
-    let tracked_streamers = runtime.state_snapshot().await?.streamers;
+    let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let tasks = spawn_background_tasks(BackgroundTaskParams {
         config: &config,
@@ -243,7 +256,7 @@ async fn main() -> Result<()> {
         twitch: &twitch,
         auth_token: &auth_token,
         user_id: user_id.as_ref(),
-        tracked_streamers: &tracked_streamers,
+        initial_streamers: &initial_streamers,
         observability: &observability,
     })?;
     let summary = runtime.runtime_summary().await?;
@@ -371,7 +384,7 @@ fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result<Background
             params.auth_token.to_string(),
             user_id.clone(),
             username.clone(),
-            params.tracked_streamers.to_vec(),
+            params.initial_streamers.to_vec(),
             user_id.clone(),
             params.observability.clone(),
         )
@@ -395,7 +408,7 @@ fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result<Background
         )
     });
     let drop = params
-        .tracked_streamers
+        .initial_streamers
         .iter()
         .any(|streamer| streamer.settings.claim_drops)
         .then(|| {
@@ -666,10 +679,7 @@ async fn bootstrap_streamer(
         stream.update(
             &info.id,
             &info.title,
-            Game {
-                display_name: (!info.game_name.trim().is_empty()).then(|| info.game_name.clone()),
-                name: (!info.game_name.trim().is_empty()).then(|| info.game_name.clone()),
-            },
+            Game::from_name(&info.game_name),
             &info.tags,
             info.viewers_count,
             tm_twitch::DROP_ID,
@@ -731,22 +741,22 @@ fn prediction_wait_duration(
     std::time::Duration::from_millis(u64::try_from(remaining_millis).unwrap_or(u64::MAX))
 }
 
-fn apply_timezone_override(raw: Option<&str>) -> Option<TimezoneOverride> {
+fn validate_timezone_override(raw: Option<&str>) -> Option<TimezoneValidation> {
     let zone = raw
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))?;
     match zone.parse::<chrono_tz::Tz>() {
-        Ok(_) => Some(TimezoneOverride::Applied(zone.to_string())),
-        Err(_) => Some(TimezoneOverride::Invalid(zone.to_string())),
+        Ok(_) => Some(TimezoneValidation::Valid(zone.to_string())),
+        Err(_) => Some(TimezoneValidation::Invalid(zone.to_string())),
     }
 }
 
-fn log_timezone_override(override_state: Option<&TimezoneOverride>) {
-    match override_state {
-        Some(TimezoneOverride::Applied(zone)) => {
-            tracing::info!(timezone = %zone, "timezone override applied");
+fn log_timezone_validation(validation: Option<&TimezoneValidation>) {
+    match validation {
+        Some(TimezoneValidation::Valid(zone)) => {
+            tracing::info!(timezone = %zone, "using configured timezone");
         }
-        Some(TimezoneOverride::Invalid(zone)) => {
+        Some(TimezoneValidation::Invalid(zone)) => {
             tracing::warn!(
                 timezone = %zone,
                 "timezone override ignored; falling back to system time"
@@ -1700,7 +1710,7 @@ fn spawn_minute_watcher_loop(
     observability: AppObservability,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let spade_urls = tokio::sync::Mutex::new(HashMap::<String, CachedSpadeUrl>::new());
+        let spade_urls = tokio::sync::Mutex::new(HashMap::<String, SpadeCacheEntry>::new());
         let mut stop = stop;
         'outer: loop {
             if *stop.borrow() {
@@ -1772,7 +1782,7 @@ fn spawn_minute_watcher_loop(
 async fn send_minute_watched_for_streamer(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
-    spade_urls: &tokio::sync::Mutex<HashMap<String, CachedSpadeUrl>>,
+    spade_urls: &tokio::sync::Mutex<HashMap<String, SpadeCacheEntry>>,
     streamer: &Streamer,
     user_id: &str,
     observability: &AppObservability,
@@ -1807,10 +1817,7 @@ async fn send_minute_watched_for_streamer(
     stream.update(
         &info.id,
         &info.title,
-        Game {
-            display_name: (!info.game_name.trim().is_empty()).then(|| info.game_name.clone()),
-            name: (!info.game_name.trim().is_empty()).then(|| info.game_name.clone()),
-        },
+        Game::from_name(&info.game_name),
         &info.tags,
         info.viewers_count,
         tm_twitch::DROP_ID,
@@ -1927,41 +1934,67 @@ fn log_stream_presence_changes(
 }
 
 async fn resolve_spade_url<FetchSpade, FetchFuture, Error>(
-    spade_urls: &tokio::sync::Mutex<HashMap<String, CachedSpadeUrl>>,
+    spade_urls: &tokio::sync::Mutex<HashMap<String, SpadeCacheEntry>>,
     streamer_username: &str,
+    force_refresh: bool,
     fetch_spade: FetchSpade,
 ) -> std::result::Result<String, Error>
 where
     FetchSpade: Fn(String) -> FetchFuture,
     FetchFuture: std::future::Future<Output = std::result::Result<String, Error>>,
 {
-    {
-        let mut cache = spade_urls.lock().await;
-        if let Some(entry) = cache.get(streamer_username) {
-            if entry.fetched_at.elapsed() < SPADE_URL_TTL {
-                return Ok(entry.url.clone());
+    let mut force_refresh = force_refresh;
+    loop {
+        let action = {
+            let mut cache = spade_urls.lock().await;
+            match cache.get(streamer_username) {
+                Some(SpadeCacheEntry::Ready(entry))
+                    if !force_refresh && entry.fetched_at.elapsed() < SPADE_URL_TTL =>
+                {
+                    SpadeResolveAction::Use(entry.url.clone())
+                }
+                Some(SpadeCacheEntry::Refreshing(notify)) => {
+                    SpadeResolveAction::Wait(Arc::clone(notify))
+                }
+                _ => {
+                    let notify = Arc::new(tokio::sync::Notify::new());
+                    cache.insert(
+                        streamer_username.to_string(),
+                        SpadeCacheEntry::Refreshing(Arc::clone(&notify)),
+                    );
+                    SpadeResolveAction::Fetch(notify)
+                }
+            }
+        };
+
+        match action {
+            SpadeResolveAction::Use(url) => return Ok(url),
+            SpadeResolveAction::Wait(notify) => {
+                force_refresh = false;
+                notify.notified().await;
+            }
+            SpadeResolveAction::Fetch(notify) => {
+                let resolved = fetch_spade(streamer_username.to_string()).await;
+                let mut cache = spade_urls.lock().await;
+                match &resolved {
+                    Ok(url) => {
+                        cache.insert(
+                            streamer_username.to_string(),
+                            SpadeCacheEntry::Ready(CachedSpadeUrl {
+                                url: url.clone(),
+                                fetched_at: StdInstant::now(),
+                            }),
+                        );
+                    }
+                    Err(_) => {
+                        cache.remove(streamer_username);
+                    }
+                }
+                notify.notify_waiters();
+                return resolved;
             }
         }
-        cache.remove(streamer_username);
     }
-
-    let resolved = fetch_spade(streamer_username.to_string()).await?;
-    let mut cache = spade_urls.lock().await;
-    cache.insert(
-        streamer_username.to_string(),
-        CachedSpadeUrl {
-            url: resolved.clone(),
-            fetched_at: StdInstant::now(),
-        },
-    );
-    Ok(resolved)
-}
-
-async fn invalidate_spade_url(
-    spade_urls: &tokio::sync::Mutex<HashMap<String, CachedSpadeUrl>>,
-    streamer_username: &str,
-) {
-    spade_urls.lock().await.remove(streamer_username);
 }
 
 async fn send_minute_watched_with_spade_cache<
@@ -1971,7 +2004,7 @@ async fn send_minute_watched_with_spade_cache<
     SendFuture,
     Error,
 >(
-    spade_urls: &tokio::sync::Mutex<HashMap<String, CachedSpadeUrl>>,
+    spade_urls: &tokio::sync::Mutex<HashMap<String, SpadeCacheEntry>>,
     streamer_username: &str,
     fetch_spade: FetchSpade,
     send_minute_watched: SendMinute,
@@ -1982,12 +2015,12 @@ where
     SendMinute: Fn(String) -> SendFuture,
     SendFuture: std::future::Future<Output = std::result::Result<StatusCode, Error>>,
 {
-    let spade_url = resolve_spade_url(spade_urls, streamer_username, &fetch_spade).await?;
+    let spade_url = resolve_spade_url(spade_urls, streamer_username, false, &fetch_spade).await?;
     if let Ok(StatusCode::NO_CONTENT) = send_minute_watched(spade_url.clone()).await {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        invalidate_spade_url(spade_urls, streamer_username).await;
-        let refreshed = resolve_spade_url(spade_urls, streamer_username, &fetch_spade).await?;
+        let refreshed =
+            resolve_spade_url(spade_urls, streamer_username, true, &fetch_spade).await?;
         send_minute_watched(refreshed).await
     }
 }
@@ -2076,6 +2109,21 @@ fn spawn_chat_manager_loop(
             ),
         > = HashMap::new();
         let mut stop = stop;
+        let mut state_changes = runtime.subscribe_state_changes();
+
+        if let Err(error) = reconcile_chat_watchers(
+            &runtime,
+            &mut watchers,
+            &auth_token,
+            &username,
+            disable_at_in_nickname,
+            &observability,
+        )
+        .await
+        {
+            tracing::warn!(%error, "chat manager snapshot failed");
+            return;
+        }
 
         loop {
             tokio::select! {
@@ -2084,43 +2132,22 @@ fn spawn_chat_manager_loop(
                         break;
                     }
                 }
-                () = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                    let desired = match runtime.state_snapshot().await {
-                        Ok(snapshot) => snapshot.desired_chat_logins(),
-                        Err(error) => {
-                            tracing::warn!(%error, "chat manager snapshot failed");
-                            break;
-                        }
-                    };
-                    let desired: std::collections::HashSet<_> = desired.into_iter().collect();
-
-                    let existing = watchers.keys().cloned().collect::<Vec<_>>();
-                    for login in existing {
-                        if desired.contains(&login) {
-                            continue;
-                        }
-                        if let Some((watcher_stop, task)) = watchers.remove(&login) {
-                            let _ = watcher_stop.send(true);
-                            let _ = task.await;
-                            tracing::info!(channel = %login, "leave irc chat");
-                        }
+                changed = state_changes.changed() => {
+                    if changed.is_err() {
+                        break;
                     }
-
-                    for login in desired {
-                        if watchers.contains_key(&login) {
-                            continue;
-                        }
-                        let (watcher_stop, watcher_rx) = tokio::sync::watch::channel(false);
-                        let task = spawn_chat_watcher_loop(
-                            watcher_rx,
-                            username.clone(),
-                            auth_token.clone(),
-                            login.clone(),
-                            disable_at_in_nickname,
-                            observability.clone(),
-                        );
-                        watchers.insert(login.clone(), (watcher_stop, task));
-                        tracing::info!(channel = %login, "join irc chat");
+                    if let Err(error) = reconcile_chat_watchers(
+                        &runtime,
+                        &mut watchers,
+                        &auth_token,
+                        &username,
+                        disable_at_in_nickname,
+                        &observability,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "chat manager snapshot failed");
+                        break;
                     }
                 }
             }
@@ -2131,6 +2158,55 @@ fn spawn_chat_manager_loop(
             let _ = task.await;
         }
     })
+}
+
+async fn reconcile_chat_watchers(
+    runtime: &tm_runtime::RuntimeHandle,
+    watchers: &mut HashMap<
+        String,
+        (
+            tokio::sync::watch::Sender<bool>,
+            tokio::task::JoinHandle<()>,
+        ),
+    >,
+    auth_token: &str,
+    username: &str,
+    disable_at_in_nickname: bool,
+    observability: &AppObservability,
+) -> Result<()> {
+    let desired = runtime.state_snapshot().await?.desired_chat_logins();
+    let desired: std::collections::HashSet<_> = desired.into_iter().collect();
+
+    let existing = watchers.keys().cloned().collect::<Vec<_>>();
+    for login in existing {
+        if desired.contains(&login) {
+            continue;
+        }
+        if let Some((watcher_stop, task)) = watchers.remove(&login) {
+            let _ = watcher_stop.send(true);
+            let _ = task.await;
+            tracing::info!(channel = %login, "leave irc chat");
+        }
+    }
+
+    for login in desired {
+        if watchers.contains_key(&login) {
+            continue;
+        }
+        let (watcher_stop, watcher_rx) = tokio::sync::watch::channel(false);
+        let task = spawn_chat_watcher_loop(
+            watcher_rx,
+            username.to_string(),
+            auth_token.to_string(),
+            login.clone(),
+            disable_at_in_nickname,
+            observability.clone(),
+        );
+        watchers.insert(login.clone(), (watcher_stop, task));
+        tracing::info!(channel = %login, "join irc chat");
+    }
+
+    Ok(())
 }
 
 fn spawn_chat_watcher_loop(
@@ -2224,7 +2300,7 @@ fn log_session_summary(summary: &tm_runtime::SessionSummary) {
             streamer.total_points_line
         );
         for line in &streamer.history_lines {
-            tracing::info!("                         {}", line);
+            tracing::info!("{:width$}{}", "", line, width = SESSION_SUMMARY_INDENT);
         }
     }
 }
@@ -2644,16 +2720,16 @@ mod tests {
     }
 
     #[test]
-    fn timezone_override_validates_iana_names() {
+    fn timezone_validation_accepts_iana_names() {
         assert_eq!(
-            apply_timezone_override(Some("Europe/Athens")),
-            Some(TimezoneOverride::Applied(String::from("Europe/Athens")))
+            validate_timezone_override(Some("Europe/Athens")),
+            Some(TimezoneValidation::Valid(String::from("Europe/Athens")))
         );
         assert_eq!(
-            apply_timezone_override(Some("not/a-timezone")),
-            Some(TimezoneOverride::Invalid(String::from("not/a-timezone")))
+            validate_timezone_override(Some("not/a-timezone")),
+            Some(TimezoneValidation::Invalid(String::from("not/a-timezone")))
         );
-        assert_eq!(apply_timezone_override(Some("auto")), None);
+        assert_eq!(validate_timezone_override(Some("auto")), None);
     }
 
     #[test]
@@ -2866,10 +2942,10 @@ mod tests {
             spawn_status_server(vec!["204 No Content"]);
         let spade_urls = tokio::sync::Mutex::new(HashMap::from([(
             String::from("alice"),
-            CachedSpadeUrl {
+            SpadeCacheEntry::Ready(CachedSpadeUrl {
                 url: spade_url,
                 fetched_at: StdInstant::now(),
-            },
+            }),
         )]));
         let config = ConfigFile {
             username: String::from("tester"),
@@ -2952,6 +3028,41 @@ mod tests {
             sent_urls.lock().unwrap().as_slice(),
             ["https://spade-1.example", "https://spade-2.example"]
         );
+    }
+
+    #[tokio::test]
+    async fn spade_cache_uses_single_inflight_fetch_per_streamer() {
+        let spade_urls = tokio::sync::Mutex::new(HashMap::new());
+        let fetches = Arc::new(AtomicUsize::new(0));
+
+        let (first, second) = tokio::join!(
+            resolve_spade_url(&spade_urls, "alice", false, {
+                let fetches = Arc::clone(&fetches);
+                move |_login| {
+                    let fetches = Arc::clone(&fetches);
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, std::io::Error>(String::from("https://spade.example"))
+                    }
+                }
+            }),
+            resolve_spade_url(&spade_urls, "alice", false, {
+                let fetches = Arc::clone(&fetches);
+                move |_login| {
+                    let fetches = Arc::clone(&fetches);
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, std::io::Error>(String::from("https://spade.example"))
+                    }
+                }
+            })
+        );
+
+        assert_eq!(first.unwrap(), "https://spade.example");
+        assert_eq!(second.unwrap(), "https://spade.example");
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

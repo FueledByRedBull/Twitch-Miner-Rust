@@ -171,6 +171,17 @@ pub struct Game {
     pub name: Option<String>,
 }
 
+impl Game {
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        let value = (!name.trim().is_empty()).then(|| name.to_string());
+        Self {
+            display_name: value.clone(),
+            name: value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stream {
     pub broadcast_id: String,

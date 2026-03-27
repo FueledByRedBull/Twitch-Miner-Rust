@@ -12,7 +12,7 @@ use tm_domain::{
 use tm_pubsub::{
     CommunityGoalKind, PlaybackType, PredictionChannelKind, PredictionUserKind, PubSubEvent,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub use tm_domain::OffsetDateTime as RuntimeTime;
 
@@ -31,6 +31,7 @@ pub struct RuntimeSession {
 #[derive(Debug, Clone)]
 pub struct RuntimeHandle {
     sender: mpsc::Sender<RuntimeCommand>,
+    state_revision: watch::Receiver<u64>,
 }
 
 #[derive(Debug)]
@@ -182,8 +183,10 @@ pub fn spawn_runtime_state(state: RuntimeState) -> RuntimeHandle {
 
 fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
     let (sender, mut receiver) = mpsc::channel(64);
+    let (state_revision_tx, state_revision_rx) = watch::channel(0_u64);
     tokio::spawn(async move {
         let RuntimeSession { summary, mut state } = session;
+        let mut state_revision = 0_u64;
         while let Some(command) = receiver.recv().await {
             match command {
                 RuntimeCommand::ApplyPubSub {
@@ -192,6 +195,7 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     respond_to,
                 } => {
                     let _ = respond_to.send(state.apply_pubsub_event(&event, now));
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::SessionSummary {
                     anonymize,
@@ -208,9 +212,11 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                 }
                 RuntimeCommand::ApplyContext { update } => {
                     state.apply_context_update(&update);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::ApplyStreamUpdate { update, now } => {
                     state.apply_stream_update(&update, now);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::SetPresence {
                     channel_id,
@@ -218,9 +224,11 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     now,
                 } => {
                     state.apply_presence(&channel_id, online, now);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::MarkMinuteWatched { channel_id, now } => {
                     state.mark_minute_watched(&channel_id, now);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::RecordPredictionPlaced {
                     event_id,
@@ -228,12 +236,14 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     deduct_stake,
                 } => {
                     state.record_prediction_placed(&event_id, &decision, deduct_stake);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::StopTrackingPrediction {
                     event_id,
                     result_type,
                 } => {
                     state.stop_tracking_prediction(&event_id, &result_type);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::Shutdown {
                     anonymize,
@@ -246,7 +256,15 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
             }
         }
     });
-    RuntimeHandle { sender }
+    RuntimeHandle {
+        sender,
+        state_revision: state_revision_rx,
+    }
+}
+
+fn notify_state_change(sender: &watch::Sender<u64>, revision: &mut u64) {
+    *revision = revision.saturating_add(1);
+    let _ = sender.send(*revision);
 }
 
 #[must_use]
@@ -277,6 +295,11 @@ impl RuntimeSession {
 }
 
 impl RuntimeHandle {
+    #[must_use]
+    pub fn subscribe_state_changes(&self) -> watch::Receiver<u64> {
+        self.state_revision.clone()
+    }
+
     pub async fn apply_pubsub_event(
         &self,
         event: PubSubEvent,
@@ -1442,5 +1465,20 @@ mod tests {
             .unwrap();
         let summary = runtime.shutdown(false, ts(70)).await.unwrap();
         assert_eq!(summary.duration, "01m 00s");
+    }
+
+    #[tokio::test]
+    async fn spawned_runtime_notifies_state_change_subscribers() {
+        let config = ConfigFile {
+            streamers: vec!["tester".into()],
+            ..ConfigFile::default()
+        };
+        let runtime = spawn_runtime(&config, ts(10));
+        let mut changes = runtime.subscribe_state_changes();
+
+        runtime.set_presence("100", true, ts(20)).await.unwrap();
+
+        changes.changed().await.unwrap();
+        assert_eq!(*changes.borrow(), 1);
     }
 }
