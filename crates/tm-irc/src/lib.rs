@@ -288,7 +288,11 @@ impl fmt::Display for ParsedLine {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use super::*;
+    use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[derive(Default)]
@@ -309,6 +313,13 @@ mod tests {
             self.calls
                 .push(format!("emoji:{emoji}:{event:?}:{message}"));
         }
+    }
+
+    fn fixture_value(name: &str) -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name);
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
     #[test]
@@ -385,10 +396,17 @@ mod tests {
 
     #[test]
     fn handle_line_logs_mentions() {
+        let fixture = fixture_value("irc.valid_mention.json");
         let logger = StubLogger::default();
-        let mut client = ChatClient::new("target", "token", "chan", logger, false);
+        let mut client = ChatClient::new(
+            "target",
+            "token",
+            "chan",
+            logger,
+            fixture["disable_at_in_nickname"].as_bool().unwrap_or(false),
+        );
 
-        let event = client.handle_line(":nick!user PRIVMSG #chan :hello @target there");
+        let event = client.handle_line(fixture["line"].as_str().unwrap());
         assert_eq!(
             event,
             Some(ChatEvent::Mention {
@@ -403,10 +421,17 @@ mod tests {
 
     #[test]
     fn handle_line_supports_disable_at_in_nickname() {
+        let fixture = fixture_value("irc.plain_username_mention.json");
         let logger = StubLogger::default();
-        let mut client = ChatClient::new("target", "token", "chan", logger, true);
+        let mut client = ChatClient::new(
+            "target",
+            "token",
+            "chan",
+            logger,
+            fixture["disable_at_in_nickname"].as_bool().unwrap_or(false),
+        );
 
-        let event = client.handle_line(":nick!u PRIVMSG #chan :target is cool");
+        let event = client.handle_line(fixture["line"].as_str().unwrap());
         assert_eq!(
             event,
             Some(ChatEvent::Mention {
@@ -420,22 +445,21 @@ mod tests {
 
     #[test]
     fn handle_line_ignores_non_mentions() {
+        let fixture = fixture_value("irc.non_mention.json");
         let logger = StubLogger::default();
         let mut client = ChatClient::new("target", "token", "chan", logger, false);
 
-        assert_eq!(
-            client.handle_line(":nick!user PRIVMSG #chan :hello target there"),
-            None
-        );
+        assert_eq!(client.handle_line(fixture["line"].as_str().unwrap()), None);
         assert!(client.logger.calls.is_empty());
     }
 
     #[test]
     fn handle_line_marks_auth_failure_closed() {
+        let fixture = fixture_value("irc.auth_failure.json");
         let logger = StubLogger::default();
         let mut client = ChatClient::new("target", "token", "chan", logger, false);
 
-        let event = client.handle_line("NOTICE * :authentication failed");
+        let event = client.handle_line(fixture["line"].as_str().unwrap());
         assert_eq!(event, Some(ChatEvent::AuthenticationFailed));
         assert!(client.is_closed());
         assert_eq!(client.logger.calls.len(), 1);

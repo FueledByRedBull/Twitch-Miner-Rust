@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::{self, Message};
 const TOPIC_BATCH_SIZE: usize = 50;
 pub const WEBSOCKET_URL: &str = "wss://pubsub-edge.twitch.tv";
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+const PING_JITTER_SECONDS: u64 = 5;
 
 #[derive(Debug, Error)]
 pub enum PubSubError {
@@ -74,7 +75,7 @@ pub enum IncomingTransportMessage {
 impl Default for PubSubClientSettings {
     fn default() -> Self {
         Self {
-            ping_interval: Duration::from_secs(4 * 60),
+            ping_interval: Duration::from_secs(25),
             pong_timeout: Duration::from_secs(5 * 60),
         }
     }
@@ -120,17 +121,21 @@ impl PubSubClient {
                 .await?;
         }
 
-        let mut ping_interval = time::interval(self.settings.ping_interval);
-        ping_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
         let mut last_pong = Instant::now();
+        let mut next_ping = std::pin::pin!(time::sleep(randomized_ping_delay(
+            self.settings.ping_interval
+        )));
 
         loop {
             tokio::select! {
-                _ = ping_interval.tick() => {
+                () = &mut next_ping => {
                     if last_pong.elapsed() > self.settings.pong_timeout {
                         return Err(PubSubError::PongTimeout);
                     }
                     socket.send(Message::Text(ping_payload().to_string().into())).await?;
+                    next_ping
+                        .as_mut()
+                        .reset(Instant::now() + randomized_ping_delay(self.settings.ping_interval));
                 }
                 message = socket.next() => {
                     let Some(message) = message else {
@@ -171,6 +176,15 @@ impl PubSubClient {
             }
         }
     }
+}
+
+fn randomized_ping_delay(base: Duration) -> Duration {
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        % (PING_JITTER_SECONDS + 1);
+    base + Duration::from_secs(jitter)
 }
 
 async fn handle_transport_frame(
@@ -1128,5 +1142,12 @@ mod tests {
     fn bad_auth_cookie_file_matches_go_shape() {
         assert_eq!(bad_auth_cookie_file(Some("alice")), "cookies/alice.json");
         assert_eq!(bad_auth_cookie_file(None), "cookies/<username>.json");
+    }
+
+    #[test]
+    fn randomized_ping_delay_stays_in_expected_range() {
+        let base = Duration::from_secs(25);
+        let delay = randomized_ping_delay(base);
+        assert!((Duration::from_secs(25)..=Duration::from_secs(30)).contains(&delay));
     }
 }

@@ -65,6 +65,10 @@ fn twitch_contract_fixtures_cover_build_id_context_stream_info_inventory_campaig
         serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.stream_live.offline.json")).unwrap())
             .unwrap();
     assert!(!parse_live_status(&live_offline_payload));
+    let live_online_payload =
+        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.stream_live.online.json")).unwrap())
+            .unwrap();
+    assert!(parse_live_status(&live_online_payload));
 
     let followers_payload =
         serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.followers.json")).unwrap())

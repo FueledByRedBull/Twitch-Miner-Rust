@@ -529,6 +529,50 @@ mod tests {
     }
 
     #[test]
+    fn decide_applies_stealth_mode_below_top_points() {
+        let mut event = PredictionEvent {
+            streamer: Streamer::default(),
+            event_id: String::new(),
+            title: String::new(),
+            status: String::from("ACTIVE"),
+            created_at: datetime!(2026-03-27 06:00 UTC),
+            window_seconds: 10.0,
+            outcomes: vec![
+                PredictionOutcome {
+                    id: String::from("a"),
+                    total_users: 10,
+                    total_points: 100,
+                    top_points: 150,
+                    odds: 2.0,
+                    odds_percentage: 50.0,
+                    ..PredictionOutcome::default()
+                },
+                PredictionOutcome {
+                    id: String::from("b"),
+                    total_users: 20,
+                    total_points: 50,
+                    top_points: 80,
+                    odds: 4.0,
+                    odds_percentage: 25.0,
+                    ..PredictionOutcome::default()
+                },
+            ],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        event.streamer.settings.bet.strategy = Strategy::HighOdds;
+        event.streamer.settings.bet.percentage = Some(5);
+        event.streamer.settings.bet.stealth_mode = Some(true);
+
+        let decision = event.decide(2_000);
+        assert_eq!(decision.outcome_id, "b");
+        assert_eq!(decision.amount, 79);
+    }
+
+    #[test]
     fn parse_result_matches_go_shape() {
         let mut event = PredictionEvent {
             streamer: Streamer::default(),

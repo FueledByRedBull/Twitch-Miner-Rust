@@ -1,5 +1,5 @@
 param(
-    [string]$Image = "ghcr.io/0x8fv/twitch-miner-rust",
+    [string]$Image = "ghcr.io/fueledbyredbull/twitch-miner-rust",
     [string]$Tag = "latest",
     [switch]$Push
 )

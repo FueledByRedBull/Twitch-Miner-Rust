@@ -127,7 +127,7 @@ pub async fn download_asset_bytes(
     url: &str,
 ) -> Result<Vec<u8>, UpdateHttpError> {
     let request = download_asset_request(url);
-    let response = client
+    let mut response = client
         .get(&request.url)
         .header("User-Agent", UPDATER_USER_AGENT)
         .send()
@@ -135,7 +135,38 @@ pub async fn download_asset_bytes(
     if !response.status().is_success() {
         return Err(UpdateHttpError::UnexpectedDownloadStatus(response.status()));
     }
-    Ok(response.bytes().await?.to_vec())
+
+    let total_bytes = response.content_length();
+    tracing::info!(url = %url, total_bytes, "downloading update asset");
+
+    let mut bytes = Vec::with_capacity(
+        total_bytes
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or_default(),
+    );
+    let mut downloaded = 0_u64;
+    let progress_step = total_bytes.map_or(1024 * 1024, |length| (length / 4).max(64 * 1024));
+    let mut next_progress_log = progress_step;
+
+    while let Some(chunk) = response.chunk().await? {
+        downloaded = downloaded.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        bytes.extend_from_slice(&chunk);
+        if downloaded >= next_progress_log {
+            tracing::info!(
+                downloaded_bytes = downloaded,
+                total_bytes,
+                "update download progress"
+            );
+            next_progress_log = next_progress_log.saturating_add(progress_step);
+        }
+    }
+
+    tracing::info!(
+        downloaded_bytes = downloaded,
+        total_bytes,
+        "update asset download complete"
+    );
+    Ok(bytes)
 }
 
 pub async fn run_auto_update(

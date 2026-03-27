@@ -1,0 +1,4 @@
+{
+  "line": ":nick!user PRIVMSG #chan :hello @target there",
+  "disable_at_in_nickname": false
+}

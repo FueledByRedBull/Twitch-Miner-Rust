@@ -541,4 +541,52 @@ mod tests {
         );
         assert_eq!(selected, vec![2, 3]);
     }
+
+    #[test]
+    fn watch_picker_avoids_duplicate_games_when_alternatives_exist() {
+        let online_at = datetime!(2026-03-27 05:58 UTC);
+        let streamers = vec![
+            Streamer {
+                username: String::from("alpha"),
+                is_online: true,
+                online_at: Some(online_at),
+                stream: Some(Stream {
+                    game: Some(crate::types::Game::from_name("valorant")),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: String::from("bravo"),
+                is_online: true,
+                online_at: Some(online_at),
+                stream: Some(Stream {
+                    game: Some(crate::types::Game::from_name("valorant")),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: String::from("charlie"),
+                is_online: true,
+                online_at: Some(online_at),
+                stream: Some(Stream {
+                    game: Some(crate::types::Game::from_name("just chatting")),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            },
+        ];
+
+        let selected = pick_streamers_to_watch(
+            &streamers,
+            &[WatchPriority::Order],
+            &[],
+            &[],
+            None,
+            datetime!(2026-03-27 06:00 UTC),
+        );
+
+        assert_eq!(selected, vec![0, 2]);
+    }
 }
