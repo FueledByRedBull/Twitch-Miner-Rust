@@ -13,7 +13,28 @@ on:
       - "v*"
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=amd64-validate
+          cache-to: type=gha,mode=max,scope=amd64-validate
+          provenance: false
+          sbom: false
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read

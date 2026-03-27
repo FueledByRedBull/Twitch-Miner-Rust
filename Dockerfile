@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     CARGO_TARGET_DIR=/tmp/cargo-install-target cargo install cargo-chef --locked
 
 FROM chef AS planner
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates/tm-app/Cargo.toml crates/tm-app/Cargo.toml
 COPY crates/tm-app/src crates/tm-app/src
 COPY crates/tm-auth/Cargo.toml crates/tm-auth/Cargo.toml
@@ -36,19 +36,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
     cargo chef cook --release --recipe-path recipe.json
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    cargo build --locked --release -p tm-app
+    cargo build --locked --release -p tm-app \
+    && install -D /workspace/target/release/tm-app /workspace/bin/twitch-miner
 
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=build /workspace/target/release/tm-app /usr/local/bin/twitch-miner
+COPY --from=build /workspace/bin/twitch-miner /usr/local/bin/twitch-miner
 ENV TCPM_DATA_DIR=/data
 ENV TCPM_CONFIG=/data/config.json
 STOPSIGNAL SIGTERM
