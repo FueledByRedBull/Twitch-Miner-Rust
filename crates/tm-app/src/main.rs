@@ -35,6 +35,9 @@ const DEFAULT_USER_AGENT: &str =
 const READ_ONLY_FILE_SYSTEM_ERROR: i32 = 30;
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
 const SPADE_URL_TTL: Duration = Duration::from_secs(15 * 60);
+const MINUTE_WATCHER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const MINUTE_WATCHER_RESUME_GAP: Duration = Duration::from_secs(10 * 60);
+const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SESSION_SUMMARY_INDENT: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,10 +148,14 @@ impl AppObservability {
     }
 
     fn online_message(&self, streamer: &Streamer) -> String {
-        self.decorate(
-            "🥳",
-            format!("{} is Online!", self.streamer_label(streamer)),
-        )
+        let mut message = format!("{} is Online!", self.streamer_label(streamer));
+        if self.show_game {
+            if let Some(game_name) = streamer_game_name(streamer) {
+                message.push_str(" | Playing: ");
+                message.push_str(&game_name);
+            }
+        }
+        self.decorate("🥳", message)
     }
 
     fn offline_message(&self, streamer: &Streamer) -> String {
@@ -204,6 +211,64 @@ impl AppObservability {
         self.decorate("💬", format!("{action} IRC Chat: {streamer_name}"))
     }
 
+    fn bonus_claim_message(&self, streamer: &Streamer, startup: bool) -> String {
+        let prefix = if startup {
+            "Claimed startup bonus"
+        } else {
+            "Claimed bonus"
+        };
+        self.decorate(
+            "🎁",
+            format!("{prefix} → {}", self.streamer_label(streamer)),
+        )
+    }
+
+    fn drop_claim_message(&self, mode: &str, drop: &InventoryDrop) -> String {
+        self.decorate(
+            "🎁",
+            format!(
+                "Claimed drop → {} | Campaign: {} | Progress: {} ({}%) | Mode: {}",
+                drop.reward_name,
+                drop.campaign_name,
+                format_drop_progress(drop.current_minutes_watched, drop.required_minutes_watched),
+                progress_percent(drop.current_minutes_watched, drop.required_minutes_watched),
+                mode.to_uppercase()
+            ),
+        )
+    }
+
+    fn minute_watcher_resume_message(&self, gap: Duration, active_streamers: usize) -> String {
+        self.decorate(
+            "⏸",
+            format!(
+                "Minute watcher resumed after {} without activity; system sleep or OS suspension is likely ({} active streamer(s))",
+                format_resume_gap(gap),
+                active_streamers
+            ),
+        )
+    }
+
+    fn start_session_message(&self, session_id: &str) -> String {
+        self.decorate("🟢", format!("Start session: '{session_id}'"))
+    }
+
+    fn loading_streamers_message(&self, count: usize) -> String {
+        self.decorate(
+            "⏳",
+            format!("Loading data for {count} streamer(s). Please wait..."),
+        )
+    }
+
+    fn loaded_streamers_message(&self, count: usize, elapsed: Duration) -> String {
+        self.decorate(
+            "✅",
+            format!(
+                "{count} Streamer loaded! ({:.1} seconds)",
+                elapsed.as_secs_f64()
+            ),
+        )
+    }
+
     async fn send_event(&self, event: DiscordEvent, message: &str) {
         send_discord_event(self.discord.as_ref(), &self.discord_client, event, message).await;
     }
@@ -236,6 +301,29 @@ fn signed_points(amount: i64) -> String {
     format!("{sign}{} →", format_channel_points(amount.abs()))
 }
 
+fn format_resume_gap(gap: Duration) -> String {
+    let seconds = gap.as_secs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let secs = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m {secs}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn minute_watcher_resume_gap(
+    previous: tm_runtime::RuntimeTime,
+    current: tm_runtime::RuntimeTime,
+) -> Option<Duration> {
+    let elapsed = (current - previous).whole_seconds().max(0).cast_unsigned();
+    let elapsed = Duration::from_secs(elapsed);
+    (elapsed >= MINUTE_WATCHER_RESUME_GAP).then_some(elapsed)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -261,8 +349,14 @@ async fn main() -> Result<()> {
     }
 
     let observability = build_observability(&config)?;
+    tracing::info!(
+        "Twitch Channel Points Miner | v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+    tracing::info!("https://github.com/FueledByRedBull/Twitch-Miner-Rust");
 
     let session_id = new_session_id();
+    tracing::info!("{}", observability.start_session_message(&session_id));
     let started_at = time_now();
     let http_client = build_http_client(config.disable_ssl_cert_verification)?;
     let session = load_or_login_session(&config, &paths.work_dir, http_client.clone()).await?;
@@ -278,6 +372,7 @@ async fn main() -> Result<()> {
         DEFAULT_USER_AGENT,
         twitch_cookie_header,
     ));
+    let bootstrap_started = StdInstant::now();
     let state = bootstrap_runtime_state(
         &config,
         &twitch,
@@ -287,6 +382,10 @@ async fn main() -> Result<()> {
     )
     .await?;
     claim_startup_drops_if_enabled(&config, &state.streamers, &twitch, &observability).await?;
+    tracing::info!(
+        "{}",
+        observability.loaded_streamers_message(state.streamers.len(), bootstrap_started.elapsed())
+    );
     let runtime = tm_runtime::spawn_runtime_state(state);
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -305,8 +404,9 @@ async fn main() -> Result<()> {
     log_startup(&paths, &config_path, &summary, &session_id, &observability).await;
 
     wait_for_shutdown_signal().await?;
-    shutdown_background_tasks(stop_tx, tasks).await;
     tracing::info!(session_id = %session_id, "shutdown requested");
+    shutdown_background_tasks(stop_tx, tasks).await;
+    tracing::info!(session_id = %session_id, "background tasks stopped");
     let summary = runtime
         .shutdown(config.privacy.anonymize_logs, time_now())
         .await?;
@@ -484,7 +584,7 @@ async fn log_startup(
     session_id: &str,
     observability: &AppObservability,
 ) {
-    tracing::info!(
+    tracing::debug!(
         session_id = %session_id,
         work_dir = %paths.work_dir.display(),
         config_path = %config_path.display(),
@@ -517,19 +617,39 @@ async fn shutdown_background_tasks(
 ) {
     let _ = stop_tx.send(true);
     if let Some(task) = tasks.pubsub {
-        let _ = task.await;
+        await_shutdown_task("pubsub", task).await;
     }
     if let Some(task) = tasks.context {
-        let _ = task.await;
+        await_shutdown_task("context", task).await;
     }
     if let Some(task) = tasks.minute {
-        let _ = task.await;
+        await_shutdown_task("minute", task).await;
     }
     if let Some(task) = tasks.drop {
-        let _ = task.await;
+        await_shutdown_task("drop", task).await;
     }
     if let Some(task) = tasks.chat {
-        let _ = task.await;
+        await_shutdown_task("chat", task).await;
+    }
+}
+
+async fn await_shutdown_task(name: &str, mut task: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(SHUTDOWN_TASK_GRACE_PERIOD, &mut task).await {
+        Ok(Ok(())) => {
+            tracing::info!(task = name, "shutdown task stopped");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(task = name, %error, "shutdown task failed while stopping");
+        }
+        Err(_) => {
+            tracing::warn!(
+                task = name,
+                timeout_seconds = SHUTDOWN_TASK_GRACE_PERIOD.as_secs(),
+                "shutdown task exceeded grace period; aborting"
+            );
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
@@ -568,7 +688,7 @@ async fn load_or_login_session_with_auth_client(
                     Ok(user_id) => {
                         session.set_user_id(user_id);
                         session.save_to_dir(base_dir)?;
-                        tracing::info!(username = %username, "loaded cookies from disk");
+                        tracing::debug!(username = %username, "loaded cookies from disk");
                         return Ok(session);
                     }
                     Err(error) => {
@@ -638,8 +758,8 @@ async fn bootstrap_runtime_state(
     let targets = load_targets(config, twitch).await?;
     let mut state = tm_runtime::RuntimeState::from_targets(config, &targets, started_at);
     tracing::info!(
-        streamers = state.streamers.len(),
-        "loading streamer context"
+        "{}",
+        observability.loading_streamers_message(state.streamers.len())
     );
 
     for streamer in &mut state.streamers {
@@ -690,11 +810,8 @@ async fn bootstrap_streamer(
             .await
             .with_context(|| format!("claim startup bonus for {}", streamer.username))?;
         if observability.show_claimed_bonus {
-            let message = format!(
-                "Claimed startup bonus for {}",
-                observability.streamer_label(streamer)
-            );
-            tracing::info!(claim_id = %claim_id, "{message}");
+            let message = observability.bonus_claim_message(streamer, true);
+            tracing::info!("{message}");
             observability
                 .send_event(DiscordEvent::BonusClaim, &message)
                 .await;
@@ -727,9 +844,11 @@ async fn bootstrap_streamer(
             tm_twitch::DROP_ID,
             started_at,
         );
+        tracing::info!("{}", observability.online_message(streamer));
     } else {
         streamer.online_at = None;
         streamer.offline_at = Some(started_at);
+        tracing::info!("{}", observability.offline_message(streamer));
     }
 
     Ok(())
@@ -850,27 +969,10 @@ async fn claim_available_drops(
             .claim_drop(&drop.drop_instance_id)
             .await
             .with_context(|| format!("claim drop {}", drop.drop_instance_id))?;
-        tracing::info!(
-            mode,
-            reward = %drop.reward_name,
-            campaign = %drop.campaign_name,
-            progress = %format_drop_progress(drop.current_minutes_watched, drop.required_minutes_watched),
-            percent = progress_percent(drop.current_minutes_watched, drop.required_minutes_watched),
-            "claimed drop"
-        );
+        let message = observability.drop_claim_message(mode, &drop);
+        tracing::info!("{message}");
         observability
-            .send_event(
-                DiscordEvent::DropClaim,
-                &format!(
-                    "Claimed drop {} ({}) {}",
-                    drop.reward_name,
-                    drop.campaign_name,
-                    format_drop_progress(
-                        drop.current_minutes_watched,
-                        drop.required_minutes_watched
-                    )
-                ),
-            )
+            .send_event(DiscordEvent::DropClaim, &message)
             .await;
     }
     Ok(())
@@ -1178,10 +1280,7 @@ async fn handle_claim_bonus_effect(
         return Ok(());
     };
     if observability.show_claimed_bonus {
-        let message = format!(
-            "Claimed bonus for {}",
-            observability.streamer_label(&streamer)
-        );
+        let message = observability.bonus_claim_message(&streamer, false);
         tracing::info!("{message}");
         observability
             .send_event(DiscordEvent::BonusClaim, &message)
@@ -1721,11 +1820,8 @@ async fn refresh_streamer_context(
             .await
             .with_context(|| format!("claim refreshed bonus for {}", streamer.username))?;
         if observability.show_claimed_bonus {
-            let message = format!(
-                "Claimed bonus for {}",
-                observability.streamer_label(streamer)
-            );
-            tracing::info!(claim_id = %claim_id, "{message}");
+            let message = observability.bonus_claim_message(streamer, false);
+            tracing::info!("{message}");
             observability
                 .send_event(DiscordEvent::BonusClaim, &message)
                 .await;
@@ -1755,12 +1851,15 @@ fn spawn_minute_watcher_loop(
     tokio::spawn(async move {
         let spade_urls = tokio::sync::Mutex::new(HashMap::<String, SpadeCacheEntry>::new());
         let mut stop = stop;
+        let mut last_loop_at = time_now();
         'outer: loop {
             if *stop.borrow() {
                 break;
             }
 
             let now = time_now();
+            let loop_gap = minute_watcher_resume_gap(last_loop_at, now);
+            last_loop_at = now;
             let snapshot = match runtime.state_snapshot().await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -1774,6 +1873,12 @@ fn spawn_minute_watcher_loop(
                     break;
                 }
                 continue;
+            }
+            if let Some(loop_gap) = loop_gap {
+                spade_urls.lock().await.clear();
+                let message =
+                    observability.minute_watcher_resume_message(loop_gap, watch_logins.len());
+                tracing::warn!("{message}");
             }
 
             let interval = tm_domain::watch_interval(watch_logins.len());
@@ -1801,17 +1906,30 @@ fn spawn_minute_watcher_loop(
                     continue;
                 }
 
-                if let Err(error) = send_minute_watched_for_streamer(
-                    &runtime,
-                    &twitch,
-                    &spade_urls,
-                    &streamer,
-                    &user_id,
-                    &observability,
+                match tokio::time::timeout(
+                    MINUTE_WATCHER_REQUEST_TIMEOUT,
+                    send_minute_watched_for_streamer(
+                        &runtime,
+                        &twitch,
+                        &spade_urls,
+                        &streamer,
+                        &user_id,
+                        &observability,
+                    ),
                 )
                 .await
                 {
-                    tracing::warn!(streamer = %streamer.username, %error, "minute watched failed");
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(streamer = %streamer.username, %error, "minute watched failed");
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            streamer = %streamer.username,
+                            timeout_seconds = MINUTE_WATCHER_REQUEST_TIMEOUT.as_secs(),
+                            "minute watched timed out"
+                        );
+                    }
                 }
 
                 if sleep_or_stop(&mut stop, interval).await {
@@ -2757,7 +2875,7 @@ mod tests {
 
         assert_eq!(
             observability.online_message(&streamer),
-            "🥳 alice (1.25k points) is Online!"
+            "🥳 alice (1.25k points) is Online! | Playing: VALORANT"
         );
     }
 
@@ -2813,6 +2931,92 @@ mod tests {
             observability.points_earned_message(&streamer, 10, "watch"),
             "🚀 +10 → alice (1.25k points) - Reason: WATCH | Game: VALORANT"
         );
+    }
+
+    #[test]
+    fn observability_claim_messages_are_styled() {
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            false,
+            true,
+            true,
+            true,
+        );
+        let streamer = Streamer {
+            username: String::from("alice"),
+            channel_points: 1_250,
+            ..Streamer::default()
+        };
+
+        assert_eq!(
+            observability.bonus_claim_message(&streamer, false),
+            "🎁 Claimed bonus → alice (1.25k points)"
+        );
+        assert_eq!(
+            observability.bonus_claim_message(&streamer, true),
+            "🎁 Claimed startup bonus → alice (1.25k points)"
+        );
+    }
+
+    #[test]
+    fn observability_startup_messages_are_styled() {
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            false,
+            true,
+            true,
+            true,
+        );
+
+        assert_eq!(
+            observability.start_session_message("session-123"),
+            "🟢 Start session: 'session-123'"
+        );
+        assert_eq!(
+            observability.loading_streamers_message(16),
+            "⏳ Loading data for 16 streamer(s). Please wait..."
+        );
+        assert_eq!(
+            observability.loaded_streamers_message(16, Duration::from_millis(20_500)),
+            "✅ 16 Streamer loaded! (20.5 seconds)"
+        );
+    }
+
+    #[test]
+    fn observability_drop_claim_message_is_styled() {
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            false,
+            true,
+            true,
+            true,
+        );
+        let drop = InventoryDrop {
+            drop_instance_id: String::from("drop-1"),
+            reward_name: String::from("60 min."),
+            campaign_name: String::from("Crimson Desert Drops #2"),
+            current_minutes_watched: 61,
+            required_minutes_watched: 60,
+            is_claimed: false,
+        };
+
+        assert_eq!(
+            observability.drop_claim_message("periodic", &drop),
+            "🎁 Claimed drop → 60 min. | Campaign: Crimson Desert Drops #2 | Progress: 61/60 (101%) | Mode: PERIODIC"
+        );
+    }
+
+    #[test]
+    fn minute_watcher_resume_gap_uses_threshold() {
+        assert_eq!(minute_watcher_resume_gap(ts(0), ts(599)), None);
+        assert_eq!(
+            minute_watcher_resume_gap(ts(0), ts(600)),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(format_resume_gap(Duration::from_secs(6_123)), "1h 42m 3s");
     }
 
     #[test]
@@ -3103,7 +3307,7 @@ mod tests {
                 let sent_urls = Arc::clone(&sent_urls);
                 move |spade_url| {
                     let sent_urls = Arc::clone(&sent_urls);
-                    let spade_url = spade_url.to_string();
+                    let spade_url = spade_url.clone();
                     async move {
                         sent_urls.lock().unwrap().push(spade_url);
                         if sent_urls.lock().unwrap().len() == 1 {
