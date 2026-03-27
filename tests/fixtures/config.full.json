@@ -1,0 +1,66 @@
+{
+  "username": "tester",
+  "password": "secret",
+  "auto_update": true,
+  "debug": false,
+  "debug_deep": false,
+  "watch_queue_logging": true,
+  "smart_logging": true,
+  "disable_ssl_cert_verification": false,
+  "show_seconds": false,
+  "claim_drops_startup": true,
+  "claim_drops": true,
+  "betting(make_predictions)": true,
+  "follow_raid": true,
+  "community_goals": true,
+  "emojis": true,
+  "save_logs": true,
+  "show_username_in_console": false,
+  "show_claimed_bonus_msg": true,
+  "show_game": true,
+  "chat_presence": "ONLINE",
+  "disable_at_in_nickname": false,
+  "streamers": ["alice", "bob"],
+  "streamers_exclude": ["eve"],
+  "game_priority": ["valorant"],
+  "game_exclude": ["banned game"],
+  "watch_priority": ["STREAK", "DROPS", "ORDER"],
+  "bet": {
+    "strategy": "SMART",
+    "percentage": 5,
+    "percentage_gap": 20,
+    "max_points": 50000,
+    "stealth_mode": false,
+    "deduct_stake_on_place": true,
+    "delay_mode": "FROM_END",
+    "delay": 6.0,
+    "minimum_points": 0,
+    "filter_condition": {
+      "by": "TOTAL_USERS",
+      "where": "GTE",
+      "value": 100.0
+    }
+  },
+  "timezone": "UTC",
+  "privacy": {
+    "anonymize_logs": false
+  },
+  "discord": {
+    "webhook_api": "",
+    "events": ["STREAMER_ONLINE"]
+  },
+  "streamer_overrides": {
+    "alice": {
+      "make_predictions": false,
+      "follow_raid": false,
+      "claim_drops": true,
+      "claim_moments": true,
+      "watch_streak": true,
+      "community_goals": true,
+      "chat_presence": "OFFLINE",
+      "bet": {
+        "strategy": "HIGH_ODDS"
+      }
+    }
+  }
+}

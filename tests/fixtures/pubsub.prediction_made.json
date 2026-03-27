@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "predictions-user-v1.user",
+    "message": "{\"type\":\"prediction-made\",\"data\":{\"prediction\":{\"event_id\":\"event-1\"}}}"
+  }
+}

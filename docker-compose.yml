@@ -1,0 +1,13 @@
+services:
+  twitch-miner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      TCPM_CONFIG: /data/config.json
+      TCPM_DATA_DIR: /data
+    volumes:
+      - ./data:/data

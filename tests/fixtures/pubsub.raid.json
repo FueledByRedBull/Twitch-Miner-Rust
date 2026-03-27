@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "raid.123",
+    "message": "{\"raid\":{\"id\":\"raid-1\",\"target_login\":\"target\"}}"
+  }
+}

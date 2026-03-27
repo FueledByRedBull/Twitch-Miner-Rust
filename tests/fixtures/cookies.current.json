@@ -1,0 +1,13 @@
+{
+  "auth-token": {
+    "value": "token-123"
+  },
+  "persistent": {
+    "value": "user-123"
+  },
+  "session": {
+    "value": "abc",
+    "path": "/",
+    "domain": ".twitch.tv"
+  }
+}

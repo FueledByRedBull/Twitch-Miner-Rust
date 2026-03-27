@@ -1,0 +1,14 @@
+services:
+  twitch-miner:
+    image: ghcr.io/0x8fv/twitch-miner-rust:latest
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      TCPM_CONFIG: /data/config.json
+      TCPM_DATA_DIR: /data
+    volumes:
+      - twitch-miner-data:/data
+
+volumes:
+  twitch-miner-data:

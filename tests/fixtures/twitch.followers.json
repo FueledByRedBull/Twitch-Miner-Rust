@@ -1,0 +1,25 @@
+{
+  "data": {
+    "user": {
+      "follows": {
+        "edges": [
+          {
+            "cursor": "cursor-1",
+            "node": {
+              "login": "Alice"
+            }
+          },
+          {
+            "cursor": "cursor-2",
+            "node": {
+              "login": "Bob"
+            }
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": true
+        }
+      }
+    }
+  }
+}

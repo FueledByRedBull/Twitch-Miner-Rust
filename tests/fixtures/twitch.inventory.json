@@ -1,0 +1,24 @@
+{
+  "data": {
+    "currentUser": {
+      "inventory": {
+        "dropCampaignsInProgress": [
+          {
+            "name": "Campaign",
+            "timeBasedDrops": [
+              {
+                "name": "Reward",
+                "requiredMinutesWatched": 60,
+                "self": {
+                  "dropInstanceID": "drop-1",
+                  "currentMinutesWatched": 30,
+                  "isClaimed": false
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

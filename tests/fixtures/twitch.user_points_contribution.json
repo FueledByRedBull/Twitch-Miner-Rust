@@ -1,0 +1,26 @@
+{
+  "data": {
+    "user": {
+      "channel": {
+        "self": {
+          "communityPoints": {
+            "goalContributions": [
+              {
+                "goal": {
+                  "id": "goal-1"
+                },
+                "userPointsContributedThisStream": 25
+              },
+              {
+                "goal": {
+                  "id": "goal-2"
+                },
+                "userPointsContributedThisStream": 10
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

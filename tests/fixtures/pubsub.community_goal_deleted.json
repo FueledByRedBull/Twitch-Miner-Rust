@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "community-points-channel-v1.123",
+    "message": "{\"type\":\"community-goal-deleted\",\"data\":{\"community_goal\":{\"id\":\"goal-1\"}}}"
+  }
+}

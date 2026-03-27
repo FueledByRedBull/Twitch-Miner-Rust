@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "community-points-channel-v1.123",
+    "message": "{\"type\":\"claim-available\",\"data\":{\"claim\":{\"id\":\"claim-1\"}}}"
+  }
+}

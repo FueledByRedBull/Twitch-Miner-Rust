@@ -1,0 +1,10 @@
+target
+.git
+.github
+**/*.log
+data
+deploy
+scripts
+**/.DS_Store
+run.out.log
+run.err.log

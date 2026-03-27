@@ -1,0 +1,16 @@
+[
+  {
+    "name": "auth-token",
+    "value": "token-123"
+  },
+  {
+    "name": "persistent",
+    "value": "user-123"
+  },
+  {
+    "name": "session",
+    "value": "abc",
+    "path": "/",
+    "domain": ".twitch.tv"
+  }
+]

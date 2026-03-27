@@ -1,0 +1,37 @@
+{
+  "data": {
+    "community": {
+      "channel": {
+        "self": {
+          "communityPoints": {
+            "balance": 1234,
+            "availableClaim": {
+              "id": "claim-1"
+            },
+            "activeMultipliers": [
+              {
+                "factor": 1.5
+              },
+              {
+                "factor": 2.0
+              }
+            ]
+          }
+        },
+        "communityPointsSettings": {
+          "goals": [
+            {
+              "id": "goal-1",
+              "title": "Goal",
+              "isInStock": true,
+              "pointsContributed": 5,
+              "amountNeeded": 10,
+              "perStreamUserMaximumContribution": 5,
+              "status": "ACTIVE"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

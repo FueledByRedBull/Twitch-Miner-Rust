@@ -1,0 +1,14 @@
+{
+  "data": {
+    "channel": {
+      "viewerDropCampaigns": [
+        {
+          "id": "campaign-1"
+        },
+        {
+          "id": "campaign-2"
+        }
+      ]
+    }
+  }
+}

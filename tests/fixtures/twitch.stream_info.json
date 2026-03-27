@@ -1,0 +1,25 @@
+{
+  "data": {
+    "user": {
+      "broadcastSettings": {
+        "title": "Test title",
+        "game": {
+          "id": "game-1",
+          "displayName": "Game Name"
+        }
+      },
+      "stream": {
+        "id": "stream-1",
+        "viewersCount": 42,
+        "tags": [
+          {
+            "id": "tag-1"
+          },
+          {
+            "id": "tag-2"
+          }
+        ]
+      }
+    }
+  }
+}

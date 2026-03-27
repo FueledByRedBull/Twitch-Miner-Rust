@@ -1,0 +1,17 @@
+[package]
+name = "tm-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tm-domain = { path = "../tm-domain" }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

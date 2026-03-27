@@ -1,0 +1,8 @@
+{
+  "username": "tester",
+  "streamers": ["alice", "bob"],
+  "bet": {
+    "percentage": 10
+  },
+  "privacy": {}
+}

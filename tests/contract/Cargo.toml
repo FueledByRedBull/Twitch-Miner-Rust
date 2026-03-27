@@ -1,0 +1,12 @@
+[package]
+name = "tm-contract-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1.0.145"
+tm-domain = { path = "../../crates/tm-domain" }
+tm-pubsub = { path = "../../crates/tm-pubsub" }
+tm-twitch = { path = "../../crates/tm-twitch" }
+
+[workspace]

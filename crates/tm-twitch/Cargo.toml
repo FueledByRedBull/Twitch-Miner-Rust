@@ -1,0 +1,16 @@
+[package]
+name = "tm-twitch"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+regex = "1.12.2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tm-domain = { path = "../tm-domain" }
+
+[lints]
+workspace = true

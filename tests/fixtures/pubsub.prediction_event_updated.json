@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "predictions-channel-v1.123",
+    "message": "{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"RESOLVED\",\"title\":\"Will it happen?\",\"created_at\":\"2024-03-27T12:00:00Z\",\"prediction_window_seconds\":30,\"winning_outcome_id\":\"a\",\"outcomes\":[{\"id\":\"a\",\"title\":\"Yes\",\"color\":\"BLUE\",\"users\":10,\"channel_points\":100,\"top_predictors\":[{\"channel_points_used\":20}]},{\"id\":\"b\",\"title\":\"No\",\"color\":\"PINK\",\"users\":5,\"channel_points\":50,\"top_predictors\":[{\"channel_points_used\":10}]}]}}}"
+  }
+}

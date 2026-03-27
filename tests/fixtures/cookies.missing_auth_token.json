@@ -1,0 +1,10 @@
+{
+  "persistent": {
+    "value": "user-123"
+  },
+  "session": {
+    "value": "abc",
+    "path": "/",
+    "domain": ".twitch.tv"
+  }
+}

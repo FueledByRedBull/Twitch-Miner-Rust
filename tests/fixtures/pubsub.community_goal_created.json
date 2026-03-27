@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "community-points-channel-v1.123",
+    "message": "{\"type\":\"community-goal-created\",\"data\":{\"community_goal\":{\"id\":\"goal-1\",\"title\":\"Goal\",\"is_in_stock\":true,\"points_contributed\":100,\"goal_amount\":500,\"per_stream_maximum_user_contribution\":50,\"status\":\"ACTIVE\"}}}"
+  }
+}
