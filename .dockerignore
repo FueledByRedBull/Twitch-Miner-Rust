@@ -5,6 +5,8 @@ target
 **/*.log
 data
 deploy
+docs
+tests
 scripts
 **/.DS_Store
 run.out.log
