@@ -11,10 +11,13 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tm_domain::Streamer;
+use tracing::field::{Field, Visit};
+use tracing::{Event as TraceEvent, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
@@ -377,16 +380,16 @@ pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityErr
         EnvFilter::new("info")
     };
 
+    let event_format = GoStyleEventFormat {
+        show_seconds: options.settings.show_seconds,
+        timezone: options
+            .timezone
+            .as_deref()
+            .and_then(|value| value.parse().ok()),
+    };
     let console_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
-        .with_timer(GoStyleTime {
-            show_seconds: options.settings.show_seconds,
-            timezone: options
-                .timezone
-                .as_deref()
-                .and_then(|value| value.parse().ok()),
-        })
-        .compact()
+        .event_format(event_format)
         .with_filter(filter.clone());
 
     let registry = tracing_subscriber::registry().with(console_layer);
@@ -400,14 +403,7 @@ pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityErr
         let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_target(false)
-            .with_timer(GoStyleTime {
-                show_seconds: options.settings.show_seconds,
-                timezone: options
-                    .timezone
-                    .as_deref()
-                    .and_then(|value| value.parse().ok()),
-            })
-            .compact()
+            .event_format(event_format)
             .with_writer(writer)
             .with_filter(filter);
         registry.with(file_layer).try_init()?;
@@ -431,18 +427,84 @@ pub fn open_log_file(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GoStyleTime {
+struct GoStyleEventFormat {
     show_seconds: bool,
     timezone: Option<Tz>,
 }
 
-impl FormatTime for GoStyleTime {
-    fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
-        write!(
-            w,
-            "{} ",
-            current_log_timestamp(self.show_seconds, self.timezone)
+impl<S, N> FormatEvent<S, N> for GoStyleEventFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &TraceEvent<'_>,
+    ) -> fmt::Result {
+        let mut visitor = MessageOnlyVisitor::default();
+        event.record(&mut visitor);
+        let body = visitor.render();
+        writeln!(
+            writer,
+            "[{}] {}: {}",
+            format_level(*event.metadata().level()),
+            current_log_timestamp(self.show_seconds, self.timezone),
+            body
         )
+    }
+}
+
+#[derive(Default)]
+struct MessageOnlyVisitor {
+    message: Option<String>,
+    fields: Vec<String>,
+}
+
+impl MessageOnlyVisitor {
+    fn record_value(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(trim_matching_quotes(value));
+            return;
+        }
+        self.fields.push(format!("{}={}", field.name(), value));
+    }
+
+    fn render(self) -> String {
+        match (self.message, self.fields.is_empty()) {
+            (Some(message), true) => message,
+            (Some(message), false) => format!("{message} | {}", self.fields.join(" ")),
+            (None, _) => self.fields.join(" "),
+        }
+    }
+}
+
+impl Visit for MessageOnlyVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.record_value(field, &format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_value(field, value);
+    }
+}
+
+fn trim_matching_quotes(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|trimmed| trimmed.strip_suffix('"'))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn format_level(level: Level) -> &'static str {
+    match level {
+        Level::ERROR => "ERROR",
+        Level::WARN => "WARN",
+        Level::INFO => "INFO",
+        Level::DEBUG => "DEBUG",
+        Level::TRACE => "TRACE",
     }
 }
 

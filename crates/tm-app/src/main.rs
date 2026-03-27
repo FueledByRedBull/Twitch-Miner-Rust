@@ -93,15 +93,18 @@ struct AppObservability {
     discord: Option<tm_observability::DiscordWebhook>,
     discord_client: DiscordClient,
     anonymizer: Arc<Mutex<Anonymizer>>,
+    emoji: bool,
     show_claimed_bonus: bool,
     show_game: bool,
 }
 
 impl AppObservability {
+    #[allow(clippy::fn_params_excessive_bools)]
     fn new(
         discord: Option<tm_observability::DiscordWebhook>,
         discord_client: DiscordClient,
         anonymize_logs: bool,
+        emoji: bool,
         show_claimed_bonus: bool,
         show_game: bool,
     ) -> Self {
@@ -109,6 +112,7 @@ impl AppObservability {
             discord,
             discord_client,
             anonymizer: Arc::new(Mutex::new(Anonymizer::new(anonymize_logs))),
+            emoji,
             show_claimed_bonus,
             show_game,
         }
@@ -132,19 +136,26 @@ impl AppObservability {
         )
     }
 
-    fn online_message(&self, streamer: &Streamer) -> String {
-        let mut message = format!("{} is online", self.streamer_label(streamer));
-        if self.show_game {
-            if let Some(game_name) = streamer_game_name(streamer) {
-                message.push_str(" | Playing: ");
-                message.push_str(&game_name);
-            }
+    fn decorate(&self, emoji: &str, message: String) -> String {
+        if self.emoji {
+            format!("{emoji} {message}")
+        } else {
+            message
         }
-        message
+    }
+
+    fn online_message(&self, streamer: &Streamer) -> String {
+        self.decorate(
+            "🥳",
+            format!("{} is Online!", self.streamer_label(streamer)),
+        )
     }
 
     fn offline_message(&self, streamer: &Streamer) -> String {
-        format!("{} is offline", self.streamer_label(streamer))
+        self.decorate(
+            "😴",
+            format!("{} is Offline!", self.streamer_label(streamer)),
+        )
     }
 
     fn game_change_message(
@@ -161,11 +172,36 @@ impl AppObservability {
         if previous.is_empty() || current.is_empty() || previous.eq_ignore_ascii_case(current) {
             return None;
         }
-        Some(format!(
-            "{} now playing: {}!",
-            self.streamer_name(streamer),
-            current
+        Some(self.decorate(
+            "🎮",
+            format!("{} now playing: {}!", self.streamer_name(streamer), current),
         ))
+    }
+
+    fn points_earned_message(&self, streamer: &Streamer, earned: i64, reason: &str) -> String {
+        let reason = reason.trim().to_uppercase();
+        let mut message = format!(
+            "{} {} - Reason: {}",
+            signed_points(earned),
+            self.streamer_label(streamer),
+            reason
+        );
+        if self.show_game && reason == "WATCH" {
+            if let Some(game_name) = streamer_game_name(streamer) {
+                message.push_str(" | Game: ");
+                message.push_str(&game_name);
+            }
+        }
+        self.decorate("🚀", message)
+    }
+
+    fn join_raid_message(&self, from: &str, target_login: &str) -> String {
+        self.decorate("🎭", format!("Joining raid from {from} to {target_login}"))
+    }
+
+    fn chat_presence_message(&self, join: bool, streamer_name: &str) -> String {
+        let action = if join { "Join" } else { "Leave" };
+        self.decorate("💬", format!("{action} IRC Chat: {streamer_name}"))
     }
 
     async fn send_event(&self, event: DiscordEvent, message: &str) {
@@ -193,6 +229,11 @@ fn streamer_game_name(streamer: &Streamer) -> Option<String> {
         })
         .filter(|name| !name.is_empty())
         .map(str::to_string)
+}
+
+fn signed_points(amount: i64) -> String {
+    let sign = if amount >= 0 { "+" } else { "-" };
+    format!("{sign}{} →", format_channel_points(amount.abs()))
 }
 
 #[tokio::main]
@@ -369,6 +410,7 @@ fn build_observability(config: &ConfigFile) -> Result<AppObservability> {
         discord,
         discord_client,
         config.privacy.anonymize_logs,
+        config.emojis,
         config.show_claimed_bonus_msg,
         config.show_game,
     ))
@@ -903,7 +945,11 @@ fn spawn_pubsub_loop(
                                 }
                             }
                             PubSubConnectionEvent::ResponseError { error, nonce } => {
-                                tracing::warn!(error = %error, nonce = ?nonce, "pubsub response error");
+                                let message = nonce.map_or_else(
+                                    || format!("PubSub response error: {error}"),
+                                    |nonce| format!("PubSub response error: {error} (nonce {nonce})"),
+                                );
+                                tracing::warn!("{message}");
                             }
                         }
                     }
@@ -979,16 +1025,21 @@ fn spawn_pubsub_connection_loop(
                 result = &mut connect => {
                     match result {
                         Ok(Ok(())) => {
-                            tracing::warn!(connection = connection_index, topics = topics.len(), "pubsub connection closed; reconnecting");
+                            tracing::warn!(
+                                "PubSub[{connection_index}] connection closed; reconnecting ({} topic(s))",
+                                topics.len()
+                            );
                         }
                         Ok(Err(error)) => {
-                            tracing::warn!(connection = connection_index, topics = topics.len(), %error, "pubsub connection failed; reconnecting");
+                            tracing::error!(
+                                "PubSub[{connection_index}] connection error: {error}"
+                            );
                         }
                         Err(error) if error.is_cancelled() => {
                             return;
                         }
                         Err(error) => {
-                            tracing::warn!(connection = connection_index, topics = topics.len(), %error, "pubsub task failed; reconnecting");
+                            tracing::error!("PubSub[{connection_index}] task failed: {error}");
                         }
                     }
                     false
@@ -1131,7 +1182,7 @@ async fn handle_claim_bonus_effect(
             "Claimed bonus for {}",
             observability.streamer_label(&streamer)
         );
-        tracing::info!(claim_id = %claim_id, "{message}");
+        tracing::info!("{message}");
         observability
             .send_event(DiscordEvent::BonusClaim, &message)
             .await;
@@ -1154,7 +1205,7 @@ async fn handle_claim_moment_effect(
         "Claimed moment for {}",
         observability.streamer_label(&streamer)
     );
-    tracing::info!(moment_id = %moment_id, "{message}");
+    tracing::info!("{message}");
     observability
         .send_event(DiscordEvent::MomentClaim, &message)
         .await;
@@ -1173,12 +1224,9 @@ async fn handle_join_raid_effect(
     let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
         return Ok(());
     };
-    let message = format!(
-        "Joined raid from {} to {}",
-        observability.streamer_name(&streamer),
-        target_login
-    );
-    tracing::info!(raid_id = %raid_id, "{message}");
+    let message =
+        observability.join_raid_message(&observability.streamer_name(&streamer), target_login);
+    tracing::info!("{message}");
     observability
         .send_event(DiscordEvent::JoinRaid, &message)
         .await;
@@ -1522,13 +1570,8 @@ async fn log_pubsub_event(
             else {
                 return Ok(());
             };
-            let message = format!(
-                "{} {} points for {}",
-                if *earned >= 0 { "Gained" } else { "Spent" },
-                earned.abs(),
-                observability.streamer_label(streamer)
-            );
-            tracing::info!(reason = %reason, "{message}");
+            let message = observability.points_earned_message(streamer, *earned, reason);
+            tracing::info!("{message}");
             if let Some(event) = event_from_gain_reason(reason) {
                 observability.send_event(event, &message).await;
             }
@@ -2070,21 +2113,20 @@ async fn sleep_or_stop(
 }
 
 struct TracingChatLogger {
-    channel: String,
     observability: AppObservability,
 }
 
 impl ChatLogger for TracingChatLogger {
     fn printf(&mut self, message: &str) {
-        tracing::info!(channel = %self.channel, "{message}");
+        tracing::info!("{message}");
     }
 
     fn errorf(&mut self, message: &str) {
-        tracing::warn!(channel = %self.channel, "{message}");
+        tracing::error!("{message}");
     }
 
     fn emoji_eventf(&mut self, _emoji: &str, event: ChatEventKind, message: &str) {
-        tracing::info!(channel = %self.channel, event = ?event, "{message}");
+        tracing::info!("{message}");
         if matches!(event, ChatEventKind::Mention) {
             self.observability
                 .spawn_event(DiscordEvent::ChatMention, message.to_string());
@@ -2174,7 +2216,18 @@ async fn reconcile_chat_watchers(
     disable_at_in_nickname: bool,
     observability: &AppObservability,
 ) -> Result<()> {
-    let desired = runtime.state_snapshot().await?.desired_chat_logins();
+    let snapshot = runtime.state_snapshot().await?;
+    let labels = snapshot
+        .streamers
+        .iter()
+        .map(|streamer| {
+            (
+                streamer.username.to_lowercase(),
+                observability.streamer_name(streamer),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let desired = snapshot.desired_chat_logins();
     let desired: std::collections::HashSet<_> = desired.into_iter().collect();
 
     let existing = watchers.keys().cloned().collect::<Vec<_>>();
@@ -2185,7 +2238,13 @@ async fn reconcile_chat_watchers(
         if let Some((watcher_stop, task)) = watchers.remove(&login) {
             let _ = watcher_stop.send(true);
             let _ = task.await;
-            tracing::info!(channel = %login, "leave irc chat");
+            let message = observability.chat_presence_message(
+                false,
+                labels
+                    .get(&login.to_lowercase())
+                    .map_or(login.as_str(), String::as_str),
+            );
+            tracing::info!("{message}");
         }
     }
 
@@ -2203,7 +2262,13 @@ async fn reconcile_chat_watchers(
             observability.clone(),
         );
         watchers.insert(login.clone(), (watcher_stop, task));
-        tracing::info!(channel = %login, "join irc chat");
+        let message = observability.chat_presence_message(
+            true,
+            labels
+                .get(&login.to_lowercase())
+                .map_or(login.as_str(), String::as_str),
+        );
+        tracing::info!("{message}");
     }
 
     Ok(())
@@ -2229,7 +2294,6 @@ fn spawn_chat_watcher_loop(
                 &auth_token,
                 &channel,
                 TracingChatLogger {
-                    channel: channel.clone(),
                     observability: observability.clone(),
                 },
                 disable_at_in_nickname,
@@ -2562,6 +2626,7 @@ mod tests {
             DiscordClient::new(Duration::from_secs(1)).unwrap(),
             false,
             false,
+            false,
             true,
         )
     }
@@ -2675,6 +2740,7 @@ mod tests {
             false,
             true,
             true,
+            true,
         );
         let streamer = Streamer {
             username: String::from("alice"),
@@ -2691,7 +2757,7 @@ mod tests {
 
         assert_eq!(
             observability.online_message(&streamer),
-            "alice (1.25k points) is online | Playing: VALORANT"
+            "🥳 alice (1.25k points) is Online!"
         );
     }
 
@@ -2703,6 +2769,7 @@ mod tests {
             false,
             true,
             true,
+            true,
         );
         let streamer = Streamer {
             username: String::from("alice"),
@@ -2711,11 +2778,40 @@ mod tests {
 
         assert_eq!(
             observability.game_change_message(&streamer, "Just Chatting", "VALORANT"),
-            Some(String::from("alice now playing: VALORANT!"))
+            Some(String::from("🎮 alice now playing: VALORANT!"))
         );
         assert_eq!(
             observability.game_change_message(&streamer, "VALORANT", "valorant"),
             None
+        );
+    }
+
+    #[test]
+    fn observability_points_message_matches_sample_shape() {
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            false,
+            true,
+            false,
+            true,
+        );
+        let streamer = Streamer {
+            username: String::from("alice"),
+            channel_points: 1_250,
+            stream: Some(tm_domain::Stream {
+                game: Some(Game {
+                    display_name: Some(String::from("VALORANT")),
+                    name: Some(String::from("valorant")),
+                }),
+                ..tm_domain::Stream::default()
+            }),
+            ..Streamer::default()
+        };
+
+        assert_eq!(
+            observability.points_earned_message(&streamer, 10, "watch"),
+            "🚀 +10 → alice (1.25k points) - Reason: WATCH | Game: VALORANT"
         );
     }
 
