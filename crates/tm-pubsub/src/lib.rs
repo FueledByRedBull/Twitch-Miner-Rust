@@ -138,63 +138,25 @@ impl PubSubClient {
                     };
                     match message? {
                         Message::Text(text) => {
-                            match parse_transport_message(text.as_ref(), tracked_streamers)? {
-                                IncomingTransportMessage::Pong => {
-                                    last_pong = Instant::now();
-                                }
-                                IncomingTransportMessage::Reconnect => {
-                                    return Err(PubSubError::ReconnectRequested);
-                                }
-                                IncomingTransportMessage::ResponseError { error, nonce, is_bad_auth } => {
-                                    if is_bad_auth {
-                                        return Err(PubSubError::BadAuth {
-                                            cookie_file: bad_auth_cookie_file(username),
-                                            error,
-                                        });
-                                    }
-                                    sender
-                                        .send(PubSubConnectionEvent::ResponseError { error, nonce })
-                                        .await
-                                        .map_err(|_| PubSubError::EventChannelClosed)?;
-                                }
-                                IncomingTransportMessage::Event(event) => {
-                                    sender
-                                        .send(PubSubConnectionEvent::Event(event))
-                                        .await
-                                        .map_err(|_| PubSubError::EventChannelClosed)?;
-                                }
-                                IncomingTransportMessage::Ignore => {}
-                            }
+                            handle_transport_frame(
+                                text.as_ref(),
+                                tracked_streamers,
+                                username,
+                                &sender,
+                                &mut last_pong,
+                            )
+                            .await?;
                         }
                         Message::Binary(bytes) => {
                             let text = String::from_utf8(bytes.to_vec())?;
-                            match parse_transport_message(&text, tracked_streamers)? {
-                                IncomingTransportMessage::Pong => {
-                                    last_pong = Instant::now();
-                                }
-                                IncomingTransportMessage::Reconnect => {
-                                    return Err(PubSubError::ReconnectRequested);
-                                }
-                                IncomingTransportMessage::ResponseError { error, nonce, is_bad_auth } => {
-                                    if is_bad_auth {
-                                        return Err(PubSubError::BadAuth {
-                                            cookie_file: bad_auth_cookie_file(username),
-                                            error,
-                                        });
-                                    }
-                                    sender
-                                        .send(PubSubConnectionEvent::ResponseError { error, nonce })
-                                        .await
-                                        .map_err(|_| PubSubError::EventChannelClosed)?;
-                                }
-                                IncomingTransportMessage::Event(event) => {
-                                    sender
-                                        .send(PubSubConnectionEvent::Event(event))
-                                        .await
-                                        .map_err(|_| PubSubError::EventChannelClosed)?;
-                                }
-                                IncomingTransportMessage::Ignore => {}
-                            }
+                            handle_transport_frame(
+                                &text,
+                                tracked_streamers,
+                                username,
+                                &sender,
+                                &mut last_pong,
+                            )
+                            .await?;
                         }
                         Message::Ping(payload) => {
                             socket.send(Message::Pong(payload)).await?;
@@ -209,6 +171,47 @@ impl PubSubClient {
             }
         }
     }
+}
+
+async fn handle_transport_frame(
+    raw: &str,
+    tracked_streamers: &[Streamer],
+    username: Option<&str>,
+    sender: &mpsc::Sender<PubSubConnectionEvent>,
+    last_pong: &mut Instant,
+) -> Result<(), PubSubError> {
+    match parse_transport_message(raw, tracked_streamers)? {
+        IncomingTransportMessage::Pong => {
+            *last_pong = Instant::now();
+        }
+        IncomingTransportMessage::Reconnect => {
+            return Err(PubSubError::ReconnectRequested);
+        }
+        IncomingTransportMessage::ResponseError {
+            error,
+            nonce,
+            is_bad_auth,
+        } => {
+            if is_bad_auth {
+                return Err(PubSubError::BadAuth {
+                    cookie_file: bad_auth_cookie_file(username),
+                    error,
+                });
+            }
+            sender
+                .send(PubSubConnectionEvent::ResponseError { error, nonce })
+                .await
+                .map_err(|_| PubSubError::EventChannelClosed)?;
+        }
+        IncomingTransportMessage::Event(event) => {
+            sender
+                .send(PubSubConnectionEvent::Event(event))
+                .await
+                .map_err(|_| PubSubError::EventChannelClosed)?;
+        }
+        IncomingTransportMessage::Ignore => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,7 +380,6 @@ pub fn topic_requires_auth(topic: &str) -> bool {
     topic.starts_with("community-points-user-v1.") || topic.starts_with("predictions-user-v1.")
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn parse_message(
     raw: &str,
     tracked_streamers: &[Streamer],
@@ -414,167 +416,217 @@ pub fn parse_message(
         .to_lowercase();
     let channel_id = channel_id_from_payload(&payload, &topic);
 
-    let event = match () {
-        () if payload_type == "points-earned" => {
-            let point_gain = payload
-                .pointer("/data/point_gain")
-                .cloned()
-                .unwrap_or(Value::Null);
-            Some(PubSubEvent::PointsEarned {
-                channel_id,
-                earned: point_gain
-                    .get("total_points")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-                reason: point_gain
-                    .get("reason_code")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_uppercase(),
-                balance: payload
-                    .pointer("/data/balance/balance")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default(),
-            })
-        }
-        () if payload_type == "claim-available" => {
-            let claim_id = payload
-                .pointer("/data/claim/id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if claim_id.is_empty() {
-                None
-            } else {
-                let resolved_channel_id = if channel_id.is_empty() && tracked_streamers.len() == 1 {
-                    tracked_streamers[0].channel_id.clone()
-                } else {
-                    channel_id
-                };
-                Some(PubSubEvent::ClaimAvailable {
-                    channel_id: resolved_channel_id,
-                    claim_id,
-                })
-            }
-        }
-        () if topic.starts_with("video-playback-by-id.") => {
-            let kind = match payload_type.as_str() {
-                "stream-up" => PlaybackType::StreamUp,
-                "viewcount" => PlaybackType::Viewcount,
-                "stream-down" => PlaybackType::StreamDown,
-                _ => return Ok(None),
-            };
-            Some(PubSubEvent::Playback { channel_id, kind })
-        }
-        () if topic.starts_with("raid.") => {
-            let raid = payload.get("raid").cloned().unwrap_or(Value::Null);
-            let raid_id = raid
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if raid_id.is_empty() {
-                None
-            } else {
-                Some(PubSubEvent::Raid {
-                    channel_id,
-                    raid_id,
-                    target_login: raid
-                        .get("target_login")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                })
-            }
-        }
-        () if topic.starts_with("community-moments-channel-v1.") => {
-            if payload_type == "active" {
-                let moment_id = payload
-                    .pointer("/data/moment_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                if moment_id.is_empty() {
-                    None
-                } else {
-                    Some(PubSubEvent::Moment {
-                        channel_id,
-                        moment_id,
-                    })
-                }
-            } else {
-                None
-            }
-        }
-        () if topic.starts_with("predictions-channel-v1.") => {
-            let kind = match payload_type.as_str() {
-                "event-created" => PredictionChannelKind::EventCreated,
-                "event-updated" => PredictionChannelKind::EventUpdated,
-                _ => return Ok(None),
-            };
-            let Some(streamer) = tracked_streamers
-                .iter()
-                .find(|streamer| streamer.channel_id == channel_id)
-                .cloned()
-            else {
-                return Ok(None);
-            };
-            let Some(raw_event) = payload.get("data").and_then(|data| data.get("event")) else {
-                return Ok(None);
-            };
-            Some(PubSubEvent::PredictionChannel {
-                kind: kind.clone(),
-                event: Box::new(parse_prediction_event(
-                    &streamer,
-                    raw_event,
-                    matches!(kind, PredictionChannelKind::EventCreated),
-                )),
-                winning_outcome_id: winning_outcome_id(raw_event),
-            })
-        }
-        () if topic.starts_with("predictions-user-v1.") => {
-            let kind = match payload_type.as_str() {
-                "prediction-made" => PredictionUserKind::PredictionMade,
-                "prediction-result" => PredictionUserKind::PredictionResult,
-                _ => return Ok(None),
-            };
-            Some(PubSubEvent::PredictionUser {
-                event_id: payload
-                    .pointer("/data/prediction/event_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                result: payload.pointer("/data/prediction/result").cloned(),
-                kind,
-            })
-        }
-        () if topic.starts_with("community-points-channel-v1.") => {
-            let kind = match payload_type.as_str() {
-                "community-goal-created" => CommunityGoalKind::Created,
-                "community-goal-updated" => CommunityGoalKind::Updated,
-                "community-goal-deleted" => CommunityGoalKind::Deleted,
-                _ => return Ok(None),
-            };
-            let goal_value = payload.pointer("/data/community_goal").cloned();
-            let goal = goal_value.as_ref().and_then(|value| {
-                serde_json::from_value::<CommunityGoal>(normalize_goal_value(value)).ok()
-            });
-            let goal_id = goal_value
-                .as_ref()
-                .and_then(|value| value.get("id"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            Some(PubSubEvent::CommunityGoal {
-                channel_id,
-                kind,
-                goal,
-                goal_id,
-            })
-        }
-        () => None,
-    };
+    if payload_type == "points-earned" {
+        return Ok(Some(parse_points_earned_event(&payload, channel_id)));
+    }
+    if payload_type == "claim-available" {
+        return Ok(parse_claim_available_event(
+            &payload,
+            channel_id,
+            tracked_streamers,
+        ));
+    }
+    if topic.starts_with("video-playback-by-id.") {
+        return Ok(parse_playback_event(&payload_type, channel_id));
+    }
+    if topic.starts_with("raid.") {
+        return Ok(parse_raid_event(&payload, channel_id));
+    }
+    if topic.starts_with("community-moments-channel-v1.") {
+        return Ok(parse_moment_event(&payload, &payload_type, channel_id));
+    }
+    if topic.starts_with("predictions-channel-v1.") {
+        return Ok(parse_prediction_channel_event(
+            &payload,
+            &payload_type,
+            &channel_id,
+            tracked_streamers,
+        ));
+    }
+    if topic.starts_with("predictions-user-v1.") {
+        return Ok(parse_prediction_user_event(&payload, &payload_type));
+    }
+    if topic.starts_with("community-points-channel-v1.") {
+        return Ok(parse_community_goal_event(
+            &payload,
+            &payload_type,
+            channel_id,
+        ));
+    }
 
-    Ok(event)
+    Ok(None)
+}
+
+fn parse_points_earned_event(payload: &Value, channel_id: String) -> PubSubEvent {
+    let point_gain = payload
+        .pointer("/data/point_gain")
+        .cloned()
+        .unwrap_or(Value::Null);
+    PubSubEvent::PointsEarned {
+        channel_id,
+        earned: point_gain
+            .get("total_points")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        reason: point_gain
+            .get("reason_code")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_uppercase(),
+        balance: payload
+            .pointer("/data/balance/balance")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+    }
+}
+
+fn parse_claim_available_event(
+    payload: &Value,
+    channel_id: String,
+    tracked_streamers: &[Streamer],
+) -> Option<PubSubEvent> {
+    let claim_id = payload
+        .pointer("/data/claim/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if claim_id.is_empty() {
+        return None;
+    }
+    let resolved_channel_id = if channel_id.is_empty() && tracked_streamers.len() == 1 {
+        tracked_streamers[0].channel_id.clone()
+    } else {
+        channel_id
+    };
+    Some(PubSubEvent::ClaimAvailable {
+        channel_id: resolved_channel_id,
+        claim_id,
+    })
+}
+
+fn parse_playback_event(payload_type: &str, channel_id: String) -> Option<PubSubEvent> {
+    let kind = match payload_type {
+        "stream-up" => PlaybackType::StreamUp,
+        "viewcount" => PlaybackType::Viewcount,
+        "stream-down" => PlaybackType::StreamDown,
+        _ => return None,
+    };
+    Some(PubSubEvent::Playback { channel_id, kind })
+}
+
+fn parse_raid_event(payload: &Value, channel_id: String) -> Option<PubSubEvent> {
+    let raid = payload.get("raid").cloned().unwrap_or(Value::Null);
+    let raid_id = raid
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if raid_id.is_empty() {
+        return None;
+    }
+    Some(PubSubEvent::Raid {
+        channel_id,
+        raid_id,
+        target_login: raid
+            .get("target_login")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn parse_moment_event(
+    payload: &Value,
+    payload_type: &str,
+    channel_id: String,
+) -> Option<PubSubEvent> {
+    if payload_type != "active" {
+        return None;
+    }
+    let moment_id = payload
+        .pointer("/data/moment_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if moment_id.is_empty() {
+        return None;
+    }
+    Some(PubSubEvent::Moment {
+        channel_id,
+        moment_id,
+    })
+}
+
+fn parse_prediction_channel_event(
+    payload: &Value,
+    payload_type: &str,
+    channel_id: &str,
+    tracked_streamers: &[Streamer],
+) -> Option<PubSubEvent> {
+    let kind = match payload_type {
+        "event-created" => PredictionChannelKind::EventCreated,
+        "event-updated" => PredictionChannelKind::EventUpdated,
+        _ => return None,
+    };
+    let streamer = tracked_streamers
+        .iter()
+        .find(|streamer| streamer.channel_id == channel_id)
+        .cloned()?;
+    let raw_event = payload.get("data").and_then(|data| data.get("event"))?;
+    Some(PubSubEvent::PredictionChannel {
+        kind: kind.clone(),
+        event: Box::new(parse_prediction_event(
+            &streamer,
+            raw_event,
+            matches!(kind, PredictionChannelKind::EventCreated),
+        )),
+        winning_outcome_id: winning_outcome_id(raw_event),
+    })
+}
+
+fn parse_prediction_user_event(payload: &Value, payload_type: &str) -> Option<PubSubEvent> {
+    let kind = match payload_type {
+        "prediction-made" => PredictionUserKind::PredictionMade,
+        "prediction-result" => PredictionUserKind::PredictionResult,
+        _ => return None,
+    };
+    Some(PubSubEvent::PredictionUser {
+        event_id: payload
+            .pointer("/data/prediction/event_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        result: payload.pointer("/data/prediction/result").cloned(),
+        kind,
+    })
+}
+
+fn parse_community_goal_event(
+    payload: &Value,
+    payload_type: &str,
+    channel_id: String,
+) -> Option<PubSubEvent> {
+    let kind = match payload_type {
+        "community-goal-created" => CommunityGoalKind::Created,
+        "community-goal-updated" => CommunityGoalKind::Updated,
+        "community-goal-deleted" => CommunityGoalKind::Deleted,
+        _ => return None,
+    };
+    let goal_value = payload.pointer("/data/community_goal").cloned();
+    let goal = goal_value.as_ref().and_then(|value| {
+        serde_json::from_value::<CommunityGoal>(normalize_goal_value(value)).ok()
+    });
+    let goal_id = goal_value
+        .as_ref()
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(PubSubEvent::CommunityGoal {
+        channel_id,
+        kind,
+        goal,
+        goal_id,
+    })
 }
 
 pub fn parse_transport_message(

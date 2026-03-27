@@ -27,21 +27,11 @@ pub struct PredictionOutcome {
     pub odds_percentage: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PredictionDecision {
-    pub choice: i32,
+    pub choice: Option<usize>,
     pub outcome_id: String,
     pub amount: i64,
-}
-
-impl Default for PredictionDecision {
-    fn default() -> Self {
-        Self {
-            choice: -1,
-            outcome_id: String::new(),
-            amount: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -139,10 +129,7 @@ impl PredictionEvent {
         }
 
         self.decision = PredictionDecision {
-            choice: match i32::try_from(choice) {
-                Ok(choice) => choice,
-                Err(_) => return PredictionDecision::default(),
-            },
+            choice: Some(choice),
             outcome_id: self.outcomes[choice].id.clone(),
             amount,
         };
@@ -158,19 +145,16 @@ impl PredictionEvent {
             return (false, 0.0, String::new());
         };
 
-        let by_choice =
-            |selector: fn(&PredictionOutcome) -> f64| -> Result<f64, String> {
-                let choice = self.decision.choice;
-                if choice < 0 {
-                    return Err(String::from("filter_condition requires a decision outcome"));
-                }
-                self.outcomes
-                    .get(usize::try_from(choice).map_err(|_| {
-                        String::from("filter_condition requires a decision outcome")
-                    })?)
-                    .map(selector)
-                    .ok_or_else(|| String::from("filter_condition requires a decision outcome"))
-            };
+        let by_choice = |selector: fn(&PredictionOutcome) -> f64| -> Result<f64, String> {
+            let choice = self
+                .decision
+                .choice
+                .ok_or_else(|| String::from("filter_condition requires a decision outcome"))?;
+            self.outcomes
+                .get(choice)
+                .map(selector)
+                .ok_or_else(|| String::from("filter_condition requires a decision outcome"))
+        };
 
         let compared = match filter_condition.by {
             OutcomeKey::TotalUsers => self
@@ -268,9 +252,8 @@ impl PredictionEvent {
 
     #[must_use]
     pub fn decision_outcome(&self) -> Option<&PredictionOutcome> {
-        let choice = self.decision.choice;
-        if let Ok(index) = usize::try_from(choice) {
-            if let Some(outcome) = self.outcomes.get(index) {
+        if let Some(choice) = self.decision.choice {
+            if let Some(outcome) = self.outcomes.get(choice) {
                 return Some(outcome);
             }
         }
@@ -291,15 +274,22 @@ impl PredictionEvent {
             if self.decision.outcome_id.is_empty() {
                 return String::new();
             }
-            return format!(
-                "{}: {}",
-                choice_label(self.decision.choice),
-                self.decision.outcome_id
+            return self.decision.choice.map_or_else(
+                || self.decision.outcome_id.clone(),
+                |choice| format!("{}: {}", choice_label(choice), self.decision.outcome_id),
             );
+        };
+        let choice = self.decision.choice.or_else(|| {
+            self.outcomes
+                .iter()
+                .position(|candidate| candidate.id == outcome.id)
+        });
+        let Some(choice) = choice else {
+            return format!("{} ({})", outcome.title, outcome.color.to_uppercase());
         };
         format!(
             "{}: {} ({})",
-            choice_label(self.decision.choice),
+            choice_label(choice),
             outcome.title,
             outcome.color.to_uppercase()
         )
@@ -380,8 +370,8 @@ fn format_float(value: f64) -> String {
     trim_trailing_zeros(&format!("{value:.2}"))
 }
 
-fn choice_label(choice: i32) -> String {
-    if (0..26).contains(&choice) {
+fn choice_label(choice: usize) -> String {
+    if choice < 26 {
         return char::from_u32(u32::from(b'A') + u32::try_from(choice).unwrap_or_default())
             .unwrap_or('#')
             .to_string();
@@ -418,7 +408,7 @@ mod tests {
                 },
             ],
             decision: PredictionDecision {
-                choice: 1,
+                choice: Some(1),
                 ..PredictionDecision::default()
             },
             bet_placed: false,
@@ -470,7 +460,7 @@ mod tests {
                 },
             ],
             decision: PredictionDecision {
-                choice: 1,
+                choice: Some(1),
                 ..PredictionDecision::default()
             },
             bet_placed: false,
@@ -554,7 +544,7 @@ mod tests {
                 ..PredictionOutcome::default()
             }],
             decision: PredictionDecision {
-                choice: 0,
+                choice: Some(0),
                 outcome_id: String::from("a"),
                 amount: 125,
             },

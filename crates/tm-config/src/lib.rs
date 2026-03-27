@@ -20,6 +20,8 @@ pub enum ConfigError {
     InvalidConfig(#[from] serde_json::Error),
     #[error("config io error: {0}")]
     Io(#[from] io::Error),
+    #[error("config validation failed: {0}")]
+    Validation(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +237,16 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     }
 
     Ok(serde_json::from_value(value)?)
+}
+
+pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
+    let username = config.username.trim().to_lowercase();
+    if username.is_empty() || username == "your-twitch-username" {
+        return Err(ConfigError::Validation(String::from(
+            "config.username must be set to a Twitch username",
+        )));
+    }
+    Ok(())
 }
 
 pub fn resolve_app_paths(input: &ResolveAppPathsInput) -> io::Result<AppPaths> {
@@ -711,6 +723,15 @@ mod tests {
         let config = load_or_create_config(&path).unwrap();
         assert_eq!(config.chat_presence, "ONLINE");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn validation_rejects_default_username_placeholder() {
+        let mut config = ConfigFile::default();
+        assert!(validate_config(&config).is_err());
+
+        config.username = String::from("Alice");
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]
