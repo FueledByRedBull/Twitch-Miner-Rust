@@ -312,6 +312,13 @@ impl CommunityGoal {
     pub fn amount_left(&self) -> i64 {
         self.amount_needed - self.points_contributed
     }
+
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        !self.id.trim().is_empty()
+            && self.is_in_stock
+            && self.status.trim().eq_ignore_ascii_case("STARTED")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -352,9 +359,27 @@ impl Streamer {
             DelayMode::Percentage => prediction_window * delay,
         }
     }
+
+    pub fn apply_channel_points_context(
+        &mut self,
+        balance: i64,
+        active_multipliers: &[ActiveMultiplier],
+        community_goals: &[CommunityGoal],
+    ) {
+        self.channel_points = balance.max(0);
+        self.active_multipliers.clear();
+        self.active_multipliers.extend_from_slice(active_multipliers);
+        self.community_goals = community_goals
+            .iter()
+            .cloned()
+            .map(|goal| (goal.id.clone(), goal))
+            .collect();
+        self.points_init = true;
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use time::macros::datetime;
 
@@ -393,6 +418,53 @@ mod tests {
         };
         assert!(streamer.has_active_multipliers());
         assert_eq!(streamer.total_multiplier(), 3.5);
+    }
+
+    #[test]
+    fn streamer_applies_channel_points_context() {
+        let mut streamer = Streamer::default();
+        streamer.apply_channel_points_context(
+            -50,
+            &[ActiveMultiplier { factor: 1.5 }],
+            &[CommunityGoal {
+                id: String::from("goal-1"),
+                title: String::from("Goal"),
+                is_in_stock: true,
+                points_contributed: 5,
+                amount_needed: 10,
+                per_stream_user_maximum_contribution: 5,
+                status: String::from("STARTED"),
+            }],
+        );
+
+        assert_eq!(streamer.channel_points, 0);
+        assert_eq!(streamer.active_multipliers, vec![ActiveMultiplier { factor: 1.5 }]);
+        assert!(streamer.community_goals.contains_key("goal-1"));
+        assert!(streamer.points_init);
+    }
+
+    #[test]
+    fn community_goal_active_matches_runtime_rules() {
+        assert!(CommunityGoal {
+            id: String::from("goal-1"),
+            title: String::from("Goal"),
+            is_in_stock: true,
+            points_contributed: 0,
+            amount_needed: 10,
+            per_stream_user_maximum_contribution: 5,
+            status: String::from("STARTED"),
+        }
+        .is_active());
+        assert!(!CommunityGoal {
+            id: String::new(),
+            title: String::from("Goal"),
+            is_in_stock: true,
+            points_contributed: 0,
+            amount_needed: 10,
+            per_stream_user_maximum_contribution: 5,
+            status: String::from("STARTED"),
+        }
+        .is_active());
     }
 
     #[test]

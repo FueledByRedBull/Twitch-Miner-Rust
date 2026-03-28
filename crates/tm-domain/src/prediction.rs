@@ -318,19 +318,21 @@ pub fn select_outcome(outcomes: &[PredictionOutcome], settings: &BetSettings) ->
         return None;
     }
 
+    let number_choice = |index: usize| outcomes.get(index).map(|_| index).or_else(|| max_index(outcomes, |outcome| outcome.odds));
+
     match settings.strategy {
         Strategy::MostVoted => max_index(outcomes, |outcome| outcome.total_users as f64),
         Strategy::HighOdds => max_index(outcomes, |outcome| outcome.odds),
         Strategy::Percentage => max_index(outcomes, |outcome| outcome.odds_percentage),
         Strategy::SmartMoney => max_index(outcomes, |outcome| outcome.top_points as f64),
         Strategy::Number1 => Some(0),
-        Strategy::Number2 => outcomes.get(1).map(|_| 1),
-        Strategy::Number3 => outcomes.get(2).map(|_| 2),
-        Strategy::Number4 => outcomes.get(3).map(|_| 3),
-        Strategy::Number5 => outcomes.get(4).map(|_| 4),
-        Strategy::Number6 => outcomes.get(5).map(|_| 5),
-        Strategy::Number7 => outcomes.get(6).map(|_| 6),
-        Strategy::Number8 => outcomes.get(7).map(|_| 7),
+        Strategy::Number2 => number_choice(1),
+        Strategy::Number3 => number_choice(2),
+        Strategy::Number4 => number_choice(3),
+        Strategy::Number5 => number_choice(4),
+        Strategy::Number6 => number_choice(5),
+        Strategy::Number7 => number_choice(6),
+        Strategy::Number8 => number_choice(7),
         Strategy::Smart => {
             let gap = f64::from(settings.percentage_gap.unwrap_or(20));
             let mut sorted = outcomes.to_vec();
@@ -603,5 +605,32 @@ mod tests {
         assert_eq!(settlement.result_type, "WIN");
         assert_eq!(settlement.result_string, "WIN, Gained: +175");
         assert_eq!(settlement.decision_label, "A: Alpha (BLUE)");
+    }
+
+    #[test]
+    fn numbered_strategy_falls_back_to_high_odds_when_outcome_is_missing() {
+        let outcomes = vec![
+            PredictionOutcome {
+                id: String::from("a"),
+                odds: 1.5,
+                ..PredictionOutcome::default()
+            },
+            PredictionOutcome {
+                id: String::from("b"),
+                odds: 4.0,
+                ..PredictionOutcome::default()
+            },
+            PredictionOutcome {
+                id: String::from("c"),
+                odds: 2.0,
+                ..PredictionOutcome::default()
+            },
+        ];
+        let settings = BetSettings {
+            strategy: Strategy::Number5,
+            ..BetSettings::default()
+        };
+
+        assert_eq!(select_outcome(&outcomes, &settings), Some(1));
     }
 }

@@ -1,6 +1,8 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+#[cfg(unix)]
+use std::{fs::OpenOptions, io::Write};
 
 use thiserror::Error;
 
@@ -55,7 +57,7 @@ impl AuthSession {
             fs::create_dir_all(parent)?;
         }
         let payload = encode_cookie_store(&self.store)?;
-        fs::write(path, payload)?;
+        write_cookie_file(&path, payload.as_bytes())?;
         Ok(())
     }
 
@@ -148,6 +150,25 @@ impl AuthSession {
     }
 }
 
+#[cfg(unix)]
+fn write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(payload)?;
+    file.flush()
+}
+
+#[cfg(not(unix))]
+fn write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
+    fs::write(path, payload)
+}
+
 fn host_matches_cookie_domain(host: &str, domain: &str) -> bool {
     let normalized = domain.trim().trim_start_matches('.').to_lowercase();
     host == normalized || host.ends_with(&format!(".{normalized}"))
@@ -227,6 +248,20 @@ mod tests {
         assert_eq!(loaded.auth_token(), Some("token"));
         assert_eq!(loaded.user_id(), Some("user-1"));
         assert_eq!(loaded.store()["session"].value, "abc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_cookie_file_uses_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = sample_session();
+        session.save_to_dir(dir.path()).unwrap();
+
+        let path = cookie_file_path(dir.path(), session.username());
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

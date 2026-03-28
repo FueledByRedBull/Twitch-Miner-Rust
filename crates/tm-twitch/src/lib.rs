@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,6 +17,18 @@ pub const CLIENT_ID: &str = "ue6666qo983tsx6so1t0vnawi233wa";
 pub const DROP_ID: &str = "c2542d6d-cd10-4532-919b-3d19f30a768b";
 pub const DEFAULT_CLIENT_VERSION: &str = "ef928475-9403-42f2-8a34-55784bd08e16";
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+static BUILD_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"window\.__twilightBuildID\s*=\s*"([0-9a-fA-F\-]{36})""#)
+        .expect("build id regex must compile")
+});
+static SETTINGS_SCRIPT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(https://static\.twitchcdn\.net/config/settings.*?\.js|https://assets\.twitch\.tv/config/settings.*?\.js)",
+    )
+    .expect("settings script regex must compile")
+});
+static SPADE_URL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""spade_url":"(.*?)""#).expect("spade url regex must compile"));
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TwitchContractError {
@@ -42,6 +55,16 @@ pub enum TwitchClientError {
     },
     #[error("missing response field: {0}")]
     MissingField(&'static str),
+    #[error("graphql errors for {context}: {errors}")]
+    GqlErrors {
+        context: String,
+        errors: String,
+    },
+    #[error("mutation rejected for {context}: {detail}")]
+    MutationRejected {
+        context: String,
+        detail: String,
+    },
 }
 
 #[derive(Debug)]
@@ -153,6 +176,18 @@ pub struct InventoryDrop {
     pub current_minutes_watched: i64,
     pub required_minutes_watched: i64,
     pub is_claimed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimBonusOutcome {
+    Claimed,
+    AlreadyClaimed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimDropOutcome {
+    EligibleForAll,
+    AlreadyClaimed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,25 +484,30 @@ impl TwitchClient {
         channel_id: &str,
         claim_id: &str,
         user_id: Option<&str>,
-    ) -> Result<serde_json::Value, TwitchClientError> {
+    ) -> Result<ClaimBonusOutcome, TwitchClientError> {
         let cookie = claim_bonus_cookie_header(&self.auth_token, user_id.unwrap_or_default());
-        self.post_gql_value_with_cookie(
-            serde_json::to_value(operations::claim_community_points(channel_id, claim_id))?,
-            cookie.as_deref(),
-        )
-        .await
+        let response = self
+            .post_validated_mutation_value_with_cookie(
+                serde_json::to_value(operations::claim_community_points(channel_id, claim_id))?,
+                cookie.as_deref(),
+            )
+            .await?;
+        validate_claim_bonus_response(&response)
     }
 
     pub async fn claim_moment(
         &self,
         moment_id: &str,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::community_moment_claim(moment_id))
-            .await
+    ) -> Result<(), TwitchClientError> {
+        self.post_validated_mutation(&operations::community_moment_claim(moment_id))
+            .await?;
+        Ok(())
     }
 
-    pub async fn join_raid(&self, raid_id: &str) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::join_raid(raid_id)).await
+    pub async fn join_raid(&self, raid_id: &str) -> Result<(), TwitchClientError> {
+        self.post_validated_mutation(&operations::join_raid(raid_id))
+            .await?;
+        Ok(())
     }
 
     pub async fn make_prediction(
@@ -475,14 +515,15 @@ impl TwitchClient {
         event_id: &str,
         outcome_id: &str,
         points: i64,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::make_prediction(
+    ) -> Result<(), TwitchClientError> {
+        self.post_validated_mutation(&operations::make_prediction(
             event_id,
             outcome_id,
             points,
             &generate_transaction_id(),
         ))
-        .await
+        .await?;
+        Ok(())
     }
 
     pub async fn fetch_inventory(&self) -> Result<serde_json::Value, TwitchClientError> {
@@ -503,9 +544,11 @@ impl TwitchClient {
     pub async fn claim_drop(
         &self,
         drop_instance_id: &str,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::claim_drop_rewards(drop_instance_id))
-            .await
+    ) -> Result<ClaimDropOutcome, TwitchClientError> {
+        let response = self
+            .post_validated_mutation(&operations::claim_drop_rewards(drop_instance_id))
+            .await?;
+        validate_claim_drop_response(&response)
     }
 
     pub async fn fetch_available_drop_campaigns(
@@ -537,14 +580,16 @@ impl TwitchClient {
         amount: i64,
         channel_id: &str,
         goal_id: &str,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::contribute_community_goal(
-            amount,
-            channel_id,
-            goal_id,
-            &generate_transaction_id(),
-        ))
-        .await
+    ) -> Result<(), TwitchClientError> {
+        let response = self
+            .post_validated_mutation(&operations::contribute_community_goal(
+                amount,
+                channel_id,
+                goal_id,
+                &generate_transaction_id(),
+            ))
+            .await?;
+        validate_community_goal_response(&response)
     }
 
     pub async fn send_minute_watched(
@@ -599,6 +644,26 @@ impl TwitchClient {
             });
         }
         Ok(response.json().await?)
+    }
+
+    async fn post_validated_mutation(
+        &self,
+        operation: &GqlPersistedOperation,
+    ) -> Result<serde_json::Value, TwitchClientError> {
+        let payload = self.post_gql(operation).await?;
+        validate_gql_mutation_response(operation.operation_name, &payload)?;
+        Ok(payload)
+    }
+
+    async fn post_validated_mutation_value_with_cookie(
+        &self,
+        payload: serde_json::Value,
+        cookie: Option<&str>,
+    ) -> Result<serde_json::Value, TwitchClientError> {
+        let operation_name = operation_name(&payload).unwrap_or_else(|| String::from("mutation"));
+        let payload = self.post_gql_value_with_cookie(payload, cookie).await?;
+        validate_gql_mutation_response(&operation_name, &payload)?;
+        Ok(payload)
     }
 
     fn request_cookie_header(&self, url: &str, cookie: Option<&str>) -> Option<String> {
@@ -887,8 +952,7 @@ fn merge_cookie_headers(default_cookie: Option<&str>, cookie: Option<&str>) -> O
 }
 
 pub fn extract_build_id(html: &str) -> Result<String, TwitchContractError> {
-    let regex = Regex::new(r#"window\.__twilightBuildID\s*=\s*"([0-9a-fA-F\-]{36})""#).unwrap();
-    regex
+    BUILD_ID_REGEX
         .captures(html)
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().to_string())
@@ -896,11 +960,7 @@ pub fn extract_build_id(html: &str) -> Result<String, TwitchContractError> {
 }
 
 pub fn extract_settings_script_url(html: &str) -> Result<String, TwitchContractError> {
-    let regex = Regex::new(
-        r"(https://static\.twitchcdn\.net/config/settings.*?\.js|https://assets\.twitch\.tv/config/settings.*?\.js)",
-    )
-    .unwrap();
-    regex
+    SETTINGS_SCRIPT_REGEX
         .captures(html)
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().to_string())
@@ -908,8 +968,7 @@ pub fn extract_settings_script_url(html: &str) -> Result<String, TwitchContractE
 }
 
 pub fn extract_spade_url(settings_js: &str) -> Result<String, TwitchContractError> {
-    let regex = Regex::new(r#""spade_url":"(.*?)""#).unwrap();
-    regex
+    SPADE_URL_REGEX
         .captures(settings_js)
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().to_string())
@@ -1174,6 +1233,95 @@ pub fn parse_user_points_contributions(payload: &serde_json::Value) -> Vec<(Stri
             ))
         })
         .collect()
+}
+
+pub fn validate_gql_mutation_response(
+    context: &str,
+    payload: &serde_json::Value,
+) -> Result<(), TwitchClientError> {
+    let Some(errors) = payload.get("errors") else {
+        return Ok(());
+    };
+    if matches!(errors, serde_json::Value::Null) {
+        return Ok(());
+    }
+    if errors.as_array().is_some_and(Vec::is_empty) {
+        return Ok(());
+    }
+    Err(TwitchClientError::GqlErrors {
+        context: context.to_string(),
+        errors: errors.to_string(),
+    })
+}
+
+pub fn validate_claim_bonus_response(
+    payload: &serde_json::Value,
+) -> Result<ClaimBonusOutcome, TwitchClientError> {
+    let claim = payload
+        .pointer("/data/claimCommunityPoints")
+        .ok_or(TwitchClientError::MissingField("data.claimCommunityPoints"))?;
+    if let Some(message) = payload
+        .pointer("/data/claimCommunityPoints/error/message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+    {
+        return Err(TwitchClientError::MutationRejected {
+            context: String::from("ClaimCommunityPoints"),
+            detail: format!("claim bonus error: {message}"),
+        });
+    }
+    match claim
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(|status| status.trim().to_uppercase())
+        .as_deref()
+    {
+        Some("SUCCESS") | None => Ok(ClaimBonusOutcome::Claimed),
+        Some("ALREADY_CLAIMED") => Ok(ClaimBonusOutcome::AlreadyClaimed),
+        Some(status) => Err(TwitchClientError::MutationRejected {
+            context: String::from("ClaimCommunityPoints"),
+            detail: format!("unexpected claim bonus status {status}"),
+        }),
+    }
+}
+
+pub fn validate_claim_drop_response(
+    payload: &serde_json::Value,
+) -> Result<ClaimDropOutcome, TwitchClientError> {
+    match payload
+        .pointer("/data/claimDropRewards/status")
+        .and_then(serde_json::Value::as_str)
+        .map(|status| status.trim().to_uppercase())
+        .as_deref()
+    {
+        Some("ELIGIBLE_FOR_ALL") => Ok(ClaimDropOutcome::EligibleForAll),
+        Some("DROP_INSTANCE_ALREADY_CLAIMED") => Ok(ClaimDropOutcome::AlreadyClaimed),
+        Some(status) => Err(TwitchClientError::MutationRejected {
+            context: String::from("DropsPage_ClaimDropRewards"),
+            detail: format!("unexpected drop claim status {status}"),
+        }),
+        None => Err(TwitchClientError::MissingField(
+            "data.claimDropRewards.status",
+        )),
+    }
+}
+
+pub fn validate_community_goal_response(
+    payload: &serde_json::Value,
+) -> Result<(), TwitchClientError> {
+    if let Some(error) = payload
+        .pointer("/data/contributeCommunityPointsCommunityGoal/error")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+    {
+        return Err(TwitchClientError::MutationRejected {
+            context: String::from("ContributeCommunityPointsCommunityGoal"),
+            detail: format!("community goal error: {error}"),
+        });
+    }
+    Ok(())
 }
 
 fn normalize_goal_value(goal: &serde_json::Value) -> serde_json::Value {
@@ -1451,6 +1599,152 @@ mod tests {
         assert_eq!(generate_device_id().len(), 32);
         assert_eq!(generate_client_session_id().len(), 16);
         assert_eq!(generate_transaction_id().len(), 32);
+    }
+
+    #[test]
+    fn gql_mutation_validation_rejects_top_level_errors() {
+        let error = validate_gql_mutation_response(
+            "ClaimCommunityPoints",
+            &serde_json::json!({
+                "errors": [{ "message": "boom" }]
+            }),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TwitchClientError::GqlErrors { context, .. } if context == "ClaimCommunityPoints"
+        ));
+    }
+
+    #[test]
+    fn claim_bonus_validation_accepts_expected_statuses() {
+        assert_eq!(
+            validate_claim_bonus_response(&serde_json::json!({
+                "data": {
+                    "claimCommunityPoints": {
+                        "status": "SUCCESS",
+                        "error": { "message": "" }
+                    }
+                }
+            }))
+            .unwrap(),
+            ClaimBonusOutcome::Claimed
+        );
+        assert_eq!(
+            validate_claim_bonus_response(&serde_json::json!({
+                "data": {
+                    "claimCommunityPoints": {
+                        "status": "already_claimed",
+                        "error": { "message": null }
+                    }
+                }
+            }))
+            .unwrap(),
+            ClaimBonusOutcome::AlreadyClaimed
+        );
+        assert_eq!(
+            validate_claim_bonus_response(&serde_json::json!({
+                "data": {
+                    "claimCommunityPoints": {
+                        "balance": 1550
+                    }
+                }
+            }))
+            .unwrap(),
+            ClaimBonusOutcome::Claimed
+        );
+    }
+
+    #[test]
+    fn claim_bonus_validation_rejects_errors_and_unknown_statuses() {
+        let error = validate_claim_bonus_response(&serde_json::json!({
+            "data": {
+                "claimCommunityPoints": {
+                    "status": "SUCCESS",
+                    "error": { "message": "already used" }
+                }
+            }
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            TwitchClientError::MutationRejected { context, .. } if context == "ClaimCommunityPoints"
+        ));
+
+        let error = validate_claim_bonus_response(&serde_json::json!({
+            "data": {
+                "claimCommunityPoints": {
+                    "status": "DENIED",
+                    "error": { "message": "" }
+                }
+            }
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            TwitchClientError::MutationRejected { context, .. } if context == "ClaimCommunityPoints"
+        ));
+    }
+
+    #[test]
+    fn claim_drop_validation_accepts_expected_statuses() {
+        assert_eq!(
+            validate_claim_drop_response(&serde_json::json!({
+                "data": {
+                    "claimDropRewards": {
+                        "status": "ELIGIBLE_FOR_ALL"
+                    }
+                }
+            }))
+            .unwrap(),
+            ClaimDropOutcome::EligibleForAll
+        );
+        assert_eq!(
+            validate_claim_drop_response(&serde_json::json!({
+                "data": {
+                    "claimDropRewards": {
+                        "status": "drop_instance_already_claimed"
+                    }
+                }
+            }))
+            .unwrap(),
+            ClaimDropOutcome::AlreadyClaimed
+        );
+    }
+
+    #[test]
+    fn claim_drop_validation_rejects_unknown_statuses() {
+        let error = validate_claim_drop_response(&serde_json::json!({
+            "data": {
+                "claimDropRewards": {
+                    "status": "INELIGIBLE"
+                }
+            }
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            TwitchClientError::MutationRejected { context, .. }
+                if context == "DropsPage_ClaimDropRewards"
+        ));
+    }
+
+    #[test]
+    fn community_goal_validation_rejects_error_field() {
+        let error = validate_community_goal_response(&serde_json::json!({
+            "data": {
+                "contributeCommunityPointsCommunityGoal": {
+                    "error": "goal closed"
+                }
+            }
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            TwitchClientError::MutationRejected { context, .. }
+                if context == "ContributeCommunityPointsCommunityGoal"
+        ));
     }
 
     #[test]

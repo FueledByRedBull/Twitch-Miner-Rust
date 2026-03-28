@@ -291,6 +291,7 @@ pub fn pick_streamers_to_watch(
         };
 
         ordered.sort_by(|left, right| match priority {
+            WatchPriority::Order => left.position.cmp(&right.position),
             WatchPriority::Subscribed => streamers[right.idx]
                 .total_multiplier()
                 .partial_cmp(&streamers[left.idx].total_multiplier())
@@ -588,5 +589,43 @@ mod tests {
         );
 
         assert_eq!(selected, vec![0, 2]);
+    }
+
+    #[test]
+    fn order_priority_uses_configured_position_even_with_game_priority() {
+        let online_at = datetime!(2026-03-27 05:58 UTC);
+        let streamers = vec![
+            Streamer {
+                username: String::from("alpha"),
+                is_online: true,
+                online_at: Some(online_at),
+                stream: Some(Stream {
+                    game: Some(crate::types::Game::from_name("other game")),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: String::from("bravo"),
+                is_online: true,
+                online_at: Some(online_at),
+                stream: Some(Stream {
+                    game: Some(crate::types::Game::from_name("priority game")),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            },
+        ];
+
+        let selected = pick_streamers_to_watch(
+            &streamers,
+            &[WatchPriority::Order],
+            &[String::from("priority game")],
+            &[],
+            None,
+            datetime!(2026-03-27 06:00 UTC),
+        );
+
+        assert_eq!(selected, vec![0, 1]);
     }
 }

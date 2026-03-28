@@ -1572,12 +1572,13 @@ dependencies = [
 name = "tm-runtime"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "serde",
+ "thiserror",
  "tm-config",
  "tm-domain",
  "tm-pubsub",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1585,6 +1586,7 @@ name = "tm-twitch"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "once_cell",
  "regex",
  "reqwest",
  "serde",

@@ -1,50 +1,55 @@
+#![warn(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::HashMap;
 use std::env;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use reqwest::StatusCode;
 use serde_json::json;
-use tm_auth::{AuthSession, AuthSessionError, TwitchAuthClient};
-use tm_config::{
-    default_user_config_dir, load_or_create_config, resolve_app_paths_from_env, validate_config,
-    AppPaths, ConfigError, ConfigFile,
-};
-use tm_domain::{
-    format_channel_points, format_drop_progress, progress_percent, Game, PredictionDecision,
-    Streamer,
-};
-use tm_irc::{ChatClient, ChatEventKind, ChatLogger};
+use tm_config::{resolve_app_paths_from_env, ConfigFile};
+use tm_domain::{Game, PredictionDecision, Streamer};
 use tm_observability::{
-    build_discord_request, event_from_bet_result, event_from_gain_reason, init_tracing,
-    new_discord_webhook, Anonymizer, DiscordClient, DiscordSettings, Event as DiscordEvent,
-    LoggerSettings, TracingInitOptions,
+    build_discord_request, event_from_bet_result, event_from_gain_reason, init_tracing, DiscordClient,
+    Event as DiscordEvent, LoggerSettings, TracingInitOptions,
 };
+use tm_irc::ChatClient;
 use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
-use tm_twitch::{generate_device_id, InventoryDrop, TwitchClient};
+use tm_twitch::{InventoryDrop, TwitchClient, generate_device_id};
+
+mod bootstrap;
+mod effects;
+mod observability;
+mod prediction;
+mod tasks;
+mod watching;
+
+use observability::{
+    build_observability, log_session_summary, log_startup, AppObservability, TracingChatLogger,
+    streamer_game_name,
+};
+use bootstrap::{
+    build_http_client, has_override, load_config_with_fallback, load_or_login_session,
+    log_timezone_validation, normalized_username, prepare_work_dir, validate_timezone_override,
+    LoadedConfig, DEFAULT_USER_AGENT,
+};
+use effects::runtime_streamer_by_channel_id;
+use prediction::prediction_wait_duration;
+use tasks::{BackgroundTaskParams, BackgroundTasks};
+use watching::{CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction, minute_watcher_resume_gap};
 
 const DEFAULT_CONSOLE_TITLE: &str = "Klaro's Twitch Miner";
-const DEFAULT_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
-const READ_ONLY_FILE_SYSTEM_ERROR: i32 = 30;
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
+const WATCH_SELECTION_REFRESH_CONCURRENCY: usize = 4;
+const PENDING_CLAIMS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
 const SPADE_URL_TTL: Duration = Duration::from_secs(15 * 60);
 const MINUTE_WATCHER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
-const MINUTE_WATCHER_RESUME_GAP: Duration = Duration::from_secs(10 * 60);
 const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SESSION_SUMMARY_INDENT: usize = 25;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TimezoneValidation {
-    Valid(String),
-    Invalid(String),
-}
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -54,291 +59,24 @@ struct Cli {
     data_dir: Option<PathBuf>,
 }
 
-struct BackgroundTasks {
-    pubsub: Option<tokio::task::JoinHandle<()>>,
-    context: Option<tokio::task::JoinHandle<()>>,
-    minute: Option<tokio::task::JoinHandle<()>>,
-    drop: Option<tokio::task::JoinHandle<()>>,
-    chat: Option<tokio::task::JoinHandle<()>>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedSpadeUrl {
-    url: String,
-    fetched_at: StdInstant,
-}
-
-#[derive(Debug, Clone)]
-enum SpadeCacheEntry {
-    Ready(CachedSpadeUrl),
-    Refreshing(Arc<tokio::sync::Notify>),
-}
-
-enum SpadeResolveAction {
-    Use(String),
-    Wait(Arc<tokio::sync::Notify>),
-    Fetch(Arc<tokio::sync::Notify>),
-}
-
-struct BackgroundTaskParams<'a> {
-    config: &'a ConfigFile,
-    stop_rx: tokio::sync::watch::Receiver<bool>,
-    runtime: &'a tm_runtime::RuntimeHandle,
-    twitch: &'a Arc<TwitchClient>,
-    auth_token: &'a str,
-    user_id: Option<&'a String>,
-    initial_streamers: &'a [Streamer],
-    observability: &'a AppObservability,
-}
-
-#[derive(Clone)]
-struct AppObservability {
-    discord: Option<tm_observability::DiscordWebhook>,
-    discord_client: DiscordClient,
-    anonymizer: Arc<Mutex<Anonymizer>>,
-    emoji: bool,
-    show_claimed_bonus: bool,
-    show_game: bool,
-}
-
-impl AppObservability {
-    #[allow(clippy::fn_params_excessive_bools)]
-    fn new(
-        discord: Option<tm_observability::DiscordWebhook>,
-        discord_client: DiscordClient,
-        anonymize_logs: bool,
-        emoji: bool,
-        show_claimed_bonus: bool,
-        show_game: bool,
-    ) -> Self {
-        Self {
-            discord,
-            discord_client,
-            anonymizer: Arc::new(Mutex::new(Anonymizer::new(anonymize_logs))),
-            emoji,
-            show_claimed_bonus,
-            show_game,
-        }
-    }
-
-    fn streamer_name(&self, streamer: &Streamer) -> String {
-        let mut anonymizer = self.anonymizer.lock().expect("anonymizer lock poisoned");
-        anonymizer.streamer_name(streamer)
-    }
-
-    fn channel_points(&self, streamer: &Streamer) -> String {
-        let mut anonymizer = self.anonymizer.lock().expect("anonymizer lock poisoned");
-        format_channel_points(anonymizer.pseudo_channel_points(streamer))
-    }
-
-    fn streamer_label(&self, streamer: &Streamer) -> String {
-        format!(
-            "{} ({} points)",
-            self.streamer_name(streamer),
-            self.channel_points(streamer)
-        )
-    }
-
-    fn decorate(&self, emoji: &str, message: String) -> String {
-        if self.emoji {
-            format!("{emoji} {message}")
-        } else {
-            message
-        }
-    }
-
-    fn online_message(&self, streamer: &Streamer) -> String {
-        let mut message = format!("{} is Online!", self.streamer_label(streamer));
-        if self.show_game {
-            if let Some(game_name) = streamer_game_name(streamer) {
-                message.push_str(" | Playing: ");
-                message.push_str(&game_name);
-            }
-        }
-        self.decorate("🥳", message)
-    }
-
-    fn offline_message(&self, streamer: &Streamer) -> String {
-        self.decorate(
-            "😴",
-            format!("{} is Offline!", self.streamer_label(streamer)),
-        )
-    }
-
-    fn game_change_message(
-        &self,
-        streamer: &Streamer,
-        previous: &str,
-        current: &str,
-    ) -> Option<String> {
-        if !self.show_game {
-            return None;
-        }
-        let previous = previous.trim();
-        let current = current.trim();
-        if previous.is_empty() || current.is_empty() || previous.eq_ignore_ascii_case(current) {
-            return None;
-        }
-        Some(self.decorate(
-            "🎮",
-            format!("{} now playing: {}!", self.streamer_name(streamer), current),
-        ))
-    }
-
-    fn points_earned_message(&self, streamer: &Streamer, earned: i64, reason: &str) -> String {
-        let reason = reason.trim().to_uppercase();
-        let mut message = format!(
-            "{} {} - Reason: {}",
-            signed_points(earned),
-            self.streamer_label(streamer),
-            reason
-        );
-        if self.show_game && reason == "WATCH" {
-            if let Some(game_name) = streamer_game_name(streamer) {
-                message.push_str(" | Game: ");
-                message.push_str(&game_name);
-            }
-        }
-        self.decorate("🚀", message)
-    }
-
-    fn join_raid_message(&self, from: &str, target_login: &str) -> String {
-        self.decorate("🎭", format!("Joining raid from {from} to {target_login}"))
-    }
-
-    fn chat_presence_message(&self, join: bool, streamer_name: &str) -> String {
-        let action = if join { "Join" } else { "Leave" };
-        self.decorate("💬", format!("{action} IRC Chat: {streamer_name}"))
-    }
-
-    fn bonus_claim_message(&self, streamer: &Streamer, startup: bool) -> String {
-        let prefix = if startup {
-            "Claimed startup bonus"
-        } else {
-            "Claimed bonus"
-        };
-        self.decorate(
-            "🎁",
-            format!("{prefix} → {}", self.streamer_label(streamer)),
-        )
-    }
-
-    fn drop_claim_message(&self, mode: &str, drop: &InventoryDrop) -> String {
-        self.decorate(
-            "🎁",
-            format!(
-                "Claimed drop → {} | Campaign: {} | Progress: {} ({}%) | Mode: {}",
-                drop.reward_name,
-                drop.campaign_name,
-                format_drop_progress(drop.current_minutes_watched, drop.required_minutes_watched),
-                progress_percent(drop.current_minutes_watched, drop.required_minutes_watched),
-                mode.to_uppercase()
-            ),
-        )
-    }
-
-    fn minute_watcher_resume_message(&self, gap: Duration, active_streamers: usize) -> String {
-        self.decorate(
-            "⏸",
-            format!(
-                "Minute watcher resumed after {} without activity; system sleep or OS suspension is likely ({} active streamer(s))",
-                format_resume_gap(gap),
-                active_streamers
-            ),
-        )
-    }
-
-    fn start_session_message(&self, session_id: &str) -> String {
-        self.decorate("🟢", format!("Start session: '{session_id}'"))
-    }
-
-    fn loading_streamers_message(&self, count: usize) -> String {
-        self.decorate(
-            "⏳",
-            format!("Loading data for {count} streamer(s). Please wait..."),
-        )
-    }
-
-    fn loaded_streamers_message(&self, count: usize, elapsed: Duration) -> String {
-        self.decorate(
-            "✅",
-            format!(
-                "{count} Streamer loaded! ({:.1} seconds)",
-                elapsed.as_secs_f64()
-            ),
-        )
-    }
-
-    async fn send_event(&self, event: DiscordEvent, message: &str) {
-        send_discord_event(self.discord.as_ref(), &self.discord_client, event, message).await;
-    }
-
-    fn spawn_event(&self, event: DiscordEvent, message: String) {
-        let this = self.clone();
-        tokio::spawn(async move {
-            this.send_event(event, &message).await;
-        });
-    }
-}
-
-fn streamer_game_name(streamer: &Streamer) -> Option<String> {
-    streamer
-        .stream
-        .as_ref()
-        .and_then(|stream| stream.game.as_ref())
-        .and_then(|game| {
-            game.display_name
-                .as_deref()
-                .or(game.name.as_deref())
-                .map(str::trim)
-        })
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
-fn signed_points(amount: i64) -> String {
-    let sign = if amount >= 0 { "+" } else { "-" };
-    format!("{sign}{} →", format_channel_points(amount.abs()))
-}
-
-fn format_resume_gap(gap: Duration) -> String {
-    let seconds = gap.as_secs();
-    let hours = seconds / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    let secs = seconds % 60;
-    if hours > 0 {
-        format!("{hours}h {minutes}m {secs}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {secs}s")
-    } else {
-        format!("{secs}s")
-    }
-}
-
-fn minute_watcher_resume_gap(
-    previous: tm_runtime::RuntimeTime,
-    current: tm_runtime::RuntimeTime,
-) -> Option<Duration> {
-    let elapsed = (current - previous).whole_seconds().max(0).cast_unsigned();
-    let elapsed = Duration::from_secs(elapsed);
-    (elapsed >= MINUTE_WATCHER_RESUME_GAP).then_some(elapsed)
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let has_override = has_override(&cli);
-    let paths = resolve_app_paths_from_env(cli.config, cli.data_dir)?;
-    prepare_work_dir(&paths)?;
+    let requested_paths = resolve_app_paths_from_env(cli.config, cli.data_dir)?;
     set_console_title(DEFAULT_CONSOLE_TITLE);
     clear_console();
 
-    let (config, config_path) = load_config_with_fallback(&paths, has_override)?;
+    let LoadedConfig {
+        config,
+        active_paths,
+    } = load_config_with_fallback(&requested_paths, has_override)?;
+    prepare_work_dir(&active_paths)?;
     let timezone_validation = validate_timezone_override(config.timezone.as_deref());
 
     init_tracing(&TracingInitOptions {
         settings: build_logger_settings(&config),
-        base_dir: env::current_dir()?,
+        base_dir: active_paths.work_dir.clone(),
         username: config.username.clone(),
         timezone: config.timezone.clone(),
     })?;
@@ -350,16 +88,18 @@ async fn main() -> Result<()> {
 
     let observability = build_observability(&config)?;
     tracing::info!(
-        "Twitch Channel Points Miner | v{}",
+        "{} | v{}",
+        tm_updater::PROJECT_DISPLAY_NAME,
         env!("CARGO_PKG_VERSION")
     );
-    tracing::info!("https://github.com/FueledByRedBull/Twitch-Miner-Rust");
+    tracing::info!("{}", tm_updater::PROJECT_REPOSITORY_URL);
 
     let session_id = new_session_id();
     tracing::info!("{}", observability.start_session_message(&session_id));
     let started_at = time_now();
     let http_client = build_http_client(config.disable_ssl_cert_verification)?;
-    let session = load_or_login_session(&config, &paths.work_dir, http_client.clone()).await?;
+    let session =
+        load_or_login_session(&config, &active_paths.work_dir, http_client.clone()).await?;
     let auth_token = session
         .auth_token()
         .ok_or_else(|| anyhow!("missing auth token after login"))?
@@ -401,7 +141,14 @@ async fn main() -> Result<()> {
     })?;
     let summary = runtime.runtime_summary().await?;
 
-    log_startup(&paths, &config_path, &summary, &session_id, &observability).await;
+    log_startup(
+        &requested_paths,
+        &active_paths,
+        &summary,
+        &session_id,
+        &observability,
+    )
+    .await;
 
     wait_for_shutdown_signal().await?;
     tracing::info!(session_id = %session_id, "shutdown requested");
@@ -418,47 +165,6 @@ async fn main() -> Result<()> {
     )
     .await;
     log_session_summary(&summary);
-    Ok(())
-}
-
-fn has_override(cli: &Cli) -> bool {
-    cli.config.is_some()
-        || cli.data_dir.is_some()
-        || env_has_value("TCPM_CONFIG")
-        || env_has_value("TCPM_DATA_DIR")
-}
-
-fn env_has_value(name: &str) -> bool {
-    env::var(name)
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-fn load_config_with_fallback(
-    paths: &AppPaths,
-    has_override: bool,
-) -> Result<(ConfigFile, PathBuf), ConfigError> {
-    match load_or_create_config(&paths.config_path) {
-        Ok(config) => {
-            validate_config(&config)?;
-            Ok((config, paths.config_path.clone()))
-        }
-        Err(ConfigError::Io(error)) if !has_override && should_fallback_to_user_config(&error) => {
-            let fallback_dir = default_user_config_dir().ok_or(error)?;
-            std::fs::create_dir_all(&fallback_dir)?;
-            env::set_current_dir(&fallback_dir)?;
-            let fallback_path = fallback_dir.join("config.json");
-            let config = load_or_create_config(&fallback_path)?;
-            validate_config(&config)?;
-            Ok((config, fallback_path))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
-    std::fs::create_dir_all(&paths.work_dir)?;
-    env::set_current_dir(&paths.work_dir)?;
     Ok(())
 }
 
@@ -481,39 +187,33 @@ async fn run_auto_update_if_enabled(config: &ConfigFile) -> Result<bool> {
         return Ok(false);
     }
     let args = env::args().skip(1).collect::<Vec<_>>();
-    match tm_updater::run_auto_update(env!("CARGO_PKG_VERSION"), &args).await? {
-        tm_updater::AutoUpdateOutcome::UpToDate => Ok(false),
-        tm_updater::AutoUpdateOutcome::UpdateAvailableForDevRun { latest_version } => {
+    match tm_updater::run_auto_update(env!("CARGO_PKG_VERSION"), &args).await {
+        Ok(tm_updater::AutoUpdateOutcome::UpToDate) => Ok(false),
+        Ok(tm_updater::AutoUpdateOutcome::UpdateAvailableForDevRun { latest_version }) => {
             tracing::warn!(
                 latest_version = %latest_version,
                 "auto-update skipped for development run"
             );
             Ok(false)
         }
-        tm_updater::AutoUpdateOutcome::UpdatedAndRestarting { latest_version } => {
+        Ok(tm_updater::AutoUpdateOutcome::UpdatedAndRestarting { latest_version }) => {
             tracing::info!(
                 latest_version = %latest_version,
                 "auto-update installed a newer version; restarting"
             );
             Ok(true)
         }
+        Err(tm_updater::AutoUpdateError::Update(
+            tm_updater::UpdateError::UnsupportedReleaseContract,
+        )) => {
+            tracing::warn!(
+                repository = %tm_updater::PROJECT_REPOSITORY_URL,
+                "auto-update skipped because no Rust binary release contract is configured"
+            );
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
     }
-}
-
-fn build_observability(config: &ConfigFile) -> Result<AppObservability> {
-    let discord = new_discord_webhook(&DiscordSettings {
-        webhook_api: config.discord.webhook_api.clone(),
-        events: config.discord.events.clone(),
-    });
-    let discord_client = DiscordClient::new(Duration::from_secs(15))?;
-    Ok(AppObservability::new(
-        discord,
-        discord_client,
-        config.privacy.anonymize_logs,
-        config.emojis,
-        config.show_claimed_bonus_msg,
-        config.show_game,
-    ))
 }
 
 fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result<BackgroundTasks> {
@@ -533,6 +233,15 @@ fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result<Background
     });
     let context = params.user_id.map(|user_id| {
         spawn_context_refresh_loop(
+            params.stop_rx.clone(),
+            params.runtime.clone(),
+            Arc::clone(params.twitch),
+            user_id.clone(),
+            params.observability.clone(),
+        )
+    });
+    let pending_claims = params.user_id.map(|user_id| {
+        spawn_pending_claim_loop(
             params.stop_rx.clone(),
             params.runtime.clone(),
             Arc::clone(params.twitch),
@@ -571,44 +280,11 @@ fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result<Background
     Ok(BackgroundTasks {
         pubsub,
         context,
+        pending_claims,
         minute,
         drop,
         chat,
     })
-}
-
-async fn log_startup(
-    paths: &AppPaths,
-    config_path: &Path,
-    summary: &tm_runtime::RuntimeSummary,
-    session_id: &str,
-    observability: &AppObservability,
-) {
-    tracing::debug!(
-        session_id = %session_id,
-        work_dir = %paths.work_dir.display(),
-        config_path = %config_path.display(),
-        configured_streamers = summary.configured_streamers,
-        follower_mode = summary.follower_mode,
-        "bootstrap complete"
-    );
-    send_discord_event(
-        observability.discord.as_ref(),
-        &observability.discord_client,
-        DiscordEvent::Startup,
-        &format!(
-            "Start session: '{}' | configured_streamers={} follower_mode={}",
-            session_id, summary.configured_streamers, summary.follower_mode
-        ),
-    )
-    .await;
-    if config_path != paths.config_path {
-        tracing::info!(
-            requested_config_path = %paths.config_path.display(),
-            active_config_path = %config_path.display(),
-            "using fallback user config directory"
-        );
-    }
 }
 
 async fn shutdown_background_tasks(
@@ -621,6 +297,9 @@ async fn shutdown_background_tasks(
     }
     if let Some(task) = tasks.context {
         await_shutdown_task("context", task).await;
+    }
+    if let Some(task) = tasks.pending_claims {
+        await_shutdown_task("pending-claims", task).await;
     }
     if let Some(task) = tasks.minute {
         await_shutdown_task("minute", task).await;
@@ -651,101 +330,6 @@ async fn await_shutdown_task(name: &str, mut task: tokio::task::JoinHandle<()>) 
             let _ = task.await;
         }
     }
-}
-
-fn build_http_client(disable_ssl_cert_verification: bool) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .danger_accept_invalid_certs(disable_ssl_cert_verification)
-        .build()
-        .context("build http client")
-}
-
-async fn load_or_login_session(
-    config: &ConfigFile,
-    base_dir: &Path,
-    client: reqwest::Client,
-) -> Result<AuthSession> {
-    let auth_client = TwitchAuthClient::with_client(client);
-    load_or_login_session_with_auth_client(config, base_dir, &auth_client).await
-}
-
-async fn load_or_login_session_with_auth_client(
-    config: &ConfigFile,
-    base_dir: &Path,
-    auth_client: &TwitchAuthClient,
-) -> Result<AuthSession> {
-    let username = normalized_username(&config.username)?;
-    let device_id = generate_device_id();
-
-    match AuthSession::load_from_dir(base_dir, &username) {
-        Ok(mut session) => {
-            if let Some(auth_token) = session.auth_token().map(str::to_string) {
-                match auth_client
-                    .validate_login(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
-                    .await
-                {
-                    Ok(user_id) => {
-                        session.set_user_id(user_id);
-                        session.save_to_dir(base_dir)?;
-                        tracing::debug!(username = %username, "loaded cookies from disk");
-                        return Ok(session);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            username = %username,
-                            %error,
-                            "saved cookies are invalid; starting device login"
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    username = %username,
-                    "saved cookies missing auth-token; starting device login"
-                );
-            }
-        }
-        Err(AuthSessionError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            tracing::warn!(
-                username = %username,
-                %error,
-                "unable to read saved cookies; starting device login"
-            );
-        }
-    }
-
-    let prompt = auth_client.request_device_code(&device_id).await?;
-    tracing::info!(
-        verification_uri = %prompt.verification_uri,
-        user_code = %prompt.user_code,
-        expires_in_seconds = prompt.expires_in.as_secs(),
-        "complete Twitch device login"
-    );
-    let started = tokio::time::Instant::now();
-    let auth_token = loop {
-        if started.elapsed() >= prompt.expires_in {
-            return Err(anyhow!("device code expired before authorization"));
-        }
-        match auth_client
-            .poll_access_token(&device_id, &prompt.device_code)
-            .await?
-        {
-            Some(token) => break token,
-            None => tokio::time::sleep(prompt.interval).await,
-        }
-    };
-
-    let user_id = auth_client
-        .validate_login(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
-        .await?;
-    let mut session = AuthSession::new(&username, tm_auth::CookieStore::new());
-    session.set_auth_token(auth_token);
-    session.set_user_id(user_id);
-    session.save_to_dir(base_dir)?;
-    tracing::info!(username = %username, "device login completed");
-    Ok(session)
 }
 
 async fn bootstrap_runtime_state(
@@ -795,14 +379,7 @@ async fn bootstrap_streamer(
         .fetch_channel_points_context(&streamer.username)
         .await
         .with_context(|| format!("load channel points context for {}", streamer.username))?;
-    streamer.channel_points = context.balance;
-    streamer.active_multipliers = context.active_multipliers;
-    streamer.community_goals = context
-        .community_goals
-        .into_iter()
-        .map(|goal| (goal.id.clone(), goal))
-        .collect::<HashMap<_, _>>();
-    streamer.points_init = true;
+    apply_context_to_streamer(streamer, &context);
 
     if let Some(claim_id) = context.claim_id.as_deref() {
         twitch
@@ -816,6 +393,14 @@ async fn bootstrap_streamer(
                 .send_event(DiscordEvent::BonusClaim, &message)
                 .await;
         }
+    }
+
+    if contribute_streamer_community_goals(twitch, streamer).await? {
+        let refreshed = twitch
+            .fetch_channel_points_context(&streamer.username)
+            .await
+            .with_context(|| format!("refresh channel points context for {}", streamer.username))?;
+        apply_context_to_streamer(streamer, &refreshed);
     }
 
     let is_live = twitch
@@ -873,59 +458,12 @@ async fn claim_startup_drops_if_enabled(
     Ok(())
 }
 
-fn normalized_username(username: &str) -> Result<String> {
-    let username = username.trim().to_lowercase();
-    if username.is_empty() || username == "your-twitch-username" {
-        return Err(anyhow!("config.username must be set to a Twitch username"));
-    }
-    Ok(username)
-}
-
 fn drop_is_claimable(drop: &InventoryDrop) -> bool {
     !drop.is_claimed
         && !drop.drop_instance_id.trim().is_empty()
         && drop.current_minutes_watched >= drop.required_minutes_watched
 }
 
-fn prediction_wait_duration(
-    event: &tm_domain::PredictionEvent,
-    now: tm_runtime::RuntimeTime,
-) -> std::time::Duration {
-    let target_seconds = event
-        .streamer
-        .prediction_window_seconds(event.window_seconds);
-    let target_millis =
-        i128::try_from(std::time::Duration::from_secs_f64(target_seconds).as_millis())
-            .unwrap_or(i128::MAX);
-    let elapsed_millis = (now - event.created_at).whole_milliseconds();
-    let remaining_millis = (target_millis - elapsed_millis).max(0);
-    std::time::Duration::from_millis(u64::try_from(remaining_millis).unwrap_or(u64::MAX))
-}
-
-fn validate_timezone_override(raw: Option<&str>) -> Option<TimezoneValidation> {
-    let zone = raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))?;
-    match zone.parse::<chrono_tz::Tz>() {
-        Ok(_) => Some(TimezoneValidation::Valid(zone.to_string())),
-        Err(_) => Some(TimezoneValidation::Invalid(zone.to_string())),
-    }
-}
-
-fn log_timezone_validation(validation: Option<&TimezoneValidation>) {
-    match validation {
-        Some(TimezoneValidation::Valid(zone)) => {
-            tracing::info!(timezone = %zone, "using configured timezone");
-        }
-        Some(TimezoneValidation::Invalid(zone)) => {
-            tracing::warn!(
-                timezone = %zone,
-                "timezone override ignored; falling back to system time"
-            );
-        }
-        None => {}
-    }
-}
 
 fn spawn_drop_claim_loop(
     stop: tokio::sync::watch::Receiver<bool>,
@@ -976,6 +514,49 @@ async fn claim_available_drops(
             .await;
     }
     Ok(())
+}
+
+fn apply_context_to_streamer(streamer: &mut Streamer, context: &tm_twitch::ChannelPointsContext) {
+    streamer.apply_channel_points_context(
+        context.balance,
+        &context.active_multipliers,
+        &context.community_goals,
+    );
+}
+
+async fn contribute_streamer_community_goals(
+    twitch: &TwitchClient,
+    streamer: &Streamer,
+) -> Result<bool> {
+    if !streamer.settings.community_goals {
+        return Ok(false);
+    }
+    let contributions = load_goal_contributions(twitch, &streamer.username).await?;
+    let mut available_points = streamer.channel_points;
+    let mut contributed = false;
+    for goal in streamer.community_goals.values() {
+        if !goal.is_active() {
+            continue;
+        }
+        let user_points = contributions.get(&goal.id).copied().unwrap_or_default();
+        let amount = tm_twitch::community_goal_contribution_amount(goal, user_points, available_points);
+        if amount <= 0 {
+            continue;
+        }
+        twitch
+            .contribute_community_goal(amount, &streamer.channel_id, &goal.id)
+            .await?;
+        available_points -= amount;
+        contributed = true;
+        tracing::info!(
+            streamer = %streamer.username,
+            goal_id = %goal.id,
+            title = %goal.title,
+            amount,
+            "contributed to community goal"
+        );
+    }
+    Ok(contributed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1125,6 +706,7 @@ fn spawn_pubsub_connection_loop(
                     changed.is_err() || *stop.borrow()
                 }
                 result = &mut connect => {
+                    let reconnect_delay = pubsub_reconnect_delay(&result, connection_index, topics.len());
                     match result {
                         Ok(Ok(())) => {
                             tracing::warn!(
@@ -1132,6 +714,7 @@ fn spawn_pubsub_connection_loop(
                                 topics.len()
                             );
                         }
+                        Ok(Err(tm_pubsub::PubSubError::ReconnectRequested)) => {}
                         Ok(Err(error)) => {
                             tracing::error!(
                                 "PubSub[{connection_index}] connection error: {error}"
@@ -1144,24 +727,40 @@ fn spawn_pubsub_connection_loop(
                             tracing::error!("PubSub[{connection_index}] task failed: {error}");
                         }
                     }
-                    false
+                    if let Some(delay) = reconnect_delay {
+                        tokio::select! {
+                            changed = stop.changed() => changed.is_err() || *stop.borrow(),
+                            () = tokio::time::sleep(delay) => false,
+                        }
+                    } else {
+                        false
+                    }
                 }
             };
 
             if should_stop {
                 break;
             }
-
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        break;
-                    }
-                }
-                () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-            }
         }
     })
+}
+
+fn pubsub_reconnect_delay(
+    result: &std::result::Result<std::result::Result<(), tm_pubsub::PubSubError>, tokio::task::JoinError>,
+    connection_index: usize,
+    topic_count: usize,
+) -> Option<Duration> {
+    match result {
+        Ok(Err(tm_pubsub::PubSubError::ReconnectRequested)) => {
+            tracing::warn!(
+                "PubSub[{connection_index}] reconnect requested; waiting 60 seconds ({topic_count} topic(s))"
+            );
+            Some(Duration::from_secs(60))
+        }
+        Ok(Ok(())) => Some(Duration::from_secs(5)),
+        Err(error) if error.is_cancelled() => None,
+        Ok(Err(_)) | Err(_) => Some(Duration::from_secs(10)),
+    }
 }
 
 async fn execute_runtime_effects(
@@ -1342,39 +941,17 @@ async fn handle_community_goal_effect(
     let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
         return Ok(());
     };
-    let contributions = load_goal_contributions(twitch, &streamer.username).await?;
-    let mut available_points = streamer.channel_points;
-    for goal in streamer.community_goals.values() {
-        if goal.id.trim().is_empty() || !goal.is_in_stock || goal.status.to_uppercase() != "STARTED"
-        {
-            continue;
-        }
-        let user_points = contributions.get(&goal.id).copied().unwrap_or_default();
-        let amount =
-            tm_twitch::community_goal_contribution_amount(goal, user_points, available_points);
-        if amount <= 0 {
-            continue;
-        }
-        twitch
-            .contribute_community_goal(amount, &streamer.channel_id, &goal.id)
-            .await?;
-        available_points -= amount;
-        tracing::info!(
-            streamer = %streamer.username,
-            goal_id = %goal.id,
-            title = %goal.title,
-            amount,
-            "contributed to community goal"
-        );
+    if contribute_streamer_community_goals(twitch, &streamer).await? {
+        refresh_streamer_context_without_goal_effects(
+            runtime,
+            twitch,
+            &streamer,
+            Some(persistent_user_id),
+            observability,
+        )
+        .await?;
     }
-    refresh_streamer_context(
-        runtime,
-        twitch,
-        &streamer,
-        Some(persistent_user_id),
-        observability,
-    )
-    .await
+    Ok(())
 }
 
 fn spawn_prediction_evaluation(
@@ -1415,17 +992,6 @@ async fn handle_prediction_settled_effect(
     if let Some(event) = event_from_bet_result(result_type) {
         observability.send_event(event, &message).await;
     }
-}
-
-async fn runtime_streamer_by_channel_id(
-    runtime: &tm_runtime::RuntimeHandle,
-    channel_id: &str,
-) -> Result<Option<Streamer>> {
-    let snapshot = runtime.state_snapshot().await?;
-    Ok(snapshot
-        .streamers
-        .into_iter()
-        .find(|streamer| streamer.channel_id == channel_id))
 }
 
 async fn evaluate_prediction_after_delay(
@@ -1600,7 +1166,8 @@ async fn skip_prediction(
     message: String,
 ) -> Result<()> {
     tracing::info!(event_id = %event_id, "{message}");
-    runtime.stop_tracking_prediction(event_id, "SKIPPED").await
+    runtime.stop_tracking_prediction(event_id, "SKIPPED").await?;
+    Ok(())
 }
 
 async fn place_prediction(
@@ -1616,7 +1183,7 @@ async fn place_prediction(
         .make_prediction(&event.event_id, &decision.outcome_id, decision.amount)
         .await
     {
-        Ok(_) => {
+        Ok(()) => {
             let deduct_stake = streamer.settings.bet.deduct_stake_on_place.unwrap_or(true);
             runtime
                 .record_prediction_placed(&event.event_id, decision.clone(), deduct_stake)
@@ -1735,7 +1302,56 @@ fn spawn_context_refresh_loop(
                     .await
                     {
                         tracing::warn!(%error, "context refresh snapshot failed");
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn spawn_pending_claim_loop(
+    stop: tokio::sync::watch::Receiver<bool>,
+    runtime: tm_runtime::RuntimeHandle,
+    twitch: Arc<TwitchClient>,
+    persistent_user_id: String,
+    observability: AppObservability,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + PENDING_CLAIMS_INTERVAL,
+            PENDING_CLAIMS_INTERVAL,
+        );
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut stop = stop;
+
+        if let Err(error) = refresh_snapshot_streamers(
+            &runtime,
+            &twitch,
+            &persistent_user_id,
+            &observability,
+        )
+        .await
+        {
+            tracing::warn!(%error, "pending bonus sweep failed");
+        }
+
+        loop {
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
                         break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(error) = refresh_snapshot_streamers(
+                        &runtime,
+                        &twitch,
+                        &persistent_user_id,
+                        &observability,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "pending bonus sweep failed");
                     }
                 }
             }
@@ -1762,14 +1378,26 @@ async fn refresh_snapshot_streamers(
         let observability = observability.clone();
         refreshes.spawn(async move {
             let username = streamer.username.clone();
-            let result = refresh_streamer_context(
+            let result = match refresh_streamer_context(
                 &runtime,
                 twitch.as_ref(),
                 &streamer,
                 Some(&persistent_user_id),
                 &observability,
             )
-            .await;
+            .await {
+                Ok(effects) => {
+                execute_runtime_effects(
+                    &runtime,
+                    &twitch,
+                    &persistent_user_id,
+                    effects,
+                    &observability,
+                )
+                .await
+                }
+                Err(error) => Err(error),
+            };
             (username, result)
         });
     }
@@ -1801,12 +1429,12 @@ async fn refresh_streamer_context(
     streamer: &Streamer,
     persistent_user_id: Option<&str>,
     observability: &AppObservability,
-) -> Result<()> {
+) -> Result<Vec<tm_runtime::RuntimeEffect>> {
     let context = twitch
         .fetch_channel_points_context(&streamer.username)
         .await
         .with_context(|| format!("fetch context for {}", streamer.username))?;
-    runtime
+    let effects = runtime
         .apply_context_update(tm_runtime::ContextUpdate {
             channel_id: streamer.channel_id.clone(),
             balance: context.balance,
@@ -1827,6 +1455,18 @@ async fn refresh_streamer_context(
                 .await;
         }
     }
+    Ok(effects)
+}
+
+async fn refresh_streamer_context_without_goal_effects(
+    runtime: &tm_runtime::RuntimeHandle,
+    twitch: &TwitchClient,
+    streamer: &Streamer,
+    persistent_user_id: Option<&str>,
+    observability: &AppObservability,
+) -> Result<()> {
+    let _ = refresh_streamer_context(runtime, twitch, streamer, persistent_user_id, observability)
+        .await?;
     Ok(())
 }
 
@@ -1841,6 +1481,7 @@ async fn load_goal_contributions(
     Ok(contributions)
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_minute_watcher_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -1864,6 +1505,24 @@ fn spawn_minute_watcher_loop(
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     tracing::warn!(%error, "minute watcher snapshot failed");
+                    break;
+                }
+            };
+            if let Err(error) = refresh_watch_selection_metadata(
+                &runtime,
+                &twitch,
+                &snapshot.streamers,
+                &observability,
+                now,
+            )
+            .await
+            {
+                tracing::warn!(%error, "watch selection metadata refresh failed");
+            }
+            let snapshot = match runtime.state_snapshot().await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::warn!(%error, "minute watcher post-refresh snapshot failed");
                     break;
                 }
             };
@@ -1938,6 +1597,59 @@ fn spawn_minute_watcher_loop(
             }
         }
     })
+}
+
+async fn refresh_watch_selection_metadata(
+    runtime: &tm_runtime::RuntimeHandle,
+    twitch: &Arc<TwitchClient>,
+    streamers: &[Streamer],
+    observability: &AppObservability,
+    now: tm_runtime::RuntimeTime,
+) -> Result<()> {
+    let mut refreshes = tokio::task::JoinSet::new();
+
+    for streamer in streamers.iter().filter(|streamer| {
+        streamer.is_online
+            && !streamer.channel_id.trim().is_empty()
+            && streamer
+                .stream
+                .as_ref()
+                .is_none_or(|stream| stream.update_required_at(now))
+    }) {
+        while refreshes.len() >= WATCH_SELECTION_REFRESH_CONCURRENCY {
+            let _ = refreshes.join_next().await;
+        }
+
+        let runtime = runtime.clone();
+        let twitch = Arc::clone(twitch);
+        let observability = observability.clone();
+        let streamer = streamer.clone();
+        refreshes.spawn(async move {
+            let previous_game = streamer_game_name(&streamer);
+            let info = twitch
+                .fetch_stream_info(&streamer.username)
+                .await
+                .with_context(|| format!("refresh stream info for {}", streamer.username))?;
+            apply_live_stream_update(&runtime, &streamer, &info, &observability, now).await?;
+            log_stream_presence_changes(
+                &observability,
+                &streamer,
+                previous_game.as_deref(),
+                &info.game_name,
+            );
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+
+    while let Some(result) = refreshes.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "watch selection refresh failed"),
+            Err(error) => tracing::warn!(%error, "watch selection refresh task failed"),
+        }
+    }
+
+    Ok(())
 }
 
 async fn send_minute_watched_for_streamer(
@@ -2230,28 +1942,6 @@ async fn sleep_or_stop(
     }
 }
 
-struct TracingChatLogger {
-    observability: AppObservability,
-}
-
-impl ChatLogger for TracingChatLogger {
-    fn printf(&mut self, message: &str) {
-        tracing::info!("{message}");
-    }
-
-    fn errorf(&mut self, message: &str) {
-        tracing::error!("{message}");
-    }
-
-    fn emoji_eventf(&mut self, _emoji: &str, event: ChatEventKind, message: &str) {
-        tracing::info!("{message}");
-        if matches!(event, ChatEventKind::Mention) {
-            self.observability
-                .spawn_event(DiscordEvent::ChatMention, message.to_string());
-        }
-    }
-}
-
 fn spawn_chat_manager_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -2447,11 +2137,6 @@ fn clear_console() {
     let _ = command.status();
 }
 
-fn should_fallback_to_user_config(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::PermissionDenied
-        || error.raw_os_error() == Some(READ_ONLY_FILE_SYSTEM_ERROR)
-}
-
 async fn wait_for_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
@@ -2469,22 +2154,6 @@ async fn wait_for_shutdown_signal() -> Result<()> {
         tokio::signal::ctrl_c().await?;
     }
     Ok(())
-}
-
-fn log_session_summary(summary: &tm_runtime::SessionSummary) {
-    tracing::info!(duration = %summary.duration, "session ended");
-    tracing::info!("{}", summary.total_points_line);
-    for streamer in &summary.streamers {
-        tracing::info!(
-            "{} ({} points), {}",
-            streamer.username,
-            streamer.current_points,
-            streamer.total_points_line
-        );
-        for line in &streamer.history_lines {
-            tracing::info!("{:width$}{}", "", line, width = SESSION_SUMMARY_INDENT);
-        }
-    }
 }
 
 fn new_session_id() -> String {
@@ -2522,16 +2191,25 @@ fn set_console_title(title: &str) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::path::Path;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
-    use tm_auth::AuthEndpoints;
+    use crate::bootstrap::{
+        env_has_value, load_config_with_fallback_using, load_or_login_session_with_auth_client,
+        should_fallback_to_user_config, TimezoneValidation, READ_ONLY_FILE_SYSTEM_ERROR,
+    };
+    use crate::observability::format_resume_gap;
+    use tm_auth::{AuthEndpoints, TwitchAuthClient};
+    use tm_config::{AppPaths, ConfigError};
     use tm_domain::{
         BetSettings, DelayMode, OffsetDateTime, PredictionDecision, PredictionEvent,
         PredictionOutcome,
@@ -2738,6 +2416,59 @@ mod tests {
         (format!("http://{address}/spade"), requests, handle)
     }
 
+    fn spawn_json_response_server(
+        responses: Vec<String>,
+    ) -> (
+        TwitchEndpoints,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            let mut responses = std::collections::VecDeque::from(responses);
+            while !responses.is_empty() {
+                let wait_started = std::time::Instant::now();
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if wait_started.elapsed() >= Duration::from_secs(5) {
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("accept json test request failed: {error}"),
+                    }
+                };
+                let request = read_http_request(&mut stream);
+                recorded.lock().unwrap().push(request);
+                let latest_request = recorded.lock().unwrap().last().cloned().unwrap_or_default();
+                let response = if latest_request.starts_with("GET / ") {
+                    http_response(
+                        "200 OK",
+                        r#"<!doctype html><script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#,
+                    )
+                } else {
+                    let body = responses.pop_front().unwrap();
+                    http_response("200 OK", &body)
+                };
+                stream.write_all(&response).unwrap();
+            }
+        });
+        (
+            TwitchEndpoints {
+                twitch_url: format!("http://{address}"),
+                gql_url: format!("http://{address}/gql"),
+            },
+            requests,
+            handle,
+        )
+    }
+
     fn test_observability() -> AppObservability {
         AppObservability::new(
             None,
@@ -2792,6 +2523,46 @@ mod tests {
 
         let missing = io::Error::new(io::ErrorKind::NotFound, "missing");
         assert!(!should_fallback_to_user_config(&missing));
+    }
+
+    #[test]
+    fn config_fallback_switches_active_work_dir_and_config_path() {
+        let requested_dir = unique_temp_dir();
+        let fallback_dir = unique_temp_dir();
+        fs::create_dir_all(&requested_dir).unwrap();
+
+        let requested_paths = AppPaths {
+            work_dir: requested_dir.clone(),
+            config_path: requested_dir.join("config.json"),
+        };
+        let loaded = load_config_with_fallback_using(
+            &requested_paths,
+            false,
+            || Some(fallback_dir.clone()),
+            |path| {
+                if path == requested_paths.config_path {
+                    return Err(ConfigError::Io(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "read only",
+                    )));
+                }
+                if path == fallback_dir.join("config.json") {
+                    return Ok(ConfigFile {
+                        username: String::from("tester"),
+                        ..ConfigFile::default()
+                    });
+                }
+                panic!("unexpected config path: {}", path.display());
+            },
+        )
+        .unwrap();
+
+        assert_eq!(loaded.active_paths.work_dir, fallback_dir);
+        assert_eq!(loaded.active_paths.config_path, fallback_dir.join("config.json"));
+        assert_eq!(loaded.config.username, "tester");
+
+        fs::remove_dir_all(&requested_dir).unwrap();
+        fs::remove_dir_all(&fallback_dir).unwrap();
     }
 
     #[test]
@@ -3020,6 +2791,26 @@ mod tests {
     }
 
     #[test]
+    fn pubsub_reconnect_delay_distinguishes_requested_and_generic_retries() {
+        let reconnect_requested = Ok(Err(tm_pubsub::PubSubError::ReconnectRequested));
+        let generic_failure = Ok(Err(tm_pubsub::PubSubError::PongTimeout));
+        let clean_close = Ok(Ok(()));
+
+        assert_eq!(
+            pubsub_reconnect_delay(&reconnect_requested, 0, 1),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            pubsub_reconnect_delay(&generic_failure, 0, 1),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            pubsub_reconnect_delay(&clean_close, 0, 1),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
     fn timezone_validation_accepts_iana_names() {
         assert_eq!(
             validate_timezone_override(Some("Europe/Athens")),
@@ -3227,6 +3018,313 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_claim_loop_runs_immediate_sweep_and_stops_promptly() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![
+            fixture_json("twitch.channel_points_context.json"),
+            serde_json::json!({
+                "data": {
+                    "claimCommunityPoints": {
+                        "balance": 1550
+                    }
+                }
+            })
+            .to_string(),
+        ]);
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        ));
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![String::from("alice")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            ..Streamer::default()
+        }];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let task = spawn_pending_claim_loop(
+            stop_rx,
+            runtime.clone(),
+            twitch,
+            String::from("user-1"),
+            test_observability(),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if runtime.state_snapshot().await.unwrap().streamers[0].channel_points == 1234 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+    }
+
+    #[tokio::test]
+    async fn pending_claim_loop_skips_bonus_claim_when_none_is_available() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![
+            serde_json::json!({
+                "data": {
+                    "community": {
+                        "channel": {
+                            "self": {
+                                "communityPoints": {
+                                    "balance": 1234,
+                                    "availableClaim": null,
+                                    "activeMultipliers": []
+                                }
+                            },
+                            "communityPointsSettings": {
+                                "goals": []
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        ]);
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        ));
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![String::from("alice")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            ..Streamer::default()
+        }];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let task = spawn_pending_claim_loop(
+            stop_rx,
+            runtime.clone(),
+            twitch,
+            String::from("user-1"),
+            test_observability(),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if runtime.state_snapshot().await.unwrap().streamers[0].channel_points == 1234 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(!requests
+            .iter()
+            .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+    }
+
+    #[tokio::test]
+    async fn refresh_watch_selection_metadata_updates_candidate_choice() {
+        let (endpoints, requests, server) =
+            spawn_json_response_server(vec![fixture_json("twitch.stream_info.json")]);
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        ));
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![
+                String::from("alice"),
+                String::from("bob"),
+                String::from("carol"),
+            ],
+            watch_priority: vec![String::from("ORDER")],
+            game_exclude: vec![String::from("game name")],
+            ..ConfigFile::default()
+        };
+        let now = ts(300);
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![
+            Streamer {
+                username: String::from("alice"),
+                channel_id: String::from("100"),
+                is_online: true,
+                presence_known: true,
+                online_at: Some(ts(0)),
+                stream: Some(tm_domain::Stream {
+                    game: Some(Game::from_name("Chess")),
+                    last_update: Some(ts(0)),
+                    ..tm_domain::Stream::default()
+                }),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: String::from("bob"),
+                channel_id: String::from("200"),
+                is_online: true,
+                presence_known: true,
+                online_at: Some(ts(0)),
+                stream: Some(tm_domain::Stream {
+                    game: Some(Game::from_name("Chess")),
+                    last_update: Some(now),
+                    ..tm_domain::Stream::default()
+                }),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: String::from("carol"),
+                channel_id: String::from("300"),
+                is_online: true,
+                presence_known: true,
+                online_at: Some(ts(0)),
+                stream: Some(tm_domain::Stream {
+                    game: Some(Game::from_name("Chess")),
+                    last_update: Some(now),
+                    ..tm_domain::Stream::default()
+                }),
+                ..Streamer::default()
+            },
+        ];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+
+        assert_eq!(
+            runtime.state_snapshot().await.unwrap().watch_target_logins(now),
+            vec![String::from("alice"), String::from("bob")]
+        );
+
+        let stale_streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
+        refresh_watch_selection_metadata(
+            &runtime,
+            &twitch,
+            &[stale_streamer],
+            &test_observability(),
+            now,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            snapshot.watch_target_logins(now),
+            vec![String::from("bob"), String::from("carol")]
+        );
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .and_then(|stream| stream.game.as_ref())
+                .and_then(|game| game.display_name.clone()),
+            Some(String::from("Game Name"))
+        );
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
+    }
+
+    #[tokio::test]
+    async fn claim_available_drops_rejects_invalid_claim_status() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![
+            serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "name": "Campaign",
+                                "timeBasedDrops": [{
+                                    "name": "Reward",
+                                    "requiredMinutesWatched": 60,
+                                    "self": {
+                                        "dropInstanceID": "drop-1",
+                                        "currentMinutesWatched": 60,
+                                        "isClaimed": false
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "data": {
+                    "claimDropRewards": {
+                        "status": "INELIGIBLE"
+                    }
+                }
+            })
+            .to_string(),
+        ]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+
+        let error = claim_available_drops(&twitch, "periodic", &test_observability())
+            .await
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert!(
+            error.chain().any(|cause| cause
+                .to_string()
+                .contains("unexpected drop claim status INELIGIBLE")),
+            "{error:?}"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
     async fn send_minute_watched_for_streamer_updates_presence_and_watch_progress() {
         let (endpoints, _requests, twitch_server) = spawn_twitch_server(2);
         let twitch = TwitchClient::with_client_and_endpoints(
@@ -3421,3 +3519,5 @@ mod tests {
         assert_eq!(snapshot.predictions["event-1"].decision.amount, 250);
     }
 }
+
+

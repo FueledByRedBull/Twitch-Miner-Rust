@@ -92,3 +92,14 @@ fn streamer_override_nested_sections_are_completed_on_write_back() {
     assert!(written["streamer_overrides"]["bob"].is_object());
     assert!(written["streamer_overrides"]["bob"]["bet"].is_object());
 }
+
+#[test]
+fn non_object_top_level_fixture_is_rejected_without_write_back() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    fs::write(&target, "null").unwrap();
+
+    let error = load_or_create_config(&target).unwrap_err();
+    assert!(matches!(error, tm_config::ConfigError::InvalidConfig(_)));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "null");
+}

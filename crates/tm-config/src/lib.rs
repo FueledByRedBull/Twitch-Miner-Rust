@@ -198,8 +198,10 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     };
 
     if !value.is_object() {
-        value = Value::Object(Map::new());
-        changed = true;
+        return Err(ConfigError::InvalidConfig(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "config root must be a JSON object",
+        ))));
     }
 
     changed |= fill_missing_top_level(&mut value, &default_config_value());
@@ -755,6 +757,18 @@ mod tests {
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(value["bet"]["filter_condition"].is_object());
         assert!(value["privacy"]["anonymize_logs"].is_boolean());
+    }
+
+    #[test]
+    fn rejects_non_object_top_level_without_rewriting() {
+        let dir = unique_temp_dir("non-object");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, b"[]").unwrap();
+
+        let error = load_or_create_config(&path).unwrap_err();
+        assert!(matches!(error, ConfigError::InvalidConfig(_)));
+        assert_eq!(fs::read(&path).unwrap(), b"[]");
     }
 
     #[test]

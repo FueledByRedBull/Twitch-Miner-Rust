@@ -10,10 +10,47 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const RELEASE_PREFIX: &str = "TwitchChannelPointsMiner";
-pub const RELEASES_URL: &str =
-    "https://api.github.com/repos/0x8fv/Twitch-Channel-Points-Miner/releases/latest";
-pub const UPDATER_USER_AGENT: &str = "TwitchChannelPointsMiner-Updater";
+pub const PROJECT_DISPLAY_NAME: &str = "Twitch Channel Points Miner";
+pub const PROJECT_REPOSITORY_URL: &str =
+    "https://github.com/FueledByRedBull/Twitch-Miner-Rust";
+pub const RELEASE_ASSET_PREFIX: &str = "tm-app";
+pub const RELEASES_API_URL: &str =
+    "https://api.github.com/repos/FueledByRedBull/Twitch-Miner-Rust/releases/latest";
+pub const UPDATER_USER_AGENT: &str = "Twitch-Miner-Rust-Updater";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectDescriptor {
+    pub display_name: &'static str,
+    pub repository_url: &'static str,
+    pub release_contract: Option<ReleaseContract>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseContract {
+    pub release_prefix: &'static str,
+    pub releases_url: &'static str,
+    pub updater_user_agent: &'static str,
+}
+
+#[must_use]
+pub const fn configured_release_contract() -> ReleaseContract {
+    ReleaseContract {
+        release_prefix: RELEASE_ASSET_PREFIX,
+        releases_url: RELEASES_API_URL,
+        updater_user_agent: UPDATER_USER_AGENT,
+    }
+}
+
+#[must_use]
+pub fn release_contract() -> Option<ReleaseContract> {
+    PROJECT_DESCRIPTOR.release_contract
+}
+
+pub const PROJECT_DESCRIPTOR: ProjectDescriptor = ProjectDescriptor {
+    display_name: PROJECT_DISPLAY_NAME,
+    repository_url: PROJECT_REPOSITORY_URL,
+    release_contract: None,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
@@ -46,6 +83,8 @@ pub enum UpdateError {
     NoMatchingAsset { goos: String, arch: String },
     #[error("missing target directory for {target_path}")]
     MissingTargetDirectory { target_path: String },
+    #[error("auto-update is disabled until a Rust binary release contract is configured")]
+    UnsupportedReleaseContract,
 }
 
 #[derive(Debug, Error)]
@@ -83,21 +122,21 @@ pub fn new_http_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Er
 }
 
 #[must_use]
-pub fn latest_release_request() -> HttpRequest {
+pub fn latest_release_request(contract: ReleaseContract) -> HttpRequest {
     HttpRequest {
-        url: RELEASES_URL.to_string(),
+        url: contract.releases_url.to_string(),
         headers: vec![
             ("Accept".into(), "application/vnd.github+json".into()),
-            ("User-Agent".into(), UPDATER_USER_AGENT.into()),
+            ("User-Agent".into(), contract.updater_user_agent.into()),
         ],
     }
 }
 
 #[must_use]
-pub fn download_asset_request(url: &str) -> HttpRequest {
+pub fn download_asset_request(url: &str, contract: ReleaseContract) -> HttpRequest {
     HttpRequest {
         url: url.to_string(),
-        headers: vec![("User-Agent".into(), UPDATER_USER_AGENT.into())],
+        headers: vec![("User-Agent".into(), contract.updater_user_agent.into())],
     }
 }
 
@@ -107,12 +146,13 @@ pub fn parse_latest_release(bytes: &[u8]) -> Result<GitHubRelease, UpdateHttpErr
 
 pub async fn fetch_latest_release(
     client: &reqwest::Client,
+    contract: ReleaseContract,
 ) -> Result<GitHubRelease, UpdateHttpError> {
-    let request = latest_release_request();
+    let request = latest_release_request(contract);
     let response = client
         .get(&request.url)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", UPDATER_USER_AGENT)
+        .header("User-Agent", contract.updater_user_agent)
         .send()
         .await?;
     if !response.status().is_success() {
@@ -125,11 +165,12 @@ pub async fn fetch_latest_release(
 pub async fn download_asset_bytes(
     client: &reqwest::Client,
     url: &str,
+    contract: ReleaseContract,
 ) -> Result<Vec<u8>, UpdateHttpError> {
-    let request = download_asset_request(url);
+    let request = download_asset_request(url, contract);
     let mut response = client
         .get(&request.url)
-        .header("User-Agent", UPDATER_USER_AGENT)
+        .header("User-Agent", contract.updater_user_agent)
         .send()
         .await?;
     if !response.status().is_success() {
@@ -175,8 +216,9 @@ pub async fn run_auto_update(
 ) -> Result<AutoUpdateOutcome, AutoUpdateError> {
     let exe_path = env::current_exe()?;
     let temp_dir = env::temp_dir();
+    let contract = release_contract().ok_or(UpdateError::UnsupportedReleaseContract)?;
     let client = new_http_client(Duration::from_secs(15)).map_err(UpdateHttpError::BuildClient)?;
-    let release = fetch_latest_release(&client).await?;
+    let release = fetch_latest_release(&client, contract).await?;
     let latest_version = normalize_release_tag(&release.tag_name);
 
     if compare_versions(&latest_version, &normalize_version(current_version)) != Ordering::Greater {
@@ -188,9 +230,10 @@ pub async fn run_auto_update(
     }
 
     let (goos, arch) = normalized_target();
-    let asset = pick_asset(&release.assets, goos, arch)?;
+    let asset = pick_asset(&release.assets, goos, arch, contract)?;
     let temp_path =
-        download_asset_to_dir(&client, &asset.browser_download_url, exe_path.parent()).await?;
+        download_asset_to_dir(&client, &asset.browser_download_url, exe_path.parent(), contract)
+            .await?;
 
     if goos == "windows" {
         launch_windows_updater(&exe_path, &temp_path, args)?;
@@ -252,14 +295,15 @@ pub fn pick_asset(
     assets: &[ReleaseAsset],
     goos: &str,
     arch: &str,
+    contract: ReleaseContract,
 ) -> Result<ReleaseAsset, UpdateError> {
-    let mut expected = vec![format!("{RELEASE_PREFIX}-{goos}-{arch}")];
+    let mut expected = vec![format!("{}-{goos}-{arch}", contract.release_prefix)];
     if goos == "windows" {
         expected[0].push_str(".exe");
     }
     if goos == "darwin" {
-        expected.push(format!("{RELEASE_PREFIX}-macos-{arch}"));
-        expected.push(format!("{RELEASE_PREFIX}-osx-{arch}"));
+        expected.push(format!("{}-macos-{arch}", contract.release_prefix));
+        expected.push(format!("{}-osx-{arch}", contract.release_prefix));
     }
 
     for asset in assets {
@@ -389,8 +433,9 @@ async fn download_asset_to_dir(
     client: &reqwest::Client,
     url: &str,
     dir: Option<&Path>,
+    contract: ReleaseContract,
 ) -> Result<PathBuf, AutoUpdateError> {
-    let bytes = download_asset_bytes(client, url).await?;
+    let bytes = download_asset_bytes(client, url, contract).await?;
     let target_dir = dir.unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(target_dir)?;
     let temp_path = target_dir.join(format!(
@@ -478,22 +523,29 @@ mod tests {
     }
 
     #[test]
-    fn builds_release_and_download_requests() {
-        let release = latest_release_request();
-        assert_eq!(release.url, RELEASES_URL);
-        assert!(release
-            .headers
-            .contains(&("Accept".into(), "application/vnd.github+json".into())));
-        assert!(release
-            .headers
-            .contains(&("User-Agent".into(), UPDATER_USER_AGENT.into())));
-
-        let download = download_asset_request("https://example.invalid/file");
-        assert_eq!(download.url, "https://example.invalid/file");
+    fn rust_project_has_no_release_contract_yet() {
+        assert_eq!(PROJECT_DISPLAY_NAME, "Twitch Channel Points Miner");
         assert_eq!(
-            download.headers,
-            vec![("User-Agent".into(), UPDATER_USER_AGENT.into())]
+            PROJECT_REPOSITORY_URL,
+            "https://github.com/FueledByRedBull/Twitch-Miner-Rust"
         );
+        assert_eq!(configured_release_contract().release_prefix, "tm-app");
+        assert_eq!(
+            configured_release_contract().releases_url,
+            "https://api.github.com/repos/FueledByRedBull/Twitch-Miner-Rust/releases/latest"
+        );
+        assert!(release_contract().is_none());
+    }
+
+    #[test]
+    fn configured_release_contract_builds_latest_release_request() {
+        let contract = configured_release_contract();
+        let request = latest_release_request(contract);
+
+        assert_eq!(request.url, RELEASES_API_URL);
+        assert!(request
+            .headers
+            .contains(&(String::from("User-Agent"), String::from(UPDATER_USER_AGENT))));
     }
 
     #[test]
@@ -545,35 +597,53 @@ mod tests {
 
     #[test]
     fn picks_matching_assets() {
+        let contract = configured_release_contract();
         let assets = vec![
             ReleaseAsset {
-                name: String::from("TwitchChannelPointsMiner-linux-amd64"),
+                name: String::from("tm-app-linux-amd64"),
                 browser_download_url: String::from("https://example.invalid/linux"),
             },
             ReleaseAsset {
-                name: String::from("TwitchChannelPointsMiner-windows-amd64.exe"),
+                name: String::from("tm-app-windows-amd64.exe"),
                 browser_download_url: String::from("https://example.invalid/windows"),
             },
             ReleaseAsset {
-                name: String::from("TwitchChannelPointsMiner-macos-arm64"),
+                name: String::from("tm-app-macos-arm64"),
                 browser_download_url: String::from("https://example.invalid/macos"),
             },
         ];
 
-        let linux = pick_asset(&assets, "linux", "amd64").unwrap();
-        assert_eq!(linux.name, "TwitchChannelPointsMiner-linux-amd64");
+        let linux = pick_asset(&assets, "linux", "amd64", contract).unwrap();
+        assert_eq!(linux.name, "tm-app-linux-amd64");
 
-        let windows = pick_asset(&assets, "windows", "amd64").unwrap();
-        assert_eq!(windows.name, "TwitchChannelPointsMiner-windows-amd64.exe");
+        let windows = pick_asset(&assets, "windows", "amd64", contract).unwrap();
+        assert_eq!(windows.name, "tm-app-windows-amd64.exe");
 
-        let macos = pick_asset(&assets, "darwin", "arm64").unwrap();
-        assert_eq!(macos.name, "TwitchChannelPointsMiner-macos-arm64");
+        let macos = pick_asset(&assets, "darwin", "arm64", contract).unwrap();
+        assert_eq!(macos.name, "tm-app-macos-arm64");
 
-        let err = pick_asset(&assets, "freebsd", "amd64").unwrap_err();
+        let err = pick_asset(&assets, "freebsd", "amd64", contract).unwrap_err();
         assert_eq!(
             err,
             UpdateError::NoMatchingAsset {
                 goos: String::from("freebsd"),
+                arch: String::from("amd64"),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_go_asset_names_are_not_accepted() {
+        let contract = configured_release_contract();
+        let assets = vec![ReleaseAsset {
+            name: String::from("TwitchChannelPointsMiner-windows-amd64.exe"),
+            browser_download_url: String::from("https://example.invalid/windows"),
+        }];
+        let err = pick_asset(&assets, "windows", "amd64", contract).unwrap_err();
+        assert_eq!(
+            err,
+            UpdateError::NoMatchingAsset {
+                goos: String::from("windows"),
                 arch: String::from("amd64"),
             }
         );

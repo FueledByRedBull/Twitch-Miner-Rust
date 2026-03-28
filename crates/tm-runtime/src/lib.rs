@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tm_config::{build_base_streamer_settings, build_override_settings, ConfigFile};
 use tm_domain::{
     format_channel_points, format_duration, normalize_game_list, normalize_streamer_list,
@@ -15,6 +15,18 @@ use tm_pubsub::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub use tm_domain::OffsetDateTime as RuntimeTime;
+
+pub type Result<T> = std::result::Result<T, RuntimeError>;
+
+#[derive(Debug, Error)]
+pub enum RuntimeError {
+    #[error("runtime command send failed for {command}")]
+    SendFailed { command: &'static str },
+    #[error("runtime actor closed before replying to {command}")]
+    ActorClosed { command: &'static str },
+    #[error("runtime caller dropped reply for {command}")]
+    CallerDropped { command: &'static str },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSummary {
@@ -54,6 +66,7 @@ enum RuntimeCommand {
     },
     ApplyContext {
         update: ContextUpdate,
+        respond_to: oneshot::Sender<Vec<RuntimeEffect>>,
     },
     ApplyStreamUpdate {
         update: StreamUpdate,
@@ -162,8 +175,8 @@ pub struct StreamerSummary {
 }
 
 #[allow(clippy::unused_async)]
-pub async fn run(config: &ConfigFile) -> Result<RuntimeSession> {
-    Ok(bootstrap(config, OffsetDateTime::now_utc()))
+pub async fn run(config: &ConfigFile) -> RuntimeSession {
+    bootstrap(config, OffsetDateTime::now_utc())
 }
 
 #[must_use]
@@ -181,6 +194,7 @@ pub fn spawn_runtime_state(state: RuntimeState) -> RuntimeHandle {
     spawn_runtime_session(RuntimeSession::from_state(state))
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
     let (sender, mut receiver) = mpsc::channel(64);
     let (state_revision_tx, state_revision_rx) = watch::channel(0_u64);
@@ -194,7 +208,11 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     now,
                     respond_to,
                 } => {
-                    let _ = respond_to.send(state.apply_pubsub_event(&event, now));
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "ApplyPubSub",
+                        respond_to,
+                        state.apply_pubsub_event(&event, now),
+                    ));
                     notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::SessionSummary {
@@ -202,16 +220,32 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     now,
                     respond_to,
                 } => {
-                    let _ = respond_to.send(state.session_summary(anonymize, now));
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "SessionSummary",
+                        respond_to,
+                        state.session_summary(anonymize, now),
+                    ));
                 }
                 RuntimeCommand::RuntimeSummary { respond_to } => {
-                    let _ = respond_to.send(summary.clone());
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "RuntimeSummary",
+                        respond_to,
+                        summary.clone(),
+                    ));
                 }
                 RuntimeCommand::StateSnapshot { respond_to } => {
-                    let _ = respond_to.send(state.clone());
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "StateSnapshot",
+                        respond_to,
+                        state.clone(),
+                    ));
                 }
-                RuntimeCommand::ApplyContext { update } => {
-                    state.apply_context_update(&update);
+                RuntimeCommand::ApplyContext { update, respond_to } => {
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "ApplyContext",
+                        respond_to,
+                        state.apply_context_update(&update),
+                    ));
                     notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::ApplyStreamUpdate { update, now } => {
@@ -250,7 +284,11 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     now,
                     respond_to,
                 } => {
-                    let _ = respond_to.send(state.session_summary(anonymize, now));
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "Shutdown",
+                        respond_to,
+                        state.session_summary(anonymize, now),
+                    ));
                     break;
                 }
             }
@@ -265,6 +303,20 @@ fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
 fn notify_state_change(sender: &watch::Sender<u64>, revision: &mut u64) {
     *revision = revision.saturating_add(1);
     let _ = sender.send(*revision);
+}
+
+fn send_runtime_reply<T>(
+    command: &'static str,
+    respond_to: oneshot::Sender<T>,
+    value: T,
+) -> Result<()> {
+    respond_to.send(value).map_err(|_| RuntimeError::CallerDropped { command })
+}
+
+fn log_dropped_runtime_reply(result: &Result<()>) {
+    if let Err(RuntimeError::CallerDropped { command }) = result {
+        tracing::warn!(command, "runtime reply receiver dropped");
+    }
 }
 
 #[must_use]
@@ -313,9 +365,12 @@ impl RuntimeHandle {
                 respond_to: send,
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))?;
-        recv.await
-            .map_err(|error| anyhow::anyhow!("pubsub effects dropped: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "ApplyPubSub",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "ApplyPubSub",
+        })
     }
 
     pub async fn runtime_summary(&self) -> Result<RuntimeSummary> {
@@ -323,9 +378,12 @@ impl RuntimeHandle {
         self.sender
             .send(RuntimeCommand::RuntimeSummary { respond_to: send })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))?;
-        recv.await
-            .map_err(|error| anyhow::anyhow!("runtime summary dropped: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "RuntimeSummary",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "RuntimeSummary",
+        })
     }
 
     pub async fn session_summary(
@@ -341,9 +399,12 @@ impl RuntimeHandle {
                 respond_to: send,
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))?;
-        recv.await
-            .map_err(|error| anyhow::anyhow!("session summary dropped: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "SessionSummary",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "SessionSummary",
+        })
     }
 
     pub async fn shutdown(&self, anonymize: bool, now: OffsetDateTime) -> Result<SessionSummary> {
@@ -355,9 +416,12 @@ impl RuntimeHandle {
                 respond_to: send,
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))?;
-        recv.await
-            .map_err(|error| anyhow::anyhow!("shutdown summary dropped: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "Shutdown",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "Shutdown",
+        })
     }
 
     pub async fn state_snapshot(&self) -> Result<RuntimeState> {
@@ -365,16 +429,28 @@ impl RuntimeHandle {
         self.sender
             .send(RuntimeCommand::StateSnapshot { respond_to: send })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))?;
-        recv.await
-            .map_err(|error| anyhow::anyhow!("state snapshot dropped: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "StateSnapshot",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "StateSnapshot",
+        })
     }
 
-    pub async fn apply_context_update(&self, update: ContextUpdate) -> Result<()> {
+    pub async fn apply_context_update(&self, update: ContextUpdate) -> Result<Vec<RuntimeEffect>> {
+        let (send, recv) = oneshot::channel();
         self.sender
-            .send(RuntimeCommand::ApplyContext { update })
+            .send(RuntimeCommand::ApplyContext {
+                update,
+                respond_to: send,
+            })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "ApplyContext",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "ApplyContext",
+        })
     }
 
     pub async fn apply_stream_update(
@@ -385,7 +461,9 @@ impl RuntimeHandle {
         self.sender
             .send(RuntimeCommand::ApplyStreamUpdate { update, now })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "ApplyStreamUpdate",
+            })
     }
 
     pub async fn set_presence(
@@ -401,7 +479,9 @@ impl RuntimeHandle {
                 now,
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "SetPresence",
+            })
     }
 
     pub async fn mark_minute_watched(
@@ -415,7 +495,9 @@ impl RuntimeHandle {
                 now,
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "MarkMinuteWatched",
+            })
     }
 
     pub async fn record_prediction_placed(
@@ -431,7 +513,9 @@ impl RuntimeHandle {
                 deduct_stake,
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "RecordPredictionPlaced",
+            })
     }
 
     pub async fn stop_tracking_prediction(
@@ -445,7 +529,9 @@ impl RuntimeHandle {
                 result_type: result_type.into(),
             })
             .await
-            .map_err(|error| anyhow::anyhow!("runtime channel closed: {error}"))
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "StopTrackingPrediction",
+            })
     }
 }
 
@@ -578,10 +664,17 @@ impl RuntimeState {
                     }]
                 })
                 .unwrap_or_default(),
-            PubSubEvent::Playback { channel_id, kind } => {
-                self.apply_presence(channel_id, *kind != PlaybackType::StreamDown, now);
-                Vec::new()
-            }
+            PubSubEvent::Playback { channel_id, kind } => match kind {
+                PlaybackType::StreamUp => {
+                    self.apply_presence(channel_id, true, now);
+                    Vec::new()
+                }
+                PlaybackType::StreamDown => {
+                    self.apply_presence(channel_id, false, now);
+                    Vec::new()
+                }
+                PlaybackType::Viewcount => Vec::new(),
+            },
             PubSubEvent::Raid {
                 channel_id,
                 raid_id,
@@ -779,21 +872,21 @@ impl RuntimeState {
         }
     }
 
-    pub fn apply_context_update(&mut self, update: &ContextUpdate) {
+    pub fn apply_context_update(&mut self, update: &ContextUpdate) -> Vec<RuntimeEffect> {
         let Some(streamer) = self.streamer_mut_by_channel_id(&update.channel_id) else {
-            return;
+            return Vec::new();
         };
-        streamer.channel_points = update.balance.max(0);
-        streamer
-            .active_multipliers
-            .clone_from(&update.active_multipliers);
-        streamer.community_goals = update
-            .community_goals
-            .iter()
-            .cloned()
-            .map(|goal| (goal.id.clone(), goal))
-            .collect();
-        streamer.points_init = true;
+        streamer.apply_channel_points_context(
+            update.balance,
+            &update.active_multipliers,
+            &update.community_goals,
+        );
+        if streamer.settings.community_goals && streamer.community_goals.values().any(CommunityGoal::is_active) {
+            return vec![RuntimeEffect::ContributeCommunityGoals {
+                channel_id: update.channel_id.clone(),
+            }];
+        }
+        Vec::new()
     }
 
     pub fn apply_stream_update(&mut self, update: &StreamUpdate, now: OffsetDateTime) {
@@ -801,7 +894,14 @@ impl RuntimeState {
             return;
         };
         let stream = streamer.stream.get_or_insert_with(Stream::default);
-        stream.stream_up_at = Some(now);
+        let broadcast_changed = !stream.broadcast_id.is_empty() && stream.broadcast_id != update.id;
+        if stream.stream_up_at.is_none() || broadcast_changed {
+            stream.stream_up_at = Some(now);
+        }
+        if broadcast_changed {
+            stream.reset_watch_progress();
+            stream.watch_streak_missing = true;
+        }
         stream.update(
             &update.id,
             &update.title,
@@ -1251,6 +1351,135 @@ mod tests {
     }
 
     #[test]
+    fn viewcount_playback_does_not_promote_presence() {
+        let mut state = RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![WatchPriority::Order],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: "tester".into(),
+                channel_id: "123".into(),
+                settings: StreamerSettings {
+                    irc_mode: IrcMode::Online,
+                    ..StreamerSettings::default()
+                },
+                stream: Some(Stream::default()),
+                ..Streamer::default()
+            }],
+            initial_points: HashMap::new(),
+            predictions: HashMap::new(),
+        };
+
+        state.apply_pubsub_event(
+            &PubSubEvent::Playback {
+                channel_id: "123".into(),
+                kind: PlaybackType::Viewcount,
+            },
+            ts(100),
+        );
+
+        assert!(!state.streamers[0].presence_known);
+        assert!(!state.streamers[0].is_online);
+        assert!(state.desired_chat_logins().is_empty());
+        assert!(state.watch_target_logins(ts(131)).is_empty());
+    }
+
+    #[test]
+    fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
+        let mut state = RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![WatchPriority::Order],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: "tester".into(),
+                channel_id: "123".into(),
+                stream: Some(Stream {
+                    broadcast_id: "old-broadcast".into(),
+                    title: "Old".into(),
+                    minute_watched: 17.5,
+                    last_minute_update: Some(ts(90)),
+                    watch_streak_missing: false,
+                    stream_up_at: Some(ts(10)),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            }],
+            initial_points: HashMap::new(),
+            predictions: HashMap::new(),
+        };
+
+        state.apply_stream_update(
+            &StreamUpdate {
+                channel_id: "123".into(),
+                id: "new-broadcast".into(),
+                title: "New".into(),
+                game_name: "Game".into(),
+                game_id: Some("game-1".into()),
+                tags: vec!["tag-1".into()],
+                viewers_count: 42,
+            },
+            ts(120),
+        );
+
+        let stream = state.streamers[0].stream.as_ref().unwrap();
+        assert_eq!(stream.broadcast_id, "new-broadcast");
+        assert_eq!(stream.minute_watched, 0.0);
+        assert!(stream.last_minute_update.is_none());
+        assert!(stream.watch_streak_missing);
+        assert_eq!(stream.stream_up_at, Some(ts(120)));
+    }
+
+    #[test]
+    fn context_update_emits_goal_contribution_effect_for_active_goals() {
+        let mut state = RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![WatchPriority::Order],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: "tester".into(),
+                channel_id: "123".into(),
+                settings: StreamerSettings {
+                    community_goals: true,
+                    ..StreamerSettings::default()
+                },
+                ..Streamer::default()
+            }],
+            initial_points: HashMap::new(),
+            predictions: HashMap::new(),
+        };
+
+        let effects = state.apply_context_update(&ContextUpdate {
+            channel_id: "123".into(),
+            balance: 500,
+            active_multipliers: Vec::new(),
+            community_goals: vec![CommunityGoal {
+                id: "goal-1".into(),
+                title: "Goal".into(),
+                is_in_stock: true,
+                points_contributed: 25,
+                amount_needed: 100,
+                per_stream_user_maximum_contribution: 50,
+                status: "STARTED".into(),
+            }],
+        });
+
+        assert_eq!(
+            effects,
+            vec![RuntimeEffect::ContributeCommunityGoals {
+                channel_id: "123".into(),
+            }]
+        );
+        assert_eq!(state.streamers[0].channel_points, 500);
+        assert!(state.streamers[0].community_goals.contains_key("goal-1"));
+    }
+
+    #[test]
     fn raid_moment_goal_and_prediction_events_emit_effects() {
         let mut state = RuntimeState {
             started_at: ts(0),
@@ -1480,5 +1709,40 @@ mod tests {
 
         changes.changed().await.unwrap();
         assert_eq!(*changes.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_bootstraps_session_directly() {
+        let config = ConfigFile {
+            streamers: vec!["tester".into()],
+            ..ConfigFile::default()
+        };
+
+        let session = run(&config).await;
+
+        assert_eq!(session.summary.configured_streamers, 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_handle_returns_typed_actor_closed_error_after_shutdown() {
+        let config = ConfigFile {
+            streamers: vec!["tester".into()],
+            ..ConfigFile::default()
+        };
+        let runtime = spawn_runtime(&config, ts(10));
+
+        let _ = runtime.shutdown(false, ts(70)).await.unwrap();
+        let error = runtime.state_snapshot().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::SendFailed {
+                command: "StateSnapshot"
+            } | RuntimeError::ActorClosed {
+                command: "StateSnapshot"
+            } | RuntimeError::CallerDropped {
+                command: "StateSnapshot"
+            }
+        ));
     }
 }
