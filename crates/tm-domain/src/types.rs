@@ -368,7 +368,8 @@ impl Streamer {
     ) {
         self.channel_points = balance.max(0);
         self.active_multipliers.clear();
-        self.active_multipliers.extend_from_slice(active_multipliers);
+        self.active_multipliers
+            .extend_from_slice(active_multipliers);
         self.community_goals = community_goals
             .iter()
             .cloned()
@@ -438,7 +439,10 @@ mod tests {
         );
 
         assert_eq!(streamer.channel_points, 0);
-        assert_eq!(streamer.active_multipliers, vec![ActiveMultiplier { factor: 1.5 }]);
+        assert_eq!(
+            streamer.active_multipliers,
+            vec![ActiveMultiplier { factor: 1.5 }]
+        );
         assert!(streamer.community_goals.contains_key("goal-1"));
         assert!(streamer.points_init);
     }

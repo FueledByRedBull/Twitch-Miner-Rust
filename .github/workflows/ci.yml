@@ -1,0 +1,48 @@
+name: CI
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          components: clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test workspace
+        run: cargo test --workspace --quiet
+
+      - name: Clippy workspace
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test contracts
+        run: cargo test --manifest-path tests/contract/Cargo.toml --quiet
+
+      - name: Clippy contracts
+        run: cargo clippy --manifest-path tests/contract/Cargo.toml -- -D warnings
+
+      - name: Test integration
+        run: cargo test --manifest-path tests/integration/Cargo.toml --quiet
+
+      - name: Clippy integration
+        run: cargo clippy --manifest-path tests/integration/Cargo.toml -- -D warnings

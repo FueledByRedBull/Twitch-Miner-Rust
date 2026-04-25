@@ -135,10 +135,16 @@ cargo clippy --manifest-path tests/integration/Cargo.toml -- -D warnings
 
 ## Safety notes
 
+- This project is unofficial and may carry Twitch account or campaign-rule risk.
+- Use a dedicated Twitch account if that risk matters to you.
 - Do not commit `data/` or cookie files.
+- Cookie files contain authentication material; treat them like credentials.
+- The app uses device-code login and does not need your Twitch password.
+- Keep `auto_update=false` for manual source builds.
 - The repo ignores runtime data and logs by default.
 - This project is unofficial and not affiliated with Twitch.
 - You are responsible for how and where you use it.
+- See [SECURITY.md](SECURITY.md) for the credential and reporting model.
 
 ## License
 

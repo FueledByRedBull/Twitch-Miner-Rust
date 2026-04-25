@@ -15,6 +15,7 @@ If you want to watch logs in the foreground, run the command directly in the ter
 
 - Set `username` in `data/config.json`.
 - Keep `auto_update=false` if you want to stay on the local source build.
+- Leave `password` empty; device-code login does not use it.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 
@@ -47,5 +48,7 @@ cd C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust
 
 ## Notes
 
+- Treat `data/cookies/<username>.json` as an authentication secret.
+- This is unofficial Twitch automation; prefer a dedicated account if account risk matters.
 - The local workspace here was validated with `cargo test` and `cargo clippy`.
 - Docker and Raspberry Pi smoke validation were not performed in this environment.

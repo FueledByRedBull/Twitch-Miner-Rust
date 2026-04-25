@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const PROJECT_DISPLAY_NAME: &str = "Twitch Channel Points Miner";
-pub const PROJECT_REPOSITORY_URL: &str =
-    "https://github.com/FueledByRedBull/Twitch-Miner-Rust";
+pub const PROJECT_REPOSITORY_URL: &str = "https://github.com/FueledByRedBull/Twitch-Miner-Rust";
 pub const RELEASE_ASSET_PREFIX: &str = "tm-app";
 pub const RELEASES_API_URL: &str =
     "https://api.github.com/repos/FueledByRedBull/Twitch-Miner-Rust/releases/latest";
@@ -231,9 +230,13 @@ pub async fn run_auto_update(
 
     let (goos, arch) = normalized_target();
     let asset = pick_asset(&release.assets, goos, arch, contract)?;
-    let temp_path =
-        download_asset_to_dir(&client, &asset.browser_download_url, exe_path.parent(), contract)
-            .await?;
+    let temp_path = download_asset_to_dir(
+        &client,
+        &asset.browser_download_url,
+        exe_path.parent(),
+        contract,
+    )
+    .await?;
 
     if goos == "windows" {
         launch_windows_updater(&exe_path, &temp_path, args)?;
@@ -665,22 +668,37 @@ mod tests {
 
     #[test]
     fn escapes_batch_paths_and_builds_script() {
+        let (target, new_file, expected_script_path, expected_workdir) = if cfg!(windows) {
+            (
+                "C:\\app\\twitch-miner.exe",
+                "C:\\app\\miner-update.exe",
+                "C:\\app\\update-123.bat",
+                "C:\\app",
+            )
+        } else {
+            (
+                "/app/twitch-miner.exe",
+                "/app/miner-update.exe",
+                "/app/update-123.bat",
+                "/app",
+            )
+        };
         let script = generate_windows_updater_script(
-            "C:\\app\\twitch-miner.exe",
-            "C:\\app\\miner-update.exe",
+            target,
+            new_file,
             &[String::from("--flag"), String::from("two words")],
             123,
         )
         .unwrap();
 
-        assert_eq!(script.script_path, "C:\\app\\update-123.bat");
+        assert_eq!(script.script_path, expected_script_path);
+        assert!(script.script.contains(&format!("set \"TARGET={target}\"")));
         assert!(script
             .script
-            .contains("set \"TARGET=C:\\app\\twitch-miner.exe\""));
+            .contains(&format!("set \"NEWFILE={new_file}\"")));
         assert!(script
             .script
-            .contains("set \"NEWFILE=C:\\app\\miner-update.exe\""));
-        assert!(script.script.contains("set \"WORKDIR=C:\\app\""));
+            .contains(&format!("set \"WORKDIR={expected_workdir}\"")));
         assert!(script
             .script
             .contains("start \"\" /b \"%TARGET%\" \"--flag\" \"two words\""));

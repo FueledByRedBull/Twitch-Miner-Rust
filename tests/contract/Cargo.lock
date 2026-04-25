@@ -1075,6 +1075,7 @@ name = "tm-twitch"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "once_cell",
  "regex",
  "reqwest",
  "serde",

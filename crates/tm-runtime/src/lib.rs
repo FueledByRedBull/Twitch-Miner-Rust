@@ -310,7 +310,9 @@ fn send_runtime_reply<T>(
     respond_to: oneshot::Sender<T>,
     value: T,
 ) -> Result<()> {
-    respond_to.send(value).map_err(|_| RuntimeError::CallerDropped { command })
+    respond_to
+        .send(value)
+        .map_err(|_| RuntimeError::CallerDropped { command })
 }
 
 fn log_dropped_runtime_reply(result: &Result<()>) {
@@ -881,7 +883,12 @@ impl RuntimeState {
             &update.active_multipliers,
             &update.community_goals,
         );
-        if streamer.settings.community_goals && streamer.community_goals.values().any(CommunityGoal::is_active) {
+        if streamer.settings.community_goals
+            && streamer
+                .community_goals
+                .values()
+                .any(CommunityGoal::is_active)
+        {
             return vec![RuntimeEffect::ContributeCommunityGoals {
                 channel_id: update.channel_id.clone(),
             }];

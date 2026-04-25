@@ -44,7 +44,12 @@ pub(crate) fn load_config_with_fallback(
     paths: &AppPaths,
     has_override: bool,
 ) -> Result<LoadedConfig, ConfigError> {
-    load_config_with_fallback_using(paths, has_override, default_user_config_dir, load_or_create_config)
+    load_config_with_fallback_using(
+        paths,
+        has_override,
+        default_user_config_dir,
+        load_or_create_config,
+    )
 }
 
 pub(crate) fn load_config_with_fallback_using<D, F>(

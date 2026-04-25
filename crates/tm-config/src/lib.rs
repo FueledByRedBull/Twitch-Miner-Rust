@@ -133,8 +133,8 @@ impl Default for ConfigFile {
 pub fn default_config_value() -> Value {
     json!({
         "username": "your-twitch-username",
-        "password": "your-twitch-password (Optional)",
-        "auto_update": true,
+        "password": "",
+        "auto_update": false,
         "debug": false,
         "debug_deep": false,
         "watch_queue_logging": false,
@@ -198,10 +198,12 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     };
 
     if !value.is_object() {
-        return Err(ConfigError::InvalidConfig(serde_json::Error::io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "config root must be a JSON object",
-        ))));
+        return Err(ConfigError::InvalidConfig(serde_json::Error::io(
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "config root must be a JSON object",
+            ),
+        )));
     }
 
     changed |= fill_missing_top_level(&mut value, &default_config_value());
@@ -724,6 +726,8 @@ mod tests {
         let path = dir.join("config.json");
         let config = load_or_create_config(&path).unwrap();
         assert_eq!(config.chat_presence, "ONLINE");
+        assert_eq!(config.password, "");
+        assert!(!config.auto_update);
         assert!(path.exists());
     }
 

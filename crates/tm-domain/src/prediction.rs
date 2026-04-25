@@ -318,7 +318,12 @@ pub fn select_outcome(outcomes: &[PredictionOutcome], settings: &BetSettings) ->
         return None;
     }
 
-    let number_choice = |index: usize| outcomes.get(index).map(|_| index).or_else(|| max_index(outcomes, |outcome| outcome.odds));
+    let number_choice = |index: usize| {
+        outcomes
+            .get(index)
+            .map(|_| index)
+            .or_else(|| max_index(outcomes, |outcome| outcome.odds))
+    };
 
     match settings.strategy {
         Strategy::MostVoted => max_index(outcomes, |outcome| outcome.total_users as f64),

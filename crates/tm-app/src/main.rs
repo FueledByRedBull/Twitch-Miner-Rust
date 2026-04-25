@@ -13,13 +13,13 @@ use reqwest::StatusCode;
 use serde_json::json;
 use tm_config::{resolve_app_paths_from_env, ConfigFile};
 use tm_domain::{Game, PredictionDecision, Streamer};
-use tm_observability::{
-    build_discord_request, event_from_bet_result, event_from_gain_reason, init_tracing, DiscordClient,
-    Event as DiscordEvent, LoggerSettings, TracingInitOptions,
-};
 use tm_irc::ChatClient;
+use tm_observability::{
+    build_discord_request, event_from_bet_result, event_from_gain_reason, init_tracing,
+    DiscordClient, Event as DiscordEvent, LoggerSettings, TracingInitOptions,
+};
 use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
-use tm_twitch::{InventoryDrop, TwitchClient, generate_device_id};
+use tm_twitch::{generate_device_id, InventoryDrop, TwitchClient};
 
 mod bootstrap;
 mod effects;
@@ -28,19 +28,19 @@ mod prediction;
 mod tasks;
 mod watching;
 
-use observability::{
-    build_observability, log_session_summary, log_startup, AppObservability, TracingChatLogger,
-    streamer_game_name,
-};
 use bootstrap::{
     build_http_client, has_override, load_config_with_fallback, load_or_login_session,
     log_timezone_validation, normalized_username, prepare_work_dir, validate_timezone_override,
     LoadedConfig, DEFAULT_USER_AGENT,
 };
 use effects::runtime_streamer_by_channel_id;
+use observability::{
+    build_observability, log_session_summary, log_startup, streamer_game_name, AppObservability,
+    TracingChatLogger,
+};
 use prediction::prediction_wait_duration;
 use tasks::{BackgroundTaskParams, BackgroundTasks};
-use watching::{CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction, minute_watcher_resume_gap};
+use watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction};
 
 const DEFAULT_CONSOLE_TITLE: &str = "Klaro's Twitch Miner";
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
@@ -464,7 +464,6 @@ fn drop_is_claimable(drop: &InventoryDrop) -> bool {
         && drop.current_minutes_watched >= drop.required_minutes_watched
 }
 
-
 fn spawn_drop_claim_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     twitch: Arc<TwitchClient>,
@@ -539,7 +538,8 @@ async fn contribute_streamer_community_goals(
             continue;
         }
         let user_points = contributions.get(&goal.id).copied().unwrap_or_default();
-        let amount = tm_twitch::community_goal_contribution_amount(goal, user_points, available_points);
+        let amount =
+            tm_twitch::community_goal_contribution_amount(goal, user_points, available_points);
         if amount <= 0 {
             continue;
         }
@@ -746,7 +746,10 @@ fn spawn_pubsub_connection_loop(
 }
 
 fn pubsub_reconnect_delay(
-    result: &std::result::Result<std::result::Result<(), tm_pubsub::PubSubError>, tokio::task::JoinError>,
+    result: &std::result::Result<
+        std::result::Result<(), tm_pubsub::PubSubError>,
+        tokio::task::JoinError,
+    >,
     connection_index: usize,
     topic_count: usize,
 ) -> Option<Duration> {
@@ -1166,7 +1169,9 @@ async fn skip_prediction(
     message: String,
 ) -> Result<()> {
     tracing::info!(event_id = %event_id, "{message}");
-    runtime.stop_tracking_prediction(event_id, "SKIPPED").await?;
+    runtime
+        .stop_tracking_prediction(event_id, "SKIPPED")
+        .await?;
     Ok(())
 }
 
@@ -1324,13 +1329,8 @@ fn spawn_pending_claim_loop(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stop = stop;
 
-        if let Err(error) = refresh_snapshot_streamers(
-            &runtime,
-            &twitch,
-            &persistent_user_id,
-            &observability,
-        )
-        .await
+        if let Err(error) =
+            refresh_snapshot_streamers(&runtime, &twitch, &persistent_user_id, &observability).await
         {
             tracing::warn!(%error, "pending bonus sweep failed");
         }
@@ -1385,16 +1385,17 @@ async fn refresh_snapshot_streamers(
                 Some(&persistent_user_id),
                 &observability,
             )
-            .await {
+            .await
+            {
                 Ok(effects) => {
-                execute_runtime_effects(
-                    &runtime,
-                    &twitch,
-                    &persistent_user_id,
-                    effects,
-                    &observability,
-                )
-                .await
+                    execute_runtime_effects(
+                        &runtime,
+                        &twitch,
+                        &persistent_user_id,
+                        effects,
+                        &observability,
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             };
@@ -2198,8 +2199,8 @@ mod tests {
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::Path;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::thread;
     use std::time::Duration;
 
@@ -2558,7 +2559,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(loaded.active_paths.work_dir, fallback_dir);
-        assert_eq!(loaded.active_paths.config_path, fallback_dir.join("config.json"));
+        assert_eq!(
+            loaded.active_paths.config_path,
+            fallback_dir.join("config.json")
+        );
         assert_eq!(loaded.config.username, "tester");
 
         fs::remove_dir_all(&requested_dir).unwrap();
@@ -3086,27 +3090,25 @@ mod tests {
 
     #[tokio::test]
     async fn pending_claim_loop_skips_bonus_claim_when_none_is_available() {
-        let (endpoints, requests, server) = spawn_json_response_server(vec![
-            serde_json::json!({
-                "data": {
-                    "community": {
-                        "channel": {
-                            "self": {
-                                "communityPoints": {
-                                    "balance": 1234,
-                                    "availableClaim": null,
-                                    "activeMultipliers": []
-                                }
-                            },
-                            "communityPointsSettings": {
-                                "goals": []
+        let (endpoints, requests, server) = spawn_json_response_server(vec![serde_json::json!({
+            "data": {
+                "community": {
+                    "channel": {
+                        "self": {
+                            "communityPoints": {
+                                "balance": 1234,
+                                "availableClaim": null,
+                                "activeMultipliers": []
                             }
+                        },
+                        "communityPointsSettings": {
+                            "goals": []
                         }
                     }
                 }
-            })
-            .to_string(),
-        ]);
+            }
+        })
+        .to_string()]);
         let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -3231,7 +3233,11 @@ mod tests {
         let runtime = tm_runtime::spawn_runtime_state(state);
 
         assert_eq!(
-            runtime.state_snapshot().await.unwrap().watch_target_logins(now),
+            runtime
+                .state_snapshot()
+                .await
+                .unwrap()
+                .watch_target_logins(now),
             vec![String::from("alice"), String::from("bob")]
         );
 
@@ -3264,7 +3270,8 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|request| request.contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
+            .any(|request| request
+                .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
     }
 
     #[tokio::test]
@@ -3519,5 +3526,3 @@ mod tests {
         assert_eq!(snapshot.predictions["event-1"].decision.amount, 250);
     }
 }
-
-

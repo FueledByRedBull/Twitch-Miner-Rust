@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -56,15 +56,9 @@ pub enum TwitchClientError {
     #[error("missing response field: {0}")]
     MissingField(&'static str),
     #[error("graphql errors for {context}: {errors}")]
-    GqlErrors {
-        context: String,
-        errors: String,
-    },
+    GqlErrors { context: String, errors: String },
     #[error("mutation rejected for {context}: {detail}")]
-    MutationRejected {
-        context: String,
-        detail: String,
-    },
+    MutationRejected { context: String, detail: String },
 }
 
 #[derive(Debug)]
@@ -495,10 +489,7 @@ impl TwitchClient {
         validate_claim_bonus_response(&response)
     }
 
-    pub async fn claim_moment(
-        &self,
-        moment_id: &str,
-    ) -> Result<(), TwitchClientError> {
+    pub async fn claim_moment(&self, moment_id: &str) -> Result<(), TwitchClientError> {
         self.post_validated_mutation(&operations::community_moment_claim(moment_id))
             .await?;
         Ok(())

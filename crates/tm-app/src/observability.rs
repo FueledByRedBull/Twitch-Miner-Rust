@@ -89,7 +89,10 @@ impl AppObservability {
     }
 
     pub(crate) fn offline_message(&self, streamer: &Streamer) -> String {
-        self.decorate("😴", format!("{} is Offline!", self.streamer_label(streamer)))
+        self.decorate(
+            "😴",
+            format!("{} is Offline!", self.streamer_label(streamer)),
+        )
     }
 
     pub(crate) fn game_change_message(
@@ -149,7 +152,10 @@ impl AppObservability {
         } else {
             "Claimed bonus"
         };
-        self.decorate("🎁", format!("{prefix} → {}", self.streamer_label(streamer)))
+        self.decorate(
+            "🎁",
+            format!("{prefix} → {}", self.streamer_label(streamer)),
+        )
     }
 
     pub(crate) fn drop_claim_message(&self, mode: &str, drop: &InventoryDrop) -> String {
@@ -186,11 +192,20 @@ impl AppObservability {
     }
 
     pub(crate) fn loading_streamers_message(&self, count: usize) -> String {
-        self.decorate("⏳", format!("Loading data for {count} streamer(s). Please wait..."))
+        self.decorate(
+            "⏳",
+            format!("Loading data for {count} streamer(s). Please wait..."),
+        )
     }
 
     pub(crate) fn loaded_streamers_message(&self, count: usize, elapsed: Duration) -> String {
-        self.decorate("✅", format!("{count} Streamer loaded! ({:.1} seconds)", elapsed.as_secs_f64()))
+        self.decorate(
+            "✅",
+            format!(
+                "{count} Streamer loaded! ({:.1} seconds)",
+                elapsed.as_secs_f64()
+            ),
+        )
     }
 
     pub(crate) async fn send_event(&self, event: DiscordEvent, message: &str) {
