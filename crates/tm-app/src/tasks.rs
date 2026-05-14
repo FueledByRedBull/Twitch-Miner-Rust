@@ -1,3 +1,7 @@
+#![allow(unused_imports)]
+#![allow(clippy::wildcard_imports)]
+use crate::*;
+
 use std::sync::Arc;
 
 use tm_domain::Streamer;
@@ -23,4 +27,75 @@ pub(crate) struct BackgroundTaskParams<'a> {
     pub(crate) user_id: Option<&'a String>,
     pub(crate) initial_streamers: &'a [Streamer],
     pub(crate) observability: &'a AppObservability,
+}
+
+pub(crate) fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result<BackgroundTasks> {
+    let username = normalized_username(&params.config.username)?;
+    let pubsub = params.user_id.map(|user_id| {
+        spawn_pubsub_loop(
+            params.stop_rx.clone(),
+            params.runtime.clone(),
+            Arc::clone(params.twitch),
+            params.auth_token.to_string(),
+            user_id.clone(),
+            username.clone(),
+            params.initial_streamers.to_vec(),
+            user_id.clone(),
+            params.observability.clone(),
+        )
+    });
+    let context = params.user_id.map(|user_id| {
+        spawn_context_refresh_loop(
+            params.stop_rx.clone(),
+            params.runtime.clone(),
+            Arc::clone(params.twitch),
+            user_id.clone(),
+            params.observability.clone(),
+        )
+    });
+    let pending_claims = params.user_id.map(|user_id| {
+        spawn_pending_claim_loop(
+            params.stop_rx.clone(),
+            params.runtime.clone(),
+            Arc::clone(params.twitch),
+            user_id.clone(),
+            params.observability.clone(),
+        )
+    });
+    let minute = params.user_id.map(|user_id| {
+        spawn_minute_watcher_loop(
+            params.stop_rx.clone(),
+            params.runtime.clone(),
+            Arc::clone(params.twitch),
+            user_id.clone(),
+            params.observability.clone(),
+        )
+    });
+    let drop = params
+        .initial_streamers
+        .iter()
+        .any(|streamer| streamer.settings.claim_drops)
+        .then(|| {
+            spawn_drop_claim_loop(
+                params.stop_rx.clone(),
+                Arc::clone(params.twitch),
+                params.observability.clone(),
+            )
+        });
+    let chat = Some(spawn_chat_manager_loop(
+        params.stop_rx,
+        params.runtime.clone(),
+        params.auth_token.to_string(),
+        username,
+        params.config.disable_at_in_nickname,
+        params.observability.clone(),
+    ));
+    Ok(BackgroundTasks {
+        pubsub,
+        context,
+        pending_claims,
+        minute,
+        drop,
+        chat,
+    })
 }
