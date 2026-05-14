@@ -68,7 +68,7 @@ The container layout is centered on `/data`:
 - `/data/cookies/<username>.json`
 - `/data/log/*.log`
 
-There is also a named-volume variant in [deploy/docker-compose.volume.yml](/C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust/deploy/docker-compose.volume.yml).
+There is also a named-volume variant in [deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml).
 
 ## Configuration
 
@@ -111,13 +111,13 @@ Important paths:
 
 ## Project status
 
-Repository-level parity work is closed and documented. The remaining unchecked items are environment-gated operational validation, not missing source work.
+The source-level rewrite and fixture-backed parity work are documented. Live Twitch and platform-specific smoke tests are tracked separately because they require real accounts, network access, Docker publishing, or ARM hardware.
 
-- parity checklist: [docs/behavior-parity/parity-checklist.md](/C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust/docs/behavior-parity/parity-checklist.md)
-- gap list: [docs/behavior-parity/gap-list.md](/C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust/docs/behavior-parity/gap-list.md)
-- operator guide: [docs/behavior-parity/operator-guide.md](/C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust/docs/behavior-parity/operator-guide.md)
-- migration notes: [docs/behavior-parity/migration-notes.md](/C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust/docs/behavior-parity/migration-notes.md)
-- architecture notes: [docs/architecture/README.md](/C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust/docs/architecture/README.md)
+- parity checklist: [docs/behavior-parity/parity-checklist.md](docs/behavior-parity/parity-checklist.md)
+- gap list: [docs/behavior-parity/gap-list.md](docs/behavior-parity/gap-list.md)
+- operator guide: [docs/behavior-parity/operator-guide.md](docs/behavior-parity/operator-guide.md)
+- migration notes: [docs/behavior-parity/migration-notes.md](docs/behavior-parity/migration-notes.md)
+- architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
 
 ## Validation
 
@@ -148,4 +148,4 @@ cargo clippy --manifest-path tests/integration/Cargo.toml -- -D warnings
 
 ## License
 
-MIT
+Licensed under the [GNU General Public License v3.0 or later](LICENSE).
