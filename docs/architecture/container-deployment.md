@@ -10,6 +10,8 @@ Runtime paths:
 
 The app reads `TCPM_DATA_DIR` first, so the recommended container setup is to mount `/data` and let the miner create its own config, cookies, and log directories there.
 
+The published runtime image is a static Rust binary copied into `scratch`. It contains no shell, package manager, or OS certificate bundle. TLS trust comes from the Rust TLS dependencies, not from a system CA package.
+
 Shutdown and health:
 
 - The container uses `SIGTERM` for shutdown.
@@ -25,7 +27,9 @@ Build targets:
 Example build:
 
 ```powershell
-docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -t ghcr.io/0x8fv/twitch-miner-rust:latest --push .
+./scripts/build-multiarch.ps1
+docker run --rm ghcr.io/fueledbyredbull/twitch-miner-rust:latest --help
+./scripts/build-multiarch.ps1 -Push
 ```
 
-The same platform set is also captured in `scripts/build-multiarch.ps1` and `.github/workflows/multiarch-build.yml` for repeatable local and CI execution.
+The helper script builds and loads one local-platform image by default. Its `-Push` mode uses the same `linux/amd64`, `linux/arm64`, and `linux/arm/v7` platform set as `.github/workflows/multiarch-build.yml`. GitHub Actions publishes GHCR images on pushes to `main` and `v*` tags after platform smoke tests pass.

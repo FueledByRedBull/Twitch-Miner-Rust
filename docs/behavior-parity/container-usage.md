@@ -6,12 +6,14 @@ Recommended layout:
 - Keep `config.json` in that directory.
 - Let the app create `cookies/` and `log/` under the same root.
 
+The published image is a static Rust binary in a `scratch` runtime. It has no shell, package manager, or OS certificate bundle, so operational debugging should use logs, mounted `/data` files, and the host Docker tooling rather than `docker exec` shell sessions.
+
 Example:
 
 ```yaml
 services:
   twitch-miner:
-    image: ghcr.io/0x8fv/twitch-miner-rust:latest
+    image: ghcr.io/fueledbyredbull/twitch-miner-rust:latest
     environment:
       TCPM_CONFIG: /data/config.json
       TCPM_DATA_DIR: /data
@@ -24,7 +26,7 @@ Named-volume example:
 ```yaml
 services:
   twitch-miner:
-    image: ghcr.io/0x8fv/twitch-miner-rust:latest
+    image: ghcr.io/fueledbyredbull/twitch-miner-rust:latest
     environment:
       TCPM_CONFIG: /data/config.json
       TCPM_DATA_DIR: /data
@@ -36,5 +38,7 @@ volumes:
 ```
 
 The Raspberry Pi compose example pins `linux/arm/v7` and follows the same `/data` convention. The miner exits on `SIGTERM`, so Compose should be given a short but non-zero stop grace period.
+
+GitHub Actions publishes the GHCR image on pushes to `main` and `v*` tags after the multi-arch workflow builds and smoke-tests the platform images.
 
 For a shorter operator-oriented checklist, see [operator-guide.md](operator-guide.md).

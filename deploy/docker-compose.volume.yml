@@ -1,6 +1,6 @@
 services:
   twitch-miner:
-    image: ghcr.io/0x8fv/twitch-miner-rust:latest
+    image: ghcr.io/fueledbyredbull/twitch-miner-rust:latest
     init: true
     restart: unless-stopped
     stop_grace_period: 30s

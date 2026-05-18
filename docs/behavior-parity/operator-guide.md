@@ -31,6 +31,8 @@ The container expects:
 - `TCPM_CONFIG=/data/config.json`
 - `TCPM_DATA_DIR=/data`
 
+Published images are static Rust binaries in a `scratch` runtime. There is no shell, package manager, or OS certificate bundle inside the image; TLS trust is provided by the Rust TLS stack.
+
 ## Stop And Restart
 
 - The app listens for `CTRL-C` on Windows and `SIGTERM` in containers.
@@ -39,12 +41,16 @@ The container expects:
 
 ## Multi-Arch Builds
 
-Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. The script targets `linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
+Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64`, `linux/arm64`, and `linux/arm/v7`, matching the GitHub Actions workflow.
 
 ```powershell
 cd C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust
+./scripts/build-multiarch.ps1
+docker run --rm ghcr.io/fueledbyredbull/twitch-miner-rust:latest --help
 ./scripts/build-multiarch.ps1 -Push
 ```
+
+GitHub Actions also publishes the GHCR image on pushes to `main` and `v*` tags.
 
 ## Notes
 

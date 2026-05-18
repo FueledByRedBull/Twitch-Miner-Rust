@@ -80,6 +80,11 @@ jobs:
           sbom: false
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 
+      - name: Smoke test image
+        run: |
+          docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --help
+        shell: pwsh
+
       - name: Export digest
         run: |
           New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/digests" -Force | Out-Null

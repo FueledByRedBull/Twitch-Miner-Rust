@@ -68,7 +68,11 @@ The container layout is centered on `/data`:
 - `/data/cookies/<username>.json`
 - `/data/log/*.log`
 
+Published images are static Rust binaries in a `scratch` runtime. The image has no shell, package manager, or OS certificate bundle; TLS trust comes from the Rust dependencies configured in the app. The runtime contract stays centered on `/data` with `TCPM_DATA_DIR=/data`, `TCPM_CONFIG=/data/config.json`, and `SIGTERM` shutdown.
+
 There is also a named-volume variant in [deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml).
+
+GitHub Actions publishes the multi-arch GHCR image on pushes to `main` and `v*` tags. For local Docker validation, `scripts/build-multiarch.ps1` builds and loads a single local-platform image by default; pass `-Push` to build and publish `linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
 
 ## Configuration
 

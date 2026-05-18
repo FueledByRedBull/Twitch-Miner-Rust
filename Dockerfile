@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 FROM rust:1.94-bookworm AS chef
 WORKDIR /workspace
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/tmp/cargo-install-target \
@@ -32,27 +35,38 @@ RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
+ARG TARGETARCH
+ARG TARGETVARIANT
 COPY --from=planner /workspace/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    cargo chef cook --release --recipe-path recipe.json
+    case "${TARGETARCH}:${TARGETVARIANT}" in \
+        "amd64:") rust_target="x86_64-unknown-linux-musl" ;; \
+        "arm64:") rust_target="aarch64-unknown-linux-musl" ;; \
+        "arm:v7") rust_target="armv7-unknown-linux-musleabihf" ;; \
+        *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
+    esac \
+    && rustup target add "${rust_target}" \
+    && cargo chef cook --release --target "${rust_target}" --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    cargo build --locked --release -p tm-app \
-    && install -D /workspace/target/release/tm-app /workspace/bin/twitch-miner
+    case "${TARGETARCH}:${TARGETVARIANT}" in \
+        "amd64:") rust_target="x86_64-unknown-linux-musl" ;; \
+        "arm64:") rust_target="aarch64-unknown-linux-musl" ;; \
+        "arm:v7") rust_target="armv7-unknown-linux-musleabihf" ;; \
+        *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
+    esac \
+    && cargo build --locked --release --target "${rust_target}" -p tm-app \
+    && install -D "/workspace/target/${rust_target}/release/tm-app" /workspace/bin/twitch-miner
 
-FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY --from=build /workspace/bin/twitch-miner /usr/local/bin/twitch-miner
+FROM scratch
+COPY --from=build /workspace/bin/twitch-miner /twitch-miner
 ENV TCPM_DATA_DIR=/data
 ENV TCPM_CONFIG=/data/config.json
 STOPSIGNAL SIGTERM
 VOLUME ["/data"]
-ENTRYPOINT ["/usr/local/bin/twitch-miner"]
+ENTRYPOINT ["/twitch-miner"]
