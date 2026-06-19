@@ -4,4 +4,13 @@
 /.idea/
 /.vscode/
 *.log
+/run.out.log
+/run.err.log
 /data/
+/config.json
+/cookies/
+/log/
+/.env
+/.env.*
+/miner-update-*
+/update-*.bat

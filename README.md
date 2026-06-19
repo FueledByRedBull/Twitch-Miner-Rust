@@ -92,11 +92,17 @@ The miner will create and extend its config automatically, but a minimal manual 
 }
 ```
 
+Notes:
+
+- `password` is a legacy compatibility field and should be left empty.
+- `disable_ssl_cert_verification` is intentionally unsupported and will be rejected at startup/config validation.
+
 Important paths:
 
 - config: `data/config.json`
 - cookies: `data/cookies/<username>.json`
 - optional logs: `data/log/`
+- the repo also ignores local root runtime paths such as `./config.json`, `./cookies/`, `./log/`, `.env*`, and updater temp files
 
 ## Workspace map
 
@@ -144,6 +150,7 @@ cargo clippy --manifest-path tests/integration/Cargo.toml -- -D warnings
 - Do not commit `data/` or cookie files.
 - Cookie files contain authentication material; treat them like credentials.
 - The app uses device-code login and does not need your Twitch password.
+- TLS certificate verification is always enforced; insecure certificate bypass is not supported.
 - Keep `auto_update=false` for manual source builds.
 - The repo ignores runtime data and logs by default.
 - This project is unofficial and not affiliated with Twitch.

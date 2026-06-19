@@ -261,6 +261,11 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
             "config.password is no longer used; remove it from config.json",
         )));
     }
+    if config.disable_ssl_cert_verification {
+        return Err(ConfigError::Validation(String::from(
+            "config.disable_ssl_cert_verification is no longer supported; remove it or set it to false",
+        )));
+    }
     Ok(())
 }
 
@@ -817,6 +822,18 @@ mod tests {
 
         config.username = String::from("Alice");
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_disabling_tls_certificate_verification() {
+        let mut config = ConfigFile::default();
+        config.username = String::from("Alice");
+        config.disable_ssl_cert_verification = true;
+
+        let error = validate_config(&config).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Validation(message) if message.contains("disable_ssl_cert_verification"))
+        );
     }
 
     #[test]

@@ -96,13 +96,12 @@ pub(crate) fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
 
 pub(crate) fn build_http_client(disable_ssl_cert_verification: bool) -> Result<reqwest::Client> {
     if disable_ssl_cert_verification {
-        tracing::warn!(
-            "disable_ssl_cert_verification is enabled; TLS certificate verification is OFF"
-        );
+        return Err(anyhow!(
+            "config.disable_ssl_cert_verification is no longer supported because it disables TLS certificate verification"
+        ));
     }
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .danger_accept_invalid_certs(disable_ssl_cert_verification)
         .build()
         .context("build http client")
 }
@@ -230,4 +229,20 @@ pub(crate) fn log_timezone_validation(validation: Option<&TimezoneValidation>) {
 pub(crate) fn should_fallback_to_user_config(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::PermissionDenied
         || error.raw_os_error() == Some(READ_ONLY_FILE_SYSTEM_ERROR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_http_client;
+
+    #[test]
+    fn build_http_client_rejects_insecure_tls_toggle() {
+        let error = build_http_client(true).unwrap_err();
+        assert!(error.to_string().contains("disable_ssl_cert_verification"));
+    }
+
+    #[test]
+    fn build_http_client_accepts_secure_default() {
+        build_http_client(false).unwrap();
+    }
 }
