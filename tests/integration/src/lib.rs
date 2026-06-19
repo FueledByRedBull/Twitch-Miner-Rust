@@ -6,7 +6,9 @@ use tm_domain::{IrcMode, OffsetDateTime, Stream, Streamer, StreamerSettings, Wat
 use tm_runtime::RuntimeState;
 
 pub fn fixture_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures")
+        .join(name)
 }
 
 pub fn fixture_json(name: &str) -> String {

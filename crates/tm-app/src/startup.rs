@@ -1,6 +1,13 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::env;
+
+use anyhow::{Context, Result};
+use tm_config::ConfigFile;
+use tm_domain::{Game, Streamer};
+use tm_observability::{Event as DiscordEvent, LoggerSettings};
+use tm_twitch::TwitchClient;
+
+use crate::context::{apply_context_to_streamer, contribute_streamer_community_goals};
+use crate::observability::AppObservability;
 
 pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
     LoggerSettings {
@@ -96,7 +103,7 @@ pub(crate) async fn bootstrap_streamer(
         .await
         .with_context(|| format!("load channel id for {}", streamer.username))?;
 
-    let context = twitch
+    let mut context = twitch
         .fetch_channel_points_context(&streamer.username)
         .await
         .with_context(|| format!("load channel points context for {}", streamer.username))?;
@@ -110,18 +117,21 @@ pub(crate) async fn bootstrap_streamer(
         if observability.show_claimed_bonus {
             let message = observability.bonus_claim_message(streamer, true);
             tracing::info!("{message}");
-            observability
-                .send_event(DiscordEvent::BonusClaim, &message)
-                .await;
+            observability.spawn_event(DiscordEvent::BonusClaim, message);
         }
+        context = twitch
+            .fetch_channel_points_context(&streamer.username)
+            .await
+            .with_context(|| format!("refresh claimed bonus context for {}", streamer.username))?;
+        apply_context_to_streamer(streamer, &context);
     }
 
     if contribute_streamer_community_goals(twitch, streamer).await? {
-        let refreshed = twitch
+        context = twitch
             .fetch_channel_points_context(&streamer.username)
             .await
             .with_context(|| format!("refresh channel points context for {}", streamer.username))?;
-        apply_context_to_streamer(streamer, &refreshed);
+        apply_context_to_streamer(streamer, &context);
     }
 
     let is_live = twitch

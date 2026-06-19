@@ -1,6 +1,6 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::process::Command;
+
+use tm_twitch::generate_device_id;
 
 pub(crate) async fn sleep_or_stop(
     stop: &mut tokio::sync::watch::Receiver<bool>,

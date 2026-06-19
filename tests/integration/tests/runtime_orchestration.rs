@@ -1,6 +1,4 @@
-use tm_domain::{
-    CommunityGoal, PredictionDecision, PredictionEvent, PredictionOutcome,
-};
+use tm_domain::{CommunityGoal, PredictionDecision, PredictionEvent, PredictionOutcome};
 use tm_integration_tests::{base_runtime_state, ts};
 use tm_pubsub::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PubSubEvent};
 use tm_runtime::RuntimeEffect;

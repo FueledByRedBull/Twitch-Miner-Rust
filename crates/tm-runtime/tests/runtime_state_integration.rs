@@ -14,6 +14,7 @@ fn ts(unix: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(unix).unwrap()
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn runtime_state_applies_pubsub_sequence_end_to_end() {
     let mut state = RuntimeState {
@@ -159,9 +160,9 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
                         total_users: 10,
                         total_points: 100,
                         top_points: 20,
-                        percentage_users: 66.66666666666667,
+                        percentage_users: 66.666_666_666_666_67,
                         odds: 1.5,
-                        odds_percentage: 66.66666666666667,
+                        odds_percentage: 66.666_666_666_666_67,
                     },
                     PredictionOutcome {
                         id: "b".into(),
@@ -170,9 +171,9 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
                         total_users: 5,
                         total_points: 50,
                         top_points: 10,
-                        percentage_users: 33.333333333333336,
+                        percentage_users: 33.333_333_333_333_336,
                         odds: 3.0,
-                        odds_percentage: 33.333333333333336,
+                        odds_percentage: 33.333_333_333_333_336,
                     },
                 ],
                 decision: PredictionDecision::default(),

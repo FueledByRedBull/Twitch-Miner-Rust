@@ -6,7 +6,6 @@ target
 data
 deploy
 docs
-tests
 scripts
 **/.DS_Store
 run.out.log

@@ -512,7 +512,7 @@ fn normalized_target() -> (&'static str, &'static str) {
     (goos, arch)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 

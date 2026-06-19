@@ -317,7 +317,10 @@ impl CommunityGoal {
     pub fn is_active(&self) -> bool {
         !self.id.trim().is_empty()
             && self.is_in_stock
-            && self.status.trim().eq_ignore_ascii_case("STARTED")
+            && matches!(
+                self.status.trim().to_ascii_uppercase().as_str(),
+                "ACTIVE" | "STARTED"
+            )
     }
 }
 
@@ -386,6 +389,10 @@ mod tests {
 
     use super::*;
 
+    fn assert_f64_eq(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn bet_defaults_match_go() {
         let bet = BetSettings::default();
@@ -418,7 +425,7 @@ mod tests {
             ..Streamer::default()
         };
         assert!(streamer.has_active_multipliers());
-        assert_eq!(streamer.total_multiplier(), 3.5);
+        assert_f64_eq(streamer.total_multiplier(), 3.5);
     }
 
     #[test]
@@ -476,14 +483,14 @@ mod tests {
         let mut streamer = Streamer::default();
         streamer.settings.bet.delay = Some(2.0);
         streamer.settings.bet.delay_mode = DelayMode::FromStart;
-        assert_eq!(streamer.prediction_window_seconds(5.0), 2.0);
+        assert_f64_eq(streamer.prediction_window_seconds(5.0), 2.0);
 
         streamer.settings.bet.delay_mode = DelayMode::FromEnd;
-        assert_eq!(streamer.prediction_window_seconds(5.0), 3.0);
+        assert_f64_eq(streamer.prediction_window_seconds(5.0), 3.0);
 
         streamer.settings.bet.delay_mode = DelayMode::Percentage;
         streamer.settings.bet.delay = Some(0.5);
-        assert_eq!(streamer.prediction_window_seconds(10.0), 5.0);
+        assert_f64_eq(streamer.prediction_window_seconds(10.0), 5.0);
     }
 
     #[test]
@@ -512,12 +519,14 @@ mod tests {
     #[test]
     fn stream_watch_progress_and_game_name() {
         let now = datetime!(2026-03-27 06:00 UTC);
-        let mut stream = Stream::default();
-        stream.last_minute_update = Some(now - time::Duration::minutes(2));
+        let mut stream = Stream {
+            last_minute_update: Some(now - time::Duration::minutes(2)),
+            ..Stream::default()
+        };
         stream.update_minute_watched(now);
         assert!(stream.minute_watched > 1.9 && stream.minute_watched < 2.1);
         stream.reset_watch_progress();
-        assert_eq!(stream.minute_watched, 0.0);
+        assert_f64_eq(stream.minute_watched, 0.0);
         assert!(stream.last_minute_update.is_none());
 
         assert_eq!(stream.game_name(), "");

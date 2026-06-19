@@ -1,28 +1,45 @@
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use crate::*;
+    use std::collections::HashMap;
+    use std::env;
     use std::fs;
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant as StdInstant};
 
+    use crate::Cli;
     use crate::bootstrap::{
-        env_has_value, load_config_with_fallback_using, load_or_login_session_with_auth_client,
-        should_fallback_to_user_config, TimezoneValidation, READ_ONLY_FILE_SYSTEM_ERROR,
+        env_has_value, has_override, load_config_with_fallback_using,
+        load_or_login_session_with_auth_client, normalized_username,
+        should_fallback_to_user_config, validate_timezone_override, TimezoneValidation,
+        READ_ONLY_FILE_SYSTEM_ERROR,
     };
-    use crate::observability::format_resume_gap;
+    use crate::context::{refresh_snapshot_streamers, spawn_pending_claim_loop};
+    use crate::drops::{claim_available_drops, drop_is_claimable};
+    use crate::minute_watcher::{
+        refresh_watch_selection_metadata, resolve_spade_url, send_minute_watched_for_streamer,
+        send_minute_watched_with_spade_cache,
+    };
+    use crate::observability::{format_resume_gap, streamer_game_name, AppObservability};
+    use crate::prediction::prediction_wait_duration;
+    use crate::pubsub::pubsub_reconnect_delay;
+    use crate::startup::{bootstrap_runtime_state, load_targets};
+    use crate::utilities::new_session_id;
+    use crate::watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry};
     use tm_auth::{AuthEndpoints, TwitchAuthClient};
-    use tm_config::{AppPaths, ConfigError};
+    use tm_config::{AppPaths, ConfigError, ConfigFile};
     use tm_domain::{
-        BetSettings, DelayMode, OffsetDateTime, PredictionDecision, PredictionEvent,
-        PredictionOutcome,
+        BetSettings, DelayMode, Game, OffsetDateTime, PredictionDecision, PredictionEvent,
+        PredictionOutcome, Streamer,
     };
-    use tm_twitch::TwitchEndpoints;
+    use tm_observability::DiscordClient;
+    use tm_twitch::{InventoryDrop, TwitchClient, TwitchEndpoints};
+    use reqwest::StatusCode;
 
     fn ts(seconds: i64) -> tm_runtime::RuntimeTime {
         OffsetDateTime::from_unix_timestamp(seconds).unwrap()
@@ -131,7 +148,7 @@ mod tests {
                         r#"{"status":400,"message":"authorization_pending"}"#,
                     ),
                     2 => http_response("200 OK", r#"{"access_token":"token-123"}"#),
-                    3 => http_response("200 OK", r#"{"data":{"user":{"id":"user-123"}}}"#),
+                    3 => http_response("200 OK", r#"{"login":"tester","user_id":"user-123"}"#),
                     _ => unreachable!(),
                 };
                 stream.write_all(&response).unwrap();
@@ -143,7 +160,7 @@ mod tests {
             AuthEndpoints {
                 device_code_url: format!("http://{address}/oauth2/device"),
                 token_url: format!("http://{address}/oauth2/token"),
-                gql_url: format!("http://{address}/gql"),
+                validate_url: format!("http://{address}/oauth2/validate"),
             },
             handle,
         )
@@ -707,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_runtime_state_claims_startup_bonus_in_manual_mode() {
-        let (endpoints, requests, server) = spawn_twitch_server(6);
+        let (endpoints, requests, server) = spawn_twitch_server(7);
         let twitch = TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -763,7 +780,7 @@ mod tests {
         assert_eq!(session.auth_token(), Some("token-123"));
         assert_eq!(session.user_id(), Some("user-123"));
 
-        let (twitch_endpoints, requests, twitch_server) = spawn_twitch_server(6);
+        let (twitch_endpoints, requests, twitch_server) = spawn_twitch_server(7);
         let twitch = TwitchClient::with_client_and_cookie_header_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -803,7 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_snapshot_streamers_updates_runtime_context() {
-        let (endpoints, requests, server) = spawn_twitch_server(3);
+        let (endpoints, requests, server) = spawn_twitch_server(4);
         let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -841,7 +858,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_claim_loop_runs_immediate_sweep_and_stops_promptly() {
+    async fn pending_claim_loop_waits_for_interval_before_refreshing() {
         let (endpoints, requests, server) = spawn_json_response_server(vec![
             fixture_json("twitch.channel_points_context.json"),
             serde_json::json!({
@@ -883,16 +900,8 @@ mod tests {
             test_observability(),
         );
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if runtime.state_snapshot().await.unwrap().streamers[0].channel_points == 1234 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(runtime.state_snapshot().await.unwrap().streamers[0].channel_points, 0);
 
         stop_tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -902,13 +911,11 @@ mod tests {
 
         server.join().unwrap();
         let requests = requests.lock().unwrap();
-        assert!(requests
-            .iter()
-            .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+        assert!(requests.is_empty());
     }
 
     #[tokio::test]
-    async fn pending_claim_loop_skips_bonus_claim_when_none_is_available() {
+    async fn pending_claim_loop_stays_idle_without_immediate_bonus_sweep() {
         let (endpoints, requests, server) = spawn_json_response_server(vec![serde_json::json!({
             "data": {
                 "community": {
@@ -958,16 +965,8 @@ mod tests {
             test_observability(),
         );
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if runtime.state_snapshot().await.unwrap().streamers[0].channel_points == 1234 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(runtime.state_snapshot().await.unwrap().streamers[0].channel_points, 0);
 
         stop_tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -977,11 +976,10 @@ mod tests {
 
         server.join().unwrap();
         let requests = requests.lock().unwrap();
-        assert!(!requests
-            .iter()
-            .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+        assert!(requests.is_empty());
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn refresh_watch_selection_metadata_updates_candidate_choice() {
         let (endpoints, requests, server) =

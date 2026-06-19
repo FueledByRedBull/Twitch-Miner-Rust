@@ -5,7 +5,7 @@ use tm_domain::{OffsetDateTime, PredictionDecision, PredictionEvent, PredictionO
 pub(crate) fn parse_prediction_event(
     streamer: &Streamer,
     raw_event: &Value,
-    apply_streamer_delay: bool,
+    _apply_streamer_delay: bool,
 ) -> PredictionEvent {
     let created_at = raw_event
         .get("created_at")
@@ -16,11 +16,6 @@ pub(crate) fn parse_prediction_event(
         .get("prediction_window_seconds")
         .and_then(Value::as_f64)
         .unwrap_or_default();
-    let window_seconds = if apply_streamer_delay {
-        streamer.prediction_window_seconds(raw_window)
-    } else {
-        raw_window
-    };
     let outcomes = raw_event
         .get("outcomes")
         .and_then(Value::as_array)
@@ -47,7 +42,7 @@ pub(crate) fn parse_prediction_event(
             .unwrap_or_default()
             .to_uppercase(),
         created_at,
-        window_seconds,
+        window_seconds: raw_window,
         outcomes,
         decision: PredictionDecision::default(),
         bet_placed: false,

@@ -1,27 +1,14 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
 
-use std::collections::HashMap;
-use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use clap::Parser;
-use reqwest::StatusCode;
-use serde_json::json;
-use tm_config::{resolve_app_paths_from_env, ConfigFile};
-use tm_domain::{Game, PredictionDecision, Streamer};
-use tm_irc::ChatClient;
-use tm_observability::{
-    build_discord_request, event_from_bet_result, event_from_gain_reason, init_tracing,
-    DiscordClient, Event as DiscordEvent, LoggerSettings, TracingInitOptions,
-};
-use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
-use tm_twitch::{generate_device_id, InventoryDrop, TwitchClient};
+use tm_config::resolve_app_paths_from_env;
+use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
+use tm_twitch::TwitchClient;
 
 mod bootstrap;
 mod chat;
@@ -41,28 +28,15 @@ mod watching;
 
 use bootstrap::{
     build_http_client, has_override, load_config_with_fallback, load_or_login_session,
-    log_timezone_validation, normalized_username, prepare_work_dir, validate_timezone_override,
-    LoadedConfig, DEFAULT_USER_AGENT,
+    log_timezone_validation, prepare_work_dir, validate_timezone_override, LoadedConfig,
+    DEFAULT_USER_AGENT,
 };
-use effects::runtime_streamer_by_channel_id;
-use observability::{
-    build_observability, log_session_summary, log_startup, streamer_game_name, AppObservability,
-    TracingChatLogger,
-};
-use prediction::prediction_wait_duration;
-use tasks::{BackgroundTaskParams, BackgroundTasks};
-use watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction};
-
-pub(crate) use chat::*;
-pub(crate) use context::*;
-pub(crate) use drops::*;
-pub(crate) use minute_watcher::*;
-pub(crate) use pubsub::*;
-pub(crate) use runtime_effects::*;
-pub(crate) use shutdown::*;
-pub(crate) use startup::*;
-pub(crate) use tasks::spawn_background_tasks;
-pub(crate) use utilities::*;
+use drops::claim_startup_drops_if_enabled;
+use observability::{build_observability, log_session_summary, log_startup};
+use shutdown::{shutdown_background_tasks, wait_for_shutdown_signal};
+use startup::{bootstrap_runtime_state, build_logger_settings, run_auto_update_if_enabled};
+use tasks::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
+use utilities::{clear_console, new_session_id, set_console_title, time_now};
 
 const DEFAULT_CONSOLE_TITLE: &str = "Klaro's Twitch Miner";
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
@@ -179,13 +153,8 @@ async fn main() -> Result<()> {
     let summary = runtime
         .shutdown(config.privacy.anonymize_logs, time_now())
         .await?;
-    send_discord_event(
-        observability.discord.as_ref(),
-        &observability.discord_client,
-        DiscordEvent::Shutdown,
-        &format!("Ending session: '{session_id}'"),
-    )
-    .await;
+    observability.spawn_event(DiscordEvent::Shutdown, format!("Ending session: '{session_id}'"));
+    observability.shutdown_pending_tasks().await;
     log_session_summary(&summary);
     Ok(())
 }

@@ -207,6 +207,12 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     }
 
     changed |= fill_missing_top_level(&mut value, &default_config_value());
+    validate_object_section(&value, "privacy")?;
+    validate_object_section(&value, "discord")?;
+    validate_object_section(&value, "bet")?;
+    validate_object_section(&value, "streamer_overrides")?;
+    validate_nested_object(&value, "bet", "filter_condition")?;
+    validate_streamer_override_shapes(&value)?;
     let privacy_defaults = privacy_defaults();
     let discord_defaults = discord_defaults();
     let bet_defaults = bet_defaults();
@@ -248,6 +254,11 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
     if username.is_empty() || username == "your-twitch-username" {
         return Err(ConfigError::Validation(String::from(
             "config.username must be set to a Twitch username",
+        )));
+    }
+    if !config.password.trim().is_empty() {
+        return Err(ConfigError::Validation(String::from(
+            "config.password is no longer used; remove it from config.json",
         )));
     }
     Ok(())
@@ -544,6 +555,74 @@ fn fill_missing_top_level(value: &mut Value, defaults: &Value) -> bool {
         }
     }
     changed
+}
+
+fn validate_object_section(value: &Value, key: &str) -> Result<(), ConfigError> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+    if root.get(key).is_some_and(|section| !section.is_object()) {
+        return Err(ConfigError::Validation(format!(
+            "config.{key} must be a JSON object"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_nested_object(value: &Value, parent: &str, key: &str) -> Result<(), ConfigError> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+    let Some(parent_value) = root.get(parent).and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if parent_value
+        .get(key)
+        .is_some_and(|nested_value| !nested_value.is_object())
+    {
+        return Err(ConfigError::Validation(format!(
+            "config.{parent}.{key} must be a JSON object"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_streamer_override_shapes(value: &Value) -> Result<(), ConfigError> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+    let Some(overrides) = root.get("streamer_overrides").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (login, override_value) in overrides {
+        if !override_value.is_object() {
+            return Err(ConfigError::Validation(format!(
+                "config.streamer_overrides.{login} must be a JSON object"
+            )));
+        }
+        let Some(override_object) = override_value.as_object() else {
+            continue;
+        };
+        if override_object
+            .get("bet")
+            .is_some_and(|bet_value| !bet_value.is_object())
+        {
+            return Err(ConfigError::Validation(format!(
+                "config.streamer_overrides.{login}.bet must be a JSON object"
+            )));
+        }
+        if let Some(bet) = override_object.get("bet").and_then(Value::as_object) {
+            if bet
+                .get("filter_condition")
+                .is_some_and(|filter| !filter.is_object())
+            {
+                return Err(ConfigError::Validation(format!(
+                    "config.streamer_overrides.{login}.bet.filter_condition must be a JSON object"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ensure_object_section(value: &mut Value, key: &str) -> bool {

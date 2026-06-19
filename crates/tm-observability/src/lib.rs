@@ -386,10 +386,14 @@ pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityErr
             .timezone
             .as_deref()
             .and_then(|value| value.parse().ok()),
+        console_username: (options.settings.console_username && !options.settings.anonymize_logs)
+            .then(|| options.username.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        include_fields: !options.settings.anonymize_logs,
     };
     let console_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
-        .event_format(event_format)
+        .event_format(event_format.clone())
         .with_filter(filter.clone());
 
     let registry = tracing_subscriber::registry().with(console_layer);
@@ -426,10 +430,12 @@ pub fn open_log_file(
     OpenOptions::new().create(true).append(true).open(path)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct GoStyleEventFormat {
     show_seconds: bool,
     timezone: Option<Tz>,
+    console_username: Option<String>,
+    include_fields: bool,
 }
 
 impl<S, N> FormatEvent<S, N> for GoStyleEventFormat
@@ -443,32 +449,47 @@ where
         mut writer: Writer<'_>,
         event: &TraceEvent<'_>,
     ) -> fmt::Result {
-        let mut visitor = MessageOnlyVisitor::default();
+        let mut visitor = MessageOnlyVisitor::new(self.include_fields);
         event.record(&mut visitor);
         let body = visitor.render();
+        let username_prefix = self
+            .console_username
+            .as_deref()
+            .map_or(String::new(), |username| format!(" [{username}]"));
         writeln!(
             writer,
-            "[{}] {}: {}",
+            "[{}] {}{}: {}",
             format_level(*event.metadata().level()),
             current_log_timestamp(self.show_seconds, self.timezone),
+            username_prefix,
             body
         )
     }
 }
 
-#[derive(Default)]
 struct MessageOnlyVisitor {
     message: Option<String>,
     fields: Vec<String>,
+    include_fields: bool,
 }
 
 impl MessageOnlyVisitor {
+    fn new(include_fields: bool) -> Self {
+        Self {
+            message: None,
+            fields: Vec::new(),
+            include_fields,
+        }
+    }
+
     fn record_value(&mut self, field: &Field, value: &str) {
         if field.name() == "message" {
             self.message = Some(trim_matching_quotes(value));
             return;
         }
-        self.fields.push(format!("{}={}", field.name(), value));
+        if self.include_fields {
+            self.fields.push(format!("{}={}", field.name(), value));
+        }
     }
 
     fn render(self) -> String {

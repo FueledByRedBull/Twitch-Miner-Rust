@@ -404,6 +404,10 @@ mod tests {
     use super::*;
     use crate::types::{Stream, StreamerSettings};
 
+    fn assert_f64_eq(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn parse_watch_priorities_matches_go() {
         assert_eq!(parse_watch_priorities(&[]), default_watch_priorities());
@@ -455,10 +459,10 @@ mod tests {
     #[test]
     fn streak_priority_limit_matches_go() {
         let now = datetime!(2026-03-27 06:00 UTC);
-        assert_eq!(streak_priority_limit(None, now), 7.0);
-        assert_eq!(
+        assert_f64_eq(streak_priority_limit(None, now), 7.0);
+        assert_f64_eq(
             streak_priority_limit(Some(now - time::Duration::hours(11)), now),
-            20.0
+            20.0,
         );
     }
 

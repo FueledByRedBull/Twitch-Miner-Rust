@@ -16,6 +16,7 @@ pub(crate) struct AppObservability {
     pub(crate) discord: Option<tm_observability::DiscordWebhook>,
     pub(crate) discord_client: DiscordClient,
     anonymizer: Arc<Mutex<Anonymizer>>,
+    pending_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     pub(crate) emoji: bool,
     pub(crate) show_claimed_bonus: bool,
     show_game: bool,
@@ -35,6 +36,7 @@ impl AppObservability {
             discord,
             discord_client,
             anonymizer: Arc::new(Mutex::new(Anonymizer::new(anonymize_logs))),
+            pending_tasks: Arc::new(Mutex::new(Vec::new())),
             emoji,
             show_claimed_bonus,
             show_game,
@@ -214,9 +216,38 @@ impl AppObservability {
 
     pub(crate) fn spawn_event(&self, event: DiscordEvent, message: String) {
         let this = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             this.send_event(event, &message).await;
         });
+        match self.pending_tasks.lock() {
+            Ok(mut pending) => pending.push(task),
+            Err(poisoned) => {
+                tracing::warn!("observability task list lock poisoned");
+                poisoned.into_inner().push(task);
+            }
+        }
+    }
+
+    pub(crate) async fn shutdown_pending_tasks(&self) {
+        let tasks = match self.pending_tasks.lock() {
+            Ok(mut pending) => std::mem::take(&mut *pending),
+            Err(poisoned) => {
+                tracing::warn!("observability task list lock poisoned");
+                let mut pending = poisoned.into_inner();
+                std::mem::take(&mut *pending)
+            }
+        };
+        for task in tasks {
+            match tokio::time::timeout(Duration::from_secs(5), task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "observability task failed while stopping");
+                }
+                Err(_) => {
+                    tracing::warn!("observability task exceeded grace period");
+                }
+            }
+        }
     }
 }
 
@@ -251,16 +282,13 @@ pub(crate) async fn log_startup(
         follower_mode = summary.follower_mode,
         "bootstrap complete"
     );
-    send_discord_event(
-        observability.discord.as_ref(),
-        &observability.discord_client,
+    observability.spawn_event(
         DiscordEvent::Startup,
-        &format!(
+        format!(
             "Start session: '{}' | configured_streamers={} follower_mode={}",
             session_id, summary.configured_streamers, summary.follower_mode
         ),
-    )
-    .await;
+    );
     if active_paths.config_path != requested_paths.config_path {
         tracing::info!(
             requested_config_path = %requested_paths.config_path.display(),

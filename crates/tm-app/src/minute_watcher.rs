@@ -1,6 +1,20 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant as StdInstant;
+
+use anyhow::{anyhow, Context, Result};
+use reqwest::StatusCode;
+use serde_json::json;
+use tm_domain::{Game, Streamer};
+use tm_observability::Event as DiscordEvent;
+use tm_twitch::TwitchClient;
+
+use crate::observability::{streamer_game_name, AppObservability};
+use crate::utilities::{sleep_or_stop, time_now};
+use crate::watching::{
+    minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction,
+};
+use crate::{MINUTE_WATCHER_REQUEST_TIMEOUT, SPADE_URL_TTL, WATCH_SELECTION_REFRESH_CONCURRENCY};
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_minute_watcher_loop(

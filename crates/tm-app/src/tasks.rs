@@ -1,13 +1,16 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
-
 use std::sync::Arc;
 
+use anyhow::Result;
 use tm_domain::Streamer;
 use tm_twitch::TwitchClient;
 
-use crate::AppObservability;
+use crate::bootstrap::normalized_username;
+use crate::chat::spawn_chat_manager_loop;
+use crate::context::{spawn_context_refresh_loop, spawn_pending_claim_loop};
+use crate::drops::spawn_drop_claim_loop;
+use crate::minute_watcher::spawn_minute_watcher_loop;
+use crate::observability::AppObservability;
+use crate::pubsub::spawn_pubsub_loop;
 
 pub(crate) struct BackgroundTasks {
     pub(crate) pubsub: Option<tokio::task::JoinHandle<()>>,

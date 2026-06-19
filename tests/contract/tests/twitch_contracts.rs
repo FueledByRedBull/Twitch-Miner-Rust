@@ -65,15 +65,17 @@ fn fixture_backed_contracts_cover_homepage_settings_and_core_gql_shapes() {
         "https://spade.example/submit"
     );
 
-    let context_payload =
-        serde_json::from_slice(&fs::read(fixture_path("twitch.channel_points_context.json")).unwrap())
-            .unwrap();
+    let context_payload = serde_json::from_slice(
+        &fs::read(fixture_path("twitch.channel_points_context.json")).unwrap(),
+    )
+    .unwrap();
     let context = parse_channel_points_context(&context_payload).unwrap();
     assert_eq!(context.balance, 1234);
     assert_eq!(context.claim_id.as_deref(), Some("claim-1"));
 
     let stream_payload =
-        serde_json::from_slice(&fs::read(fixture_path("twitch.stream_info.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(fixture_path("twitch.stream_info.json")).unwrap())
+            .unwrap();
     let stream_info = parse_stream_info(&stream_payload).unwrap();
     assert_eq!(stream_info.id, "stream-1");
     assert_eq!(stream_info.game_name, "Game Name");

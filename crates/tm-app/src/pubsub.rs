@@ -1,6 +1,15 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use tm_domain::Streamer;
+use tm_observability::{event_from_gain_reason, Event as DiscordEvent};
+use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
+use tm_twitch::TwitchClient;
+
+use crate::observability::AppObservability;
+use crate::runtime_effects::execute_runtime_effects;
+use crate::utilities::time_now;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_pubsub_loop(
@@ -15,7 +24,8 @@ pub(crate) fn spawn_pubsub_loop(
     observability: AppObservability,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+        let (sender, receiver) = tokio::sync::mpsc::channel(128);
+        let (effect_sender, effect_receiver) = tokio::sync::mpsc::channel(128);
         let topic_batches = match build_topic_batches(&user_id, &tracked_streamers) {
             Ok(batches) => batches,
             Err(error) => {
@@ -23,65 +33,20 @@ pub(crate) fn spawn_pubsub_loop(
                 return;
             }
         };
-        let mut event_stop = stop.clone();
-        let event_runtime = runtime.clone();
-        let event_twitch = Arc::clone(&twitch);
-        let event_observability = observability.clone();
-        let event_task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    changed = event_stop.changed() => {
-                        if changed.is_err() || *event_stop.borrow() {
-                            break;
-                        }
-                    }
-                    message = receiver.recv() => {
-                        let Some(message) = message else {
-                            break;
-                        };
-                        match message {
-                            PubSubConnectionEvent::Event(event) => {
-                                let log_event = (*event).clone();
-                                match event_runtime.apply_pubsub_event(*event, time_now()).await {
-                                    Ok(effects) => {
-                                        if let Err(error) = log_pubsub_event(
-                                            &event_runtime,
-                                            &event_observability,
-                                            &log_event,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(%error, "pubsub log handling failed");
-                                        }
-                                        if let Err(error) = execute_runtime_effects(
-                                            &event_runtime,
-                                            &event_twitch,
-                                            &persistent_user_id,
-                                            effects,
-                                            &event_observability,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(%error, "runtime effect execution failed");
-                                        }
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(%error, "pubsub event application failed");
-                                    }
-                                }
-                            }
-                            PubSubConnectionEvent::ResponseError { error, nonce } => {
-                                let message = nonce.map_or_else(
-                                    || format!("PubSub response error: {error}"),
-                                    |nonce| format!("PubSub response error: {error} (nonce {nonce})"),
-                                );
-                                tracing::warn!("{message}");
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        let effect_task = spawn_pubsub_effect_task(
+            runtime.clone(),
+            Arc::clone(&twitch),
+            persistent_user_id.clone(),
+            observability.clone(),
+            effect_receiver,
+        );
+        let event_task = spawn_pubsub_event_task(
+            stop.clone(),
+            runtime.clone(),
+            observability.clone(),
+            receiver,
+            effect_sender.clone(),
+        );
 
         let mut connections = Vec::with_capacity(topic_batches.len());
         for (index, topics) in topic_batches.into_iter().enumerate() {
@@ -101,8 +66,97 @@ pub(crate) fn spawn_pubsub_loop(
         }
 
         drop(sender);
+        drop(effect_sender);
         let _ = event_task.await;
+        let _ = effect_task.await;
     })
+}
+
+fn spawn_pubsub_effect_task(
+    runtime: tm_runtime::RuntimeHandle,
+    twitch: Arc<TwitchClient>,
+    persistent_user_id: String,
+    observability: AppObservability,
+    mut receiver: tokio::sync::mpsc::Receiver<Vec<tm_runtime::RuntimeEffect>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(effects) = receiver.recv().await {
+            if let Err(error) = execute_runtime_effects(
+                &runtime,
+                &twitch,
+                &persistent_user_id,
+                effects,
+                &observability,
+            )
+            .await
+            {
+                tracing::warn!(%error, "runtime effect execution failed");
+            }
+        }
+    })
+}
+
+fn spawn_pubsub_event_task(
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    runtime: tm_runtime::RuntimeHandle,
+    observability: AppObservability,
+    mut receiver: tokio::sync::mpsc::Receiver<PubSubConnectionEvent>,
+    effect_sender: tokio::sync::mpsc::Sender<Vec<tm_runtime::RuntimeEffect>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        break;
+                    }
+                }
+                message = receiver.recv() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    if handle_pubsub_message(&runtime, &observability, &effect_sender, message).await {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn handle_pubsub_message(
+    runtime: &tm_runtime::RuntimeHandle,
+    observability: &AppObservability,
+    effect_sender: &tokio::sync::mpsc::Sender<Vec<tm_runtime::RuntimeEffect>>,
+    message: PubSubConnectionEvent,
+) -> bool {
+    match message {
+        PubSubConnectionEvent::Event(event) => {
+            let log_event = (*event).clone();
+            match runtime.apply_pubsub_event(*event, time_now()).await {
+                Ok(effects) => {
+                    if let Err(error) = log_pubsub_event(runtime, observability, &log_event).await {
+                        tracing::warn!(%error, "pubsub log handling failed");
+                    }
+                    if effect_sender.send(effects).await.is_err() {
+                        tracing::warn!("pubsub runtime effect queue closed unexpectedly");
+                        return true;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "pubsub event application failed");
+                }
+            }
+        }
+        PubSubConnectionEvent::ResponseError { error, nonce } => {
+            let message = nonce.map_or_else(
+                || format!("PubSub response error: {error}"),
+                |nonce| format!("PubSub response error: {error} (nonce {nonce})"),
+            );
+            tracing::warn!("{message}");
+        }
+    }
+    false
 }
 
 pub(crate) fn spawn_pubsub_connection_loop(

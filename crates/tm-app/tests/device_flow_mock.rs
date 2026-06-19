@@ -90,7 +90,7 @@ fn spawn_login_flow_server() -> (String, thread::JoinHandle<Vec<String>>) {
                     r#"{"status":400,"message":"authorization_pending"}"#,
                 ),
                 2 => http_response("200 OK", r#"{"access_token":"token-123"}"#),
-                3 => http_response("200 OK", r#"{"data":{"user":{"id":"user-123"}}}"#),
+                3 => http_response("200 OK", r#"{"login":"tester","user_id":"user-123"}"#),
                 _ => unreachable!(),
             };
             stream.write_all(&response).unwrap();
@@ -114,7 +114,7 @@ async fn mocked_device_flow_login_saves_session_and_uses_overridden_endpoints() 
         AuthEndpoints {
             device_code_url: format!("{base_url}/oauth2/device"),
             token_url: format!("{base_url}/oauth2/token"),
-            gql_url: format!("{base_url}/gql"),
+            validate_url: format!("{base_url}/oauth2/validate"),
         },
     );
 
@@ -136,8 +136,10 @@ async fn mocked_device_flow_login_saves_session_and_uses_overridden_endpoints() 
     assert!(requests[0].starts_with("POST /oauth2/device "));
     assert!(requests[1].starts_with("POST /oauth2/token "));
     assert!(requests[2].starts_with("POST /oauth2/token "));
-    assert!(requests[3].starts_with("POST /gql "));
-    assert!(requests[3].contains(r#""operationName":"GetIDFromLogin""#));
+    assert!(requests[3].starts_with("GET /oauth2/validate "));
+    assert!(requests[3]
+        .to_ascii_lowercase()
+        .contains("authorization: oauth token-123"));
 
     fs::remove_dir_all(&temp_dir).unwrap();
 }

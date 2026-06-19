@@ -48,26 +48,31 @@ fn full_config_fixture_deserializes_parity_fields() {
     assert_eq!(config.streamers_exclude, vec!["eve"]);
     assert_eq!(config.game_priority, vec!["valorant"]);
     assert_eq!(config.discord.webhook_api, "");
-    assert_eq!(config.privacy.anonymize_logs, false);
+    assert!(!config.privacy.anonymize_logs);
     assert!(config.streamer_overrides.contains_key("alice"));
 }
 
 #[test]
-fn invalid_nested_fixture_is_normalized() {
+fn invalid_nested_fixture_is_rejected_without_normalizing() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("config.json");
     fs::copy(fixture_path("config.invalid_nested.json"), &target).unwrap();
 
-    let _ = load_or_create_config(&target).unwrap();
+    let error = load_or_create_config(&target).unwrap_err();
+    assert!(matches!(
+        error,
+        tm_config::ConfigError::Validation(message)
+        if message == "config.privacy must be a JSON object"
+    ));
     let written: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
-    assert!(written["privacy"].is_object());
-    assert!(written["discord"].is_object());
-    assert!(written["bet"].is_object());
-    assert!(written["bet"]["filter_condition"].is_object());
+    assert!(written["privacy"].is_array());
+    assert!(written["discord"].is_boolean());
+    assert!(written["bet"].is_string());
+    assert!(written["bet"].get("filter_condition").is_none());
 }
 
 #[test]
-fn streamer_override_nested_sections_are_completed_on_write_back() {
+fn streamer_override_invalid_shapes_are_rejected_without_write_back() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("config.json");
     fs::write(
@@ -85,12 +90,16 @@ fn streamer_override_nested_sections_are_completed_on_write_back() {
     )
     .unwrap();
 
-    let _ = load_or_create_config(&target).unwrap();
+    let error = load_or_create_config(&target).unwrap_err();
+    assert!(matches!(
+        error,
+        tm_config::ConfigError::Validation(message)
+        if message == "config.streamer_overrides.bob must be a JSON object"
+    ));
     let written: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
-    assert!(written["streamer_overrides"]["alice"]["bet"]["filter_condition"].is_object());
-    assert!(written["streamer_overrides"]["alice"]["claim_moments"].is_null());
-    assert!(written["streamer_overrides"]["bob"].is_object());
-    assert!(written["streamer_overrides"]["bob"]["bet"].is_object());
+    assert!(written["streamer_overrides"]["alice"]["bet"]["filter_condition"].is_null());
+    assert!(written["streamer_overrides"]["alice"].get("claim_moments").is_none());
+    assert!(written["streamer_overrides"]["bob"].is_string());
 }
 
 #[test]

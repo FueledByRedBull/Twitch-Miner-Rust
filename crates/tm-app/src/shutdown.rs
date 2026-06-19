@@ -1,30 +1,28 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use anyhow::Result;
+
+use crate::{BackgroundTasks, SHUTDOWN_TASK_GRACE_PERIOD};
 
 pub(crate) async fn shutdown_background_tasks(
     stop_tx: tokio::sync::watch::Sender<bool>,
     tasks: BackgroundTasks,
 ) {
     let _ = stop_tx.send(true);
-    if let Some(task) = tasks.pubsub {
-        await_shutdown_task("pubsub", task).await;
+    let mut waits = tokio::task::JoinSet::new();
+    for (name, task) in [
+        ("pubsub", tasks.pubsub),
+        ("context", tasks.context),
+        ("pending-claims", tasks.pending_claims),
+        ("minute", tasks.minute),
+        ("drop", tasks.drop),
+        ("chat", tasks.chat),
+    ] {
+        if let Some(task) = task {
+            waits.spawn(async move {
+                await_shutdown_task(name, task).await;
+            });
+        }
     }
-    if let Some(task) = tasks.context {
-        await_shutdown_task("context", task).await;
-    }
-    if let Some(task) = tasks.pending_claims {
-        await_shutdown_task("pending-claims", task).await;
-    }
-    if let Some(task) = tasks.minute {
-        await_shutdown_task("minute", task).await;
-    }
-    if let Some(task) = tasks.drop {
-        await_shutdown_task("drop", task).await;
-    }
-    if let Some(task) = tasks.chat {
-        await_shutdown_task("chat", task).await;
-    }
+    while waits.join_next().await.is_some() {}
 }
 
 pub(crate) async fn await_shutdown_task(name: &str, mut task: tokio::task::JoinHandle<()>) {

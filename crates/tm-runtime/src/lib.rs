@@ -61,6 +61,10 @@ mod tests {
     };
     use tm_pubsub::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PubSubEvent};
 
+    fn assert_f64_eq(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
     fn ts(unix: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(unix).unwrap()
     }
@@ -258,9 +262,9 @@ mod tests {
         assert!(state.desired_chat_logins().is_empty());
         assert!(!state.streamers[0].is_online);
         assert_eq!(state.streamers[0].offline_at, Some(ts(200)));
-        assert_eq!(
+        assert_f64_eq(
             state.streamers[0].stream.as_ref().unwrap().minute_watched,
-            0.0
+            0.0,
         );
     }
 
@@ -341,7 +345,7 @@ mod tests {
 
         let stream = state.streamers[0].stream.as_ref().unwrap();
         assert_eq!(stream.broadcast_id, "new-broadcast");
-        assert_eq!(stream.minute_watched, 0.0);
+        assert_f64_eq(stream.minute_watched, 0.0);
         assert!(stream.last_minute_update.is_none());
         assert!(stream.watch_streak_missing);
         assert_eq!(stream.stream_up_at, Some(ts(120)));
@@ -393,6 +397,7 @@ mod tests {
         assert!(state.streamers[0].community_goals.contains_key("goal-1"));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn raid_moment_goal_and_prediction_events_emit_effects() {
         let mut state = RuntimeState {
@@ -502,9 +507,9 @@ mod tests {
                             total_users: 10,
                             total_points: 100,
                             top_points: 20,
-                            percentage_users: 66.66666666666667,
+                            percentage_users: 66.666_666_666_666_67,
                             odds: 1.5,
-                            odds_percentage: 66.66666666666667,
+                            odds_percentage: 66.666_666_666_666_67,
                         },
                         PredictionOutcome {
                             id: "b".into(),
@@ -513,9 +518,9 @@ mod tests {
                             total_users: 5,
                             total_points: 50,
                             top_points: 10,
-                            percentage_users: 33.333333333333336,
+                            percentage_users: 33.333_333_333_333_336,
                             odds: 3.0,
-                            odds_percentage: 33.333333333333336,
+                            odds_percentage: 33.333_333_333_333_336,
                         },
                     ],
                     decision: PredictionDecision::default(),

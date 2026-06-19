@@ -8,12 +8,13 @@ use tm_pubsub::{
 use tm_twitch::{
     extract_build_id, extract_settings_script_url, extract_spade_url,
     parse_available_drop_campaign_ids, parse_channel_points_context, parse_followers_page,
-    parse_inventory_drops, parse_live_status, parse_stream_info,
-    parse_user_points_contributions,
+    parse_inventory_drops, parse_live_status, parse_stream_info, parse_user_points_contributions,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures")
+        .join(name)
 }
 
 fn fixture_json(name: &str) -> String {
@@ -29,8 +30,8 @@ fn streamer(channel_id: &str) -> Streamer {
 }
 
 #[test]
-fn twitch_contract_fixtures_cover_build_id_context_stream_info_inventory_campaigns_and_lookup_shapes()
-{
+fn twitch_contract_fixtures_cover_build_id_context_stream_info_inventory_campaigns_and_lookup_shapes(
+) {
     let homepage = fixture_json("twitch.homepage.html");
     assert_eq!(
         extract_build_id(&homepage).unwrap(),
@@ -47,40 +48,46 @@ fn twitch_contract_fixtures_cover_build_id_context_stream_info_inventory_campaig
         "https://spade.example/submit"
     );
 
-    let context_payload =
-        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.channel_points_context.json")).unwrap())
-            .unwrap();
+    let context_payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_path("twitch.channel_points_context.json")).unwrap(),
+    )
+    .unwrap();
     let context = parse_channel_points_context(&context_payload).unwrap();
     assert_eq!(context.balance, 1234);
     assert_eq!(context.claim_id.as_deref(), Some("claim-1"));
 
-    let stream_payload =
-        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.stream_info.json")).unwrap())
-            .unwrap();
+    let stream_payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_path("twitch.stream_info.json")).unwrap(),
+    )
+    .unwrap();
     let stream = parse_stream_info(&stream_payload).unwrap();
     assert_eq!(stream.id, "stream-1");
     assert_eq!(stream.game_name, "Game Name");
 
-    let live_offline_payload =
-        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.stream_live.offline.json")).unwrap())
-            .unwrap();
+    let live_offline_payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_path("twitch.stream_live.offline.json")).unwrap(),
+    )
+    .unwrap();
     assert!(!parse_live_status(&live_offline_payload));
-    let live_online_payload =
-        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.stream_live.online.json")).unwrap())
-            .unwrap();
+    let live_online_payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_path("twitch.stream_live.online.json")).unwrap(),
+    )
+    .unwrap();
     assert!(parse_live_status(&live_online_payload));
 
-    let followers_payload =
-        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.followers.json")).unwrap())
-            .unwrap();
+    let followers_payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_path("twitch.followers.json")).unwrap(),
+    )
+    .unwrap();
     let followers = parse_followers_page(&followers_payload).unwrap();
     assert_eq!(followers.logins, vec!["alice", "bob"]);
     assert!(followers.has_next_page);
     assert_eq!(followers.cursor.as_deref(), Some("cursor-2"));
 
-    let inventory_payload =
-        serde_json::from_slice::<serde_json::Value>(&fs::read(fixture_path("twitch.inventory.json")).unwrap())
-            .unwrap();
+    let inventory_payload = serde_json::from_slice::<serde_json::Value>(
+        &fs::read(fixture_path("twitch.inventory.json")).unwrap(),
+    )
+    .unwrap();
     let drops = parse_inventory_drops(&inventory_payload);
     assert_eq!(drops.len(), 1);
     assert_eq!(drops[0].drop_instance_id, "drop-1");

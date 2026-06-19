@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tm_twitch::{operations, CLIENT_ID};
+use tm_twitch::CLIENT_ID;
 
 pub const DEVICE_URL: &str = "https://id.twitch.tv/oauth2/device";
 pub const TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
+pub const VALIDATE_URL: &str = "https://id.twitch.tv/oauth2/validate";
 pub const ANDROID_TV_ORIGIN: &str = "https://android.tv.twitch.tv";
 pub const ANDROID_TV_REFERER: &str = "https://android.tv.twitch.tv/";
 pub const ANDROID_TV_USER_AGENT: &str =
@@ -35,9 +36,8 @@ pub struct DeviceFlowState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginValidationRequest {
-    pub operation_name: String,
+    pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: serde_json::Value,
 }
 
 #[must_use]
@@ -77,17 +77,13 @@ pub fn build_token_poll_request(device_id: &str, device_code: &str) -> OAuthRequ
 pub fn build_validate_login_request(
     auth_token: &str,
     device_id: &str,
-    username: &str,
     user_agent: &str,
 ) -> LoginValidationRequest {
-    let operation = operations::get_id_from_login(username);
     LoginValidationRequest {
-        operation_name: operation.operation_name.to_string(),
-        body: serde_json::to_value(operation).expect("persisted operation should serialize"),
+        url: VALIDATE_URL.to_string(),
         headers: vec![
-            ("Content-Type".into(), "application/json".into()),
+            ("Accept".into(), "application/json".into()),
             ("Authorization".into(), format!("OAuth {auth_token}")),
-            ("Client-Id".into(), CLIENT_ID.into()),
             ("X-Device-Id".into(), device_id.into()),
             ("User-Agent".into(), user_agent.into()),
         ],
@@ -167,13 +163,14 @@ mod tests {
 
     #[test]
     fn builds_validate_login_request() {
-        let request = build_validate_login_request("token", "device", "tester", "ua");
-        assert_eq!(request.operation_name, "GetIDFromLogin");
+        let request = build_validate_login_request("token", "device", "ua");
+        assert_eq!(request.url, VALIDATE_URL);
         assert!(request
             .headers
             .contains(&("Authorization".into(), "OAuth token".into())));
-        assert_eq!(request.body["operationName"], "GetIDFromLogin");
-        assert_eq!(request.body["variables"]["login"], "tester");
+        assert!(request
+            .headers
+            .contains(&("X-Device-Id".into(), "device".into())));
     }
 
     #[test]

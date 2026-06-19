@@ -393,6 +393,10 @@ mod tests {
     use super::*;
     use crate::types::{Condition, FilterCondition, OutcomeKey};
 
+    fn assert_f64_eq(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn filter_condition_totals() {
         let mut event = PredictionEvent {
@@ -430,7 +434,7 @@ mod tests {
         });
         let (skip, compared, _) = event.should_skip_by_filter();
         assert!(!skip);
-        assert_eq!(compared, 25.0);
+        assert_f64_eq(compared, 25.0);
 
         event
             .streamer
@@ -442,7 +446,7 @@ mod tests {
             .value = Some(30.0);
         let (skip, compared, _) = event.should_skip_by_filter();
         assert!(skip);
-        assert_eq!(compared, 25.0);
+        assert_f64_eq(compared, 25.0);
     }
 
     #[test]
@@ -482,7 +486,7 @@ mod tests {
         });
         let (skip, compared, _) = event.should_skip_by_filter();
         assert!(skip);
-        assert_eq!(compared, 50.0);
+        assert_f64_eq(compared, 50.0);
 
         event.streamer.settings.bet.filter_condition = Some(FilterCondition {
             by: OutcomeKey::DecisionUsers,

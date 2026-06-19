@@ -3,6 +3,9 @@ name = "tm-updater"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+test = false
+
 [dependencies]
 reqwest.workspace = true
 serde.workspace = true

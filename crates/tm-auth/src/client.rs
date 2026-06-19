@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::device_flow::{
     build_device_code_request, build_token_poll_request, build_validate_login_request,
-    DeviceFlowState, DEVICE_URL, TOKEN_URL,
+    DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
 };
 use crate::session::AuthSession;
 use crate::CookieStore;
@@ -37,7 +37,7 @@ pub struct LoginResult {
 pub struct AuthEndpoints {
     pub device_code_url: String,
     pub token_url: String,
-    pub gql_url: String,
+    pub validate_url: String,
 }
 
 #[derive(Debug, Error)]
@@ -55,8 +55,15 @@ pub enum AuthClientError {
     DeviceFlowExpired,
     #[error("oauth token missing from response")]
     MissingAccessToken,
+    #[error("login missing from validation response")]
+    MissingLogin,
     #[error("user id missing from validation response")]
     MissingUserId,
+    #[error("validated token belongs to Twitch login '{actual_login}', expected '{expected_login}'")]
+    LoginMismatch {
+        expected_login: String,
+        actual_login: String,
+    },
     #[error("session error: {0}")]
     Session(#[from] crate::AuthSessionError),
 }
@@ -183,12 +190,12 @@ impl TwitchAuthClient {
         username: &str,
         user_agent: &str,
     ) -> Result<String, AuthClientError> {
-        let request = build_validate_login_request(auth_token, device_id, username, user_agent);
+        let mut request = build_validate_login_request(auth_token, device_id, user_agent);
+        request.url.clone_from(&self.endpoints.validate_url);
         let response = self
             .client
-            .post(&self.endpoints.gql_url)
+            .get(request.url)
             .headers(headers_from_pairs(&request.headers)?)
-            .json(&request.body)
             .send()
             .await
             .map_err(AuthClientError::Http)?;
@@ -202,8 +209,21 @@ impl TwitchAuthClient {
             .json::<serde_json::Value>()
             .await
             .map_err(AuthClientError::Http)?;
+        let login = payload
+            .get("login")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(AuthClientError::MissingLogin)?
+            .trim()
+            .to_lowercase();
+        let expected_login = username.trim().to_lowercase();
+        if login != expected_login {
+            return Err(AuthClientError::LoginMismatch {
+                expected_login,
+                actual_login: login,
+            });
+        }
         payload
-            .pointer("/data/user/id")
+            .get("user_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
             .ok_or(AuthClientError::MissingUserId)
@@ -248,7 +268,7 @@ impl Default for AuthEndpoints {
         Self {
             device_code_url: DEVICE_URL.to_string(),
             token_url: TOKEN_URL.to_string(),
-            gql_url: tm_twitch::GQL_URL.to_string(),
+            validate_url: VALIDATE_URL.to_string(),
         }
     }
 }

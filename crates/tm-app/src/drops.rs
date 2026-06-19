@@ -1,6 +1,12 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use tm_config::ConfigFile;
+use tm_domain::Streamer;
+use tm_observability::Event as DiscordEvent;
+use tm_twitch::{InventoryDrop, TwitchClient};
+
+use crate::observability::AppObservability;
 
 pub(crate) async fn claim_startup_drops_if_enabled(
     config: &ConfigFile,

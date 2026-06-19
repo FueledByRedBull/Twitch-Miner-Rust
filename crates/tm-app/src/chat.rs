@@ -1,6 +1,10 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::collections::HashMap;
+
+use anyhow::Result;
+use tm_irc::ChatClient;
+
+use crate::observability::{AppObservability, TracingChatLogger};
+use crate::utilities::sleep_or_stop;
 
 pub(crate) fn spawn_chat_manager_loop(
     stop: tokio::sync::watch::Receiver<bool>,

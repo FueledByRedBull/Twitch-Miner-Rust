@@ -1,6 +1,14 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use tm_domain::Streamer;
+use tm_observability::Event as DiscordEvent;
+use tm_twitch::TwitchClient;
+
+use crate::observability::AppObservability;
+use crate::runtime_effects::execute_runtime_effects;
+use crate::{CONTEXT_REFRESH_CONCURRENCY, PENDING_CLAIMS_INTERVAL};
 
 pub(crate) fn apply_context_to_streamer(
     streamer: &mut Streamer,
@@ -57,7 +65,10 @@ pub(crate) fn spawn_context_refresh_loop(
     observability: AppObservability,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(20 * 60));
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(20 * 60),
+            std::time::Duration::from_secs(20 * 60),
+        );
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stop = stop;
         loop {
@@ -98,12 +109,6 @@ pub(crate) fn spawn_pending_claim_loop(
         );
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stop = stop;
-
-        if let Err(error) =
-            refresh_snapshot_streamers(&runtime, &twitch, &persistent_user_id, &observability).await
-        {
-            tracing::warn!(%error, "pending bonus sweep failed");
-        }
 
         loop {
             tokio::select! {
@@ -201,18 +206,7 @@ pub(crate) async fn refresh_streamer_context(
     persistent_user_id: Option<&str>,
     observability: &AppObservability,
 ) -> Result<Vec<tm_runtime::RuntimeEffect>> {
-    let context = twitch
-        .fetch_channel_points_context(&streamer.username)
-        .await
-        .with_context(|| format!("fetch context for {}", streamer.username))?;
-    let effects = runtime
-        .apply_context_update(tm_runtime::ContextUpdate {
-            channel_id: streamer.channel_id.clone(),
-            balance: context.balance,
-            active_multipliers: context.active_multipliers,
-            community_goals: context.community_goals,
-        })
-        .await?;
+    let mut context = fetch_streamer_context(twitch, streamer).await?;
     if let Some(claim_id) = context.claim_id.as_deref() {
         twitch
             .claim_bonus(&streamer.channel_id, claim_id, persistent_user_id)
@@ -221,12 +215,11 @@ pub(crate) async fn refresh_streamer_context(
         if observability.show_claimed_bonus {
             let message = observability.bonus_claim_message(streamer, false);
             tracing::info!("{message}");
-            observability
-                .send_event(DiscordEvent::BonusClaim, &message)
-                .await;
+            observability.spawn_event(DiscordEvent::BonusClaim, message);
         }
+        context = fetch_streamer_context(twitch, streamer).await?;
     }
-    Ok(effects)
+    apply_runtime_context(runtime, streamer, context).await
 }
 
 pub(crate) async fn refresh_streamer_context_without_goal_effects(
@@ -239,6 +232,31 @@ pub(crate) async fn refresh_streamer_context_without_goal_effects(
     let _ = refresh_streamer_context(runtime, twitch, streamer, persistent_user_id, observability)
         .await?;
     Ok(())
+}
+
+pub(crate) async fn fetch_streamer_context(
+    twitch: &TwitchClient,
+    streamer: &Streamer,
+) -> Result<tm_twitch::ChannelPointsContext> {
+    twitch
+        .fetch_channel_points_context(&streamer.username)
+        .await
+        .with_context(|| format!("fetch context for {}", streamer.username))
+}
+
+pub(crate) async fn apply_runtime_context(
+    runtime: &tm_runtime::RuntimeHandle,
+    streamer: &Streamer,
+    context: tm_twitch::ChannelPointsContext,
+) -> Result<Vec<tm_runtime::RuntimeEffect>> {
+    Ok(runtime
+        .apply_context_update(tm_runtime::ContextUpdate {
+            channel_id: streamer.channel_id.clone(),
+            balance: context.balance,
+            active_multipliers: context.active_multipliers,
+            community_goals: context.community_goals,
+        })
+        .await?)
 }
 
 pub(crate) async fn load_goal_contributions(

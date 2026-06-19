@@ -95,6 +95,11 @@ pub(crate) fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
 }
 
 pub(crate) fn build_http_client(disable_ssl_cert_verification: bool) -> Result<reqwest::Client> {
+    if disable_ssl_cert_verification {
+        tracing::warn!(
+            "disable_ssl_cert_verification is enabled; TLS certificate verification is OFF"
+        );
+    }
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .danger_accept_invalid_certs(disable_ssl_cert_verification)

@@ -1,6 +1,19 @@
-#![allow(unused_imports)]
-#![allow(clippy::wildcard_imports)]
-use crate::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use tm_domain::{PredictionDecision, Streamer};
+use tm_observability::{event_from_bet_result, Event as DiscordEvent};
+use tm_twitch::TwitchClient;
+
+use crate::context::{
+    apply_runtime_context, contribute_streamer_community_goals, fetch_streamer_context,
+    refresh_streamer_context_without_goal_effects,
+};
+use crate::effects::runtime_streamer_by_channel_id;
+use crate::observability::AppObservability;
+use crate::prediction::prediction_wait_duration;
+use crate::utilities::time_now;
 
 pub(crate) async fn execute_runtime_effects(
     runtime: &tm_runtime::RuntimeHandle,
@@ -96,7 +109,7 @@ pub(crate) async fn execute_runtime_effect(
                 &result_string,
                 observability,
             )
-            .await;
+            ;
         }
     }
 
@@ -120,10 +133,10 @@ pub(crate) async fn handle_claim_bonus_effect(
     if observability.show_claimed_bonus {
         let message = observability.bonus_claim_message(&streamer, false);
         tracing::info!("{message}");
-        observability
-            .send_event(DiscordEvent::BonusClaim, &message)
-            .await;
+        observability.spawn_event(DiscordEvent::BonusClaim, message);
     }
+    let context = fetch_streamer_context(twitch, &streamer).await?;
+    let _ = apply_runtime_context(runtime, &streamer, context).await?;
     Ok(())
 }
 
@@ -143,9 +156,7 @@ pub(crate) async fn handle_claim_moment_effect(
         observability.streamer_label(&streamer)
     );
     tracing::info!("{message}");
-    observability
-        .send_event(DiscordEvent::MomentClaim, &message)
-        .await;
+    observability.spawn_event(DiscordEvent::MomentClaim, message);
     Ok(())
 }
 
@@ -164,9 +175,7 @@ pub(crate) async fn handle_join_raid_effect(
     let message =
         observability.join_raid_message(&observability.streamer_name(&streamer), target_login);
     tracing::info!("{message}");
-    observability
-        .send_event(DiscordEvent::JoinRaid, &message)
-        .await;
+    observability.spawn_event(DiscordEvent::JoinRaid, message);
     Ok(())
 }
 
@@ -212,7 +221,7 @@ pub(crate) fn spawn_prediction_evaluation(
     });
 }
 
-pub(crate) async fn handle_prediction_settled_effect(
+pub(crate) fn handle_prediction_settled_effect(
     event_id: &str,
     streamer_username: &str,
     title: &str,
@@ -229,7 +238,7 @@ pub(crate) async fn handle_prediction_settled_effect(
         "{message}"
     );
     if let Some(event) = event_from_bet_result(result_type) {
-        observability.send_event(event, &message).await;
+        observability.spawn_event(event, message);
     }
 }
 
@@ -436,40 +445,19 @@ pub(crate) async fn place_prediction(
                 event.decision_label()
             );
             tracing::info!(event_id = %event.event_id, "{message}");
-            observability
-                .send_event(DiscordEvent::BetGeneral, &message)
-                .await;
+            observability.spawn_event(DiscordEvent::BetGeneral, message);
             Ok(())
         }
         Err(error) => {
             runtime.stop_tracking_prediction(event_id, "ERROR").await?;
-            observability
-                .send_event(
-                    DiscordEvent::BetFailed,
-                    &format!(
-                        "Prediction failed for {}: {error}",
-                        observability.streamer_name(streamer)
-                    ),
-                )
-                .await;
+            observability.spawn_event(
+                DiscordEvent::BetFailed,
+                format!(
+                    "Prediction failed for {}: {error}",
+                    observability.streamer_name(streamer)
+                ),
+            );
             Err(error.into())
         }
-    }
-}
-
-pub(crate) async fn send_discord_event(
-    webhook: Option<&tm_observability::DiscordWebhook>,
-    client: &DiscordClient,
-    event: DiscordEvent,
-    message: &str,
-) {
-    let Some(webhook) = webhook else {
-        return;
-    };
-    let Some(request) = build_discord_request(webhook, message, Some(event)) else {
-        return;
-    };
-    if let Err(error) = client.send(&request).await {
-        tracing::warn!(event = ?event, %error, "discord notification failed");
     }
 }
