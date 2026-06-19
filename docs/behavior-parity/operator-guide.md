@@ -56,5 +56,4 @@ GitHub Actions also publishes the GHCR image on pushes to `main` and `v*` tags.
 
 - Treat `data/cookies/<username>.json` as an authentication secret.
 - This is unofficial Twitch automation; prefer a dedicated account if account risk matters.
-- The local workspace here was validated with `cargo test` and `cargo clippy`.
 - Docker and Raspberry Pi smoke validation were not performed in this environment.

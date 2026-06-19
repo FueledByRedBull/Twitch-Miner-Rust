@@ -15,3 +15,7 @@
 /miner-update-*
 /update-*.bat
 /PLAN.md
+/docs/behavior-parity/README.md
+/docs/behavior-parity/gap-list.md
+/docs/behavior-parity/migration-notes.md
+/docs/behavior-parity/parity-checklist.md

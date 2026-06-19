@@ -1,6 +1,6 @@
 # Architecture
 
-The rewrite currently runs as a Cargo workspace with crate boundaries matching the plan:
+The project runs as a Cargo workspace with crate boundaries split by responsibility:
 
 - `tm-app` owns process bootstrap and task wiring.
 - `tm-config` owns config/path resolution and write-back.

@@ -1,6 +1,6 @@
 # Twitch Miner Rust
 
-An unofficial Twitch channel points miner rebuilt in Rust for a codebase that is easier to reason about, test, ship, and operate.
+An unofficial Twitch channel points miner rebuilt in Rust as a rewrite of [0x8fv/Twitch-Channel-Points-Miner](https://github.com/0x8fv/Twitch-Channel-Points-Miner), with the goal of keeping the useful behavior while making the codebase easier to reason about, test, ship, and operate.
 
 This project keeps the behavior that matters in day-to-day use:
 
@@ -121,13 +121,12 @@ Important paths:
 
 ## Project status
 
-The source-level rewrite and fixture-backed parity work are documented. Live Twitch and platform-specific smoke tests are tracked separately because they require real accounts, network access, Docker publishing, or ARM hardware.
+The public repo docs focus on operating and understanding the Rust implementation:
 
-- parity checklist: [docs/behavior-parity/parity-checklist.md](docs/behavior-parity/parity-checklist.md)
-- gap list: [docs/behavior-parity/gap-list.md](docs/behavior-parity/gap-list.md)
 - operator guide: [docs/behavior-parity/operator-guide.md](docs/behavior-parity/operator-guide.md)
-- migration notes: [docs/behavior-parity/migration-notes.md](docs/behavior-parity/migration-notes.md)
+- container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
+- container deployment notes: [docs/architecture/container-deployment.md](docs/architecture/container-deployment.md)
 
 ## Validation
 
