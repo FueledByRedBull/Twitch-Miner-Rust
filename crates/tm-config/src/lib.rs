@@ -826,9 +826,11 @@ mod tests {
 
     #[test]
     fn validation_rejects_disabling_tls_certificate_verification() {
-        let mut config = ConfigFile::default();
-        config.username = String::from("Alice");
-        config.disable_ssl_cert_verification = true;
+        let config = ConfigFile {
+            username: String::from("Alice"),
+            disable_ssl_cert_verification: true,
+            ..ConfigFile::default()
+        };
 
         let error = validate_config(&config).unwrap_err();
         assert!(

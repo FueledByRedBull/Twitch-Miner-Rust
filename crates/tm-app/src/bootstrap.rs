@@ -237,12 +237,14 @@ mod tests {
 
     #[test]
     fn build_http_client_rejects_insecure_tls_toggle() {
-        let error = build_http_client(true).unwrap_err();
-        assert!(error.to_string().contains("disable_ssl_cert_verification"));
+        match build_http_client(true) {
+            Ok(_) => panic!("expected insecure TLS toggle to be rejected"),
+            Err(error) => assert!(error.to_string().contains("disable_ssl_cert_verification")),
+        }
     }
 
     #[test]
     fn build_http_client_accepts_secure_default() {
-        build_http_client(false).unwrap();
+        assert!(build_http_client(false).is_ok());
     }
 }
