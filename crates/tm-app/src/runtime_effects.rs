@@ -108,8 +108,7 @@ pub(crate) async fn execute_runtime_effect(
                 &result_type,
                 &result_string,
                 observability,
-            )
-            ;
+            );
         }
     }
 

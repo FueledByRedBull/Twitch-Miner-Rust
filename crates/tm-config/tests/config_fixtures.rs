@@ -98,7 +98,9 @@ fn streamer_override_invalid_shapes_are_rejected_without_write_back() {
     ));
     let written: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert!(written["streamer_overrides"]["alice"]["bet"]["filter_condition"].is_null());
-    assert!(written["streamer_overrides"]["alice"].get("claim_moments").is_none());
+    assert!(written["streamer_overrides"]["alice"]
+        .get("claim_moments")
+        .is_none());
     assert!(written["streamer_overrides"]["bob"].is_string());
 }
 

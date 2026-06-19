@@ -153,7 +153,10 @@ async fn main() -> Result<()> {
     let summary = runtime
         .shutdown(config.privacy.anonymize_logs, time_now())
         .await?;
-    observability.spawn_event(DiscordEvent::Shutdown, format!("Ending session: '{session_id}'"));
+    observability.spawn_event(
+        DiscordEvent::Shutdown,
+        format!("Ending session: '{session_id}'"),
+    );
     observability.shutdown_pending_tasks().await;
     log_session_summary(&summary);
     Ok(())

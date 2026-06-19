@@ -59,7 +59,9 @@ pub enum AuthClientError {
     MissingLogin,
     #[error("user id missing from validation response")]
     MissingUserId,
-    #[error("validated token belongs to Twitch login '{actual_login}', expected '{expected_login}'")]
+    #[error(
+        "validated token belongs to Twitch login '{actual_login}', expected '{expected_login}'"
+    )]
     LoginMismatch {
         expected_login: String,
         actual_login: String,

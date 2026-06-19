@@ -12,7 +12,6 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant as StdInstant};
 
-    use crate::Cli;
     use crate::bootstrap::{
         env_has_value, has_override, load_config_with_fallback_using,
         load_or_login_session_with_auth_client, normalized_username,
@@ -31,6 +30,8 @@ mod tests {
     use crate::startup::{bootstrap_runtime_state, load_targets};
     use crate::utilities::new_session_id;
     use crate::watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry};
+    use crate::Cli;
+    use reqwest::StatusCode;
     use tm_auth::{AuthEndpoints, TwitchAuthClient};
     use tm_config::{AppPaths, ConfigError, ConfigFile};
     use tm_domain::{
@@ -39,7 +40,6 @@ mod tests {
     };
     use tm_observability::DiscordClient;
     use tm_twitch::{InventoryDrop, TwitchClient, TwitchEndpoints};
-    use reqwest::StatusCode;
 
     fn ts(seconds: i64) -> tm_runtime::RuntimeTime {
         OffsetDateTime::from_unix_timestamp(seconds).unwrap()
@@ -901,7 +901,10 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(runtime.state_snapshot().await.unwrap().streamers[0].channel_points, 0);
+        assert_eq!(
+            runtime.state_snapshot().await.unwrap().streamers[0].channel_points,
+            0
+        );
 
         stop_tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
@@ -966,7 +969,10 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(runtime.state_snapshot().await.unwrap().streamers[0].channel_points, 0);
+        assert_eq!(
+            runtime.state_snapshot().await.unwrap().streamers[0].channel_points,
+            0
+        );
 
         stop_tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(1), task)
