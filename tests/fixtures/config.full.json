@@ -1,6 +1,5 @@
 {
   "username": "tester",
-  "password": "secret",
   "auto_update": true,
   "debug": false,
   "debug_deep": false,

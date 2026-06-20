@@ -15,7 +15,7 @@ If you want to watch logs in the foreground, run the command directly in the ter
 
 - Set `username` in `data/config.json`.
 - Keep `auto_update=false` if you want to stay on the local source build.
-- Leave `password` empty; device-code login does not use it.
+- Remove `password` from older configs; device-code login does not use it.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 
@@ -25,6 +25,7 @@ The repo ships two compose examples:
 
 - `docker-compose.yml` for a bind-mount layout at `./data`.
 - `deploy/docker-compose.volume.yml` for a named-volume layout.
+- `deploy/docker-compose.rpi.yml` for a Raspberry Pi bind-mount layout that runs as the host user.
 
 The container expects:
 
@@ -32,6 +33,8 @@ The container expects:
 - `TCPM_DATA_DIR=/data`
 
 Published images are static Rust binaries in a `scratch` runtime. There is no shell, package manager, or OS certificate bundle inside the image; TLS trust is provided by the Rust TLS stack.
+
+If you are migrating a Linux bind mount from an older root-run image, make sure existing `config/`, `cookies/`, and `log/` files are readable and writable by the UID/GID configured in Compose before restarting the Rust container.
 
 ## Stop And Restart
 

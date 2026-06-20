@@ -13,7 +13,7 @@ The app uses Twitch device-code login and persists session data under:
 
 These files contain Twitch authentication material and should be treated like credentials. Do not commit, publish, paste, or share them. On Unix, newly written cookie files use `0600` permissions.
 
-The generated config keeps `password` as an empty legacy field for compatibility. The app does not need your Twitch password for device-code login.
+The app does not need your Twitch password for device-code login. If an older config still has a `password` field, remove it instead of trying to keep it in sync.
 
 ## Network Destinations
 

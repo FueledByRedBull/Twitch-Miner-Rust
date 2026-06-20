@@ -14,6 +14,7 @@ Example:
 services:
   twitch-miner:
     image: ghcr.io/fueledbyredbull/twitch-miner-rust:latest
+    user: "${UID:-1000}:${GID:-1000}"
     environment:
       TCPM_CONFIG: /data/config.json
       TCPM_DATA_DIR: /data
@@ -38,6 +39,8 @@ volumes:
 ```
 
 The Raspberry Pi compose example pins `linux/arm/v7` and follows the same `/data` convention. The miner exits on `SIGTERM`, so Compose should be given a short but non-zero stop grace period.
+
+On Linux bind mounts, the mounted directory and any existing cookie/log files must be writable by the configured container UID/GID. If you are migrating from an older root-run image, a one-time `chown` of the data directory may be required before the Rust container can reuse saved cookies.
 
 GitHub Actions publishes the GHCR image on pushes to `main` and `v*` tags after the multi-arch workflow builds and smoke-tests the platform images.
 

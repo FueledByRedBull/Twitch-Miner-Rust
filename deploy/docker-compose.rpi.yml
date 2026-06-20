@@ -2,6 +2,7 @@ services:
   twitch-miner:
     image: ghcr.io/fueledbyredbull/twitch-miner-rust:latest
     platform: linux/arm64
+    user: "${UID:-1000}:${GID:-1000}"
     init: true
     restart: unless-stopped
     stop_grace_period: 30s

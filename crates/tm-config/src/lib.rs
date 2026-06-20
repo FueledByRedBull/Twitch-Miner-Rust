@@ -90,6 +90,7 @@ pub struct DiscordConfig {
 #[allow(clippy::struct_excessive_bools)]
 pub struct ConfigFile {
     pub username: String,
+    #[serde(default)]
     pub password: String,
     pub auto_update: bool,
     pub debug: bool,
@@ -133,7 +134,6 @@ impl Default for ConfigFile {
 pub fn default_config_value() -> Value {
     json!({
         "username": "your-twitch-username",
-        "password": "",
         "auto_update": false,
         "debug": false,
         "debug_deep": false,
@@ -813,6 +813,8 @@ mod tests {
         assert_eq!(config.password, "");
         assert!(!config.auto_update);
         assert!(path.exists());
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(value.get("password").is_none());
     }
 
     #[test]

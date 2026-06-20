@@ -12,6 +12,8 @@ The app reads `TCPM_DATA_DIR` first, so the recommended container setup is to mo
 
 The published runtime image is a static Rust binary copied into `scratch`. It contains no shell, package manager, or OS certificate bundle. TLS trust comes from the Rust TLS dependencies, not from a system CA package.
 
+For Linux bind mounts, run the container with a UID/GID that can write the mounted data directory, or pre-chown that directory and any existing cookie files before first startup. The Raspberry Pi example does this with an explicit Compose `user` override.
+
 Shutdown and health:
 
 - The container uses `SIGTERM` for shutdown.
