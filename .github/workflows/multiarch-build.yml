@@ -176,14 +176,50 @@ jobs:
       - name: Smoke test published manifest digest
         shell: pwsh
         run: |
+          $image = '${{ steps.image.outputs.name }}'
           $digest = '${{ steps.manifest.outputs.digest }}'
+          $imageRef = "$image@$digest"
+          $raw = docker buildx imagetools inspect $imageRef --raw 2>&1
+          $inspectExit = $LASTEXITCODE
+          if ($inspectExit -ne 0) {
+            throw "Unable to inspect published manifest ${imageRef}: $($raw -join ' ')"
+          }
+          try {
+            $index = ($raw -join "`n") | ConvertFrom-Json
+          } catch {
+            throw "Published manifest metadata was not valid JSON: $($raw -join ' ')"
+          }
           foreach ($platform in @('linux/amd64', 'linux/arm64', 'linux/arm/v7')) {
-            docker run --rm --platform $platform "${{ steps.image.outputs.name }}@$digest" --help
+            $descriptor = switch ($platform) {
+              'linux/amd64' {
+                @($index.manifests | Where-Object {
+                  $_.platform.os -eq 'linux' -and $_.platform.architecture -eq 'amd64'
+                } | Select-Object -First 1)
+              }
+              'linux/arm64' {
+                @($index.manifests | Where-Object {
+                  $_.platform.os -eq 'linux' -and $_.platform.architecture -eq 'arm64'
+                } | Select-Object -First 1)
+              }
+              'linux/arm/v7' {
+                @($index.manifests | Where-Object {
+                  $_.platform.os -eq 'linux' -and
+                  $_.platform.architecture -eq 'arm' -and
+                  $_.platform.variant -eq 'v7'
+                } | Select-Object -First 1)
+              }
+            }
+            if (-not $descriptor -or $descriptor.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Published manifest has no child image for $platform."
+            }
+            $platformRef = "$image@$($descriptor.digest)"
+            docker run --rm --platform $platform $platformRef --help
             if ($LASTEXITCODE -ne 0) {
               throw "Published manifest smoke test failed for $platform."
             }
           }
           Set-Content -Path '${{ runner.temp }}/manifest/digest.txt' -Value $digest -NoNewline
+          exit 0
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
