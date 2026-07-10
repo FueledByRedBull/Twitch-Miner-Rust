@@ -87,6 +87,7 @@ jobs:
           if (($health -join "`n") -notmatch 'runtime[- ]status|runtime status') {
             throw "Health validation failed for an unexpected reason on ${{ matrix.platform }}: $($health -join ' ')"
           }
+          exit 0
         shell: pwsh
 
       - name: Export digest
