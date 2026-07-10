@@ -9,8 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 serde_json = { workspace = true }
-tm-config = { path = "../../crates/tm-config" }
-tm-domain = { path = "../../crates/tm-domain" }
-tm-pubsub = { path = "../../crates/tm-pubsub" }
-tm-runtime = { path = "../../crates/tm-runtime" }
+tm-config = { path = "../../crates/tm-config", version = "0.1.0" }
+tm-domain = { path = "../../crates/tm-domain", version = "0.1.0" }
+tm-pubsub = { path = "../../crates/tm-pubsub", version = "0.1.0" }
+tm-runtime = { path = "../../crates/tm-runtime", version = "0.1.0" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

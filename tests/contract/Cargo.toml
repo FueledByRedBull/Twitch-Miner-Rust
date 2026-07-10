@@ -9,9 +9,9 @@ rust-version.workspace = true
 
 [dependencies]
 serde_json = { workspace = true }
-tm-auth = { path = "../../crates/tm-auth" }
-tm-config = { path = "../../crates/tm-config" }
-tm-domain = { path = "../../crates/tm-domain" }
-tm-irc = { path = "../../crates/tm-irc" }
-tm-pubsub = { path = "../../crates/tm-pubsub" }
-tm-twitch = { path = "../../crates/tm-twitch" }
+tm-auth = { path = "../../crates/tm-auth", version = "0.1.0" }
+tm-config = { path = "../../crates/tm-config", version = "0.1.0" }
+tm-domain = { path = "../../crates/tm-domain", version = "0.1.0" }
+tm-irc = { path = "../../crates/tm-irc", version = "0.1.0" }
+tm-pubsub = { path = "../../crates/tm-pubsub", version = "0.1.0" }
+tm-twitch = { path = "../../crates/tm-twitch", version = "0.1.0" }

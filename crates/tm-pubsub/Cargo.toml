@@ -15,7 +15,7 @@ thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
-tm-domain = { path = "../tm-domain" }
+tm-domain = { path = "../tm-domain", version = "0.1.0" }
 
 [lints]
 workspace = true

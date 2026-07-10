@@ -15,7 +15,7 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tm-domain = { path = "../tm-domain" }
+tm-domain = { path = "../tm-domain", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3.23.0"

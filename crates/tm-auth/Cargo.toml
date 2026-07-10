@@ -12,7 +12,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tm-twitch = { path = "../tm-twitch" }
+tm-twitch = { path = "../tm-twitch", version = "0.1.0" }
 
 [dev-dependencies]
 tempfile = "3.23.0"

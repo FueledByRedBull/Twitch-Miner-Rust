@@ -12,9 +12,9 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tm-config = { path = "../tm-config" }
-tm-domain = { path = "../tm-domain" }
-tm-pubsub = { path = "../tm-pubsub" }
+tm-config = { path = "../tm-config", version = "0.1.0" }
+tm-domain = { path = "../tm-domain", version = "0.1.0" }
+tm-pubsub = { path = "../tm-pubsub", version = "0.1.0" }
 
 [lints]
 workspace = true
