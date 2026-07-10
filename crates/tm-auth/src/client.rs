@@ -329,7 +329,11 @@ impl std::future::Future for ThreadSleep {
         }
 
         {
-            let mut waker = self.shared.waker.lock().expect("sleep waker lock poisoned");
+            let mut waker = self
+                .shared
+                .waker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *waker = Some(cx.waker().clone());
         }
 
@@ -341,7 +345,7 @@ impl std::future::Future for ThreadSleep {
                 if let Some(waker) = shared
                     .waker
                     .lock()
-                    .expect("sleep waker lock poisoned")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                 {
                     waker.wake();

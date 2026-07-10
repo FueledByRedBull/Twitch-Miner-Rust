@@ -10,3 +10,8 @@ scripts
 **/.DS_Store
 run.out.log
 run.err.log
+FINISHING_TOUCHES.md
+DIFFERENTIAL_REVIEW_REPORT.md
+.release-check
+.tm-build-context.tar.gz
+.go-parity-context.tar.gz

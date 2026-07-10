@@ -43,7 +43,7 @@ flowchart LR
 ### Local
 
 ```powershell
-cd C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust
+cd Twitch-Miner-Rust
 cargo run -p tm-app -- --config ./data/config.json --data-dir ./data
 ```
 
@@ -58,7 +58,7 @@ On first launch:
 ### Docker
 
 ```powershell
-cd C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust
+cd Twitch-Miner-Rust
 docker compose up --build
 ```
 
@@ -76,6 +76,8 @@ For Linux bind mounts, make sure the mounted data directory and any existing coo
 
 GitHub Actions publishes the multi-arch GHCR image on pushes to `main` and `v*` tags. For local Docker validation, `scripts/build-multiarch.ps1` builds and loads a single local-platform image by default; pass `-Push` to build and publish `linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
 
+Deploy published images by immutable digest. See [docs/release-process.md](docs/release-process.md) for the release, Pi update, health, and rollback procedure.
+
 ## Configuration
 
 The miner will create and extend its config automatically, but a minimal manual setup looks like this:
@@ -83,7 +85,6 @@ The miner will create and extend its config automatically, but a minimal manual 
 ```json
 {
   "username": "your-twitch-username",
-  "auto_update": false,
   "streamers": ["StreamerHouse"],
   "claim_drops": true,
   "claim_drops_startup": true,
@@ -104,7 +105,10 @@ Important paths:
 - config: `data/config.json`
 - cookies: `data/cookies/<username>.json`
 - optional logs: `data/log/`
-- the repo also ignores local root runtime paths such as `./config.json`, `./cookies/`, `./log/`, `.env*`, and updater temp files
+- the repo also ignores local root runtime paths such as `./config.json`, `./cookies/`, `./log/`, and `.env*`
+
+`auto_update` was removed. A legacy `false` value is migrated away; `true` is rejected.
+Use `tm-app --check-config --data-dir ./data` to preview a migration without writing.
 
 ## Workspace map
 
@@ -119,7 +123,6 @@ Important paths:
 | `tm-pubsub` | PubSub batching, parsing, connection handling |
 | `tm-runtime` | single-writer runtime state |
 | `tm-twitch` | Twitch HTTP, GQL, scraping, parser contracts |
-| `tm-updater` | release lookup and binary replacement |
 
 ## Project status
 
@@ -129,20 +132,31 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
 - container deployment notes: [docs/architecture/container-deployment.md](docs/architecture/container-deployment.md)
+- behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
+- protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
+- release and rollback: [docs/release-process.md](docs/release-process.md)
+- Go-to-Rust migration: [docs/migration.md](docs/migration.md)
 
 ## Validation
 
 The workspace has been exercised with:
 
 ```powershell
-cargo fmt --all
-cargo test --workspace --quiet
-cargo clippy --workspace -- -D warnings
-cargo test --manifest-path tests/contract/Cargo.toml --quiet
-cargo clippy --manifest-path tests/contract/Cargo.toml -- -D warnings
-cargo test --manifest-path tests/integration/Cargo.toml --quiet
-cargo clippy --manifest-path tests/integration/Cargo.toml -- -D warnings
+cargo fmt --all -- --check
+cargo test --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo build --workspace --release --locked
+./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
+
+The Go baseline gate requires Go 1.21+ and is run when the adjacent reference
+checkout is available; the Rust-only commands remain reproducible from this
+repository alone.
+
+The running process writes a privacy-safe `runtime-status.json` in the data
+directory. `twitch-miner --health` checks process and task freshness; Docker
+uses that command as its health check. `tm-app --support-bundle ./support.json`
+writes version/status and file-count metadata without cookies, config values, or log contents.
 
 ## Safety notes
 
@@ -152,7 +166,7 @@ cargo clippy --manifest-path tests/integration/Cargo.toml -- -D warnings
 - Cookie files contain authentication material; treat them like credentials.
 - The app uses device-code login and does not need your Twitch password.
 - TLS certificate verification is always enforced; insecure certificate bypass is not supported.
-- Keep `auto_update=false` for manual source builds.
+- Run `tm-app --canary --data-dir ./data` on a dedicated account before publishing a release.
 - The repo ignores runtime data and logs by default.
 - This project is unofficial and not affiliated with Twitch.
 - You are responsible for how and where you use it.

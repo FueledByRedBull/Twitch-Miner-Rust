@@ -368,9 +368,14 @@ pub(crate) fn format_resume_gap(gap: Duration) -> String {
 
 pub(crate) struct TracingChatLogger {
     pub(crate) observability: AppObservability,
+    pub(crate) health: crate::status::HealthTracker,
 }
 
 impl ChatLogger for TracingChatLogger {
+    fn activity(&mut self) {
+        self.health.success("chat");
+    }
+
     fn printf(&mut self, message: &str) {
         tracing::info!("{message}");
     }

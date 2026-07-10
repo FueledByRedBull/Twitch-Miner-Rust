@@ -44,6 +44,7 @@ pub enum ChatTransportAction {
 }
 
 pub trait ChatLogger {
+    fn activity(&mut self) {}
     fn printf(&mut self, message: &str);
     fn errorf(&mut self, message: &str);
     fn emoji_eventf(&mut self, emoji: &str, event: ChatEventKind, message: &str);
@@ -109,6 +110,7 @@ where
     }
 
     pub fn protocol_actions(&mut self, line: &str) -> Vec<ChatTransportAction> {
+        self.logger.activity();
         match parse_line(line) {
             ParsedLine::Ping { payload } => {
                 vec![ChatTransportAction::Write(format!("PONG{payload}\r\n"))]

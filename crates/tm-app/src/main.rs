@@ -11,6 +11,7 @@ use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
 use tm_twitch::TwitchClient;
 
 mod bootstrap;
+mod canary;
 mod chat;
 mod context;
 mod drops;
@@ -33,10 +34,13 @@ use bootstrap::{
 };
 use drops::claim_startup_drops_if_enabled;
 use observability::{build_observability, log_session_summary, log_startup};
-use shutdown::{shutdown_background_tasks, wait_for_shutdown_signal};
-use startup::{bootstrap_runtime_state, build_logger_settings, run_auto_update_if_enabled};
+use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
+use startup::{bootstrap_runtime_state, build_logger_settings};
 use tasks::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
 use utilities::{clear_console, new_session_id, set_console_title, time_now};
+
+mod build_info;
+mod status;
 
 const DEFAULT_CONSOLE_TITLE: &str = "Klaro's Twitch Miner";
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
@@ -48,18 +52,45 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SESSION_SUMMARY_INDENT: usize = 25;
 
 #[derive(Debug, Parser)]
+#[command(version = build_info::VERSION_BANNER)]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long = "data-dir")]
     data_dir: Option<PathBuf>,
+    #[arg(long, conflicts_with_all = ["check_config", "support_bundle", "canary"])]
+    health: bool,
+    #[arg(long, conflicts_with_all = ["health", "support_bundle", "canary"])]
+    check_config: bool,
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["health", "check_config", "canary"])]
+    support_bundle: Option<PathBuf>,
+    #[arg(long, conflicts_with_all = ["health", "check_config", "support_bundle"])]
+    canary: bool,
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let has_override = has_override(&cli);
     let requested_paths = resolve_app_paths_from_env(cli.config, cli.data_dir)?;
+    if cli.health {
+        return status::check_health(&requested_paths.work_dir);
+    }
+    if cli.check_config {
+        let preview = tm_config::preview_config(&requested_paths.config_path)?;
+        tm_config::validate_config(&preview.config)?;
+        println!(
+            "config valid; schema_version={}; migration_required={}",
+            preview.config.config_schema_version, preview.migration_required
+        );
+        return Ok(());
+    }
+    if let Some(destination) = cli.support_bundle.as_deref() {
+        status::write_support_bundle(&requested_paths.work_dir, destination)?;
+        println!("support bundle written to {}", destination.display());
+        return Ok(());
+    }
     set_console_title(DEFAULT_CONSOLE_TITLE);
     clear_console();
 
@@ -78,17 +109,18 @@ async fn main() -> Result<()> {
     })?;
     log_timezone_validation(timezone_validation.as_ref());
 
-    if run_auto_update_if_enabled(&config).await? {
-        return Ok(());
+    if cli.canary {
+        let http_client = build_http_client(config.disable_ssl_cert_verification)?;
+        return canary::run_read_only_canary(&config, &active_paths.work_dir, http_client).await;
     }
 
     let observability = build_observability(&config)?;
     tracing::info!(
-        "{} | v{}",
-        tm_updater::PROJECT_DISPLAY_NAME,
-        env!("CARGO_PKG_VERSION")
+        "{} | {}",
+        build_info::DISPLAY_NAME,
+        build_info::VERSION_BANNER
     );
-    tracing::info!("{}", tm_updater::PROJECT_REPOSITORY_URL);
+    tracing::info!("{}", build_info::REPOSITORY_URL);
 
     let session_id = new_session_id();
     tracing::info!("{}", observability.start_session_message(&session_id));
@@ -125,6 +157,7 @@ async fn main() -> Result<()> {
     let runtime = tm_runtime::spawn_runtime_state(state);
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let health = status::HealthTracker::default();
     let tasks = spawn_background_tasks(BackgroundTaskParams {
         config: &config,
         stop_rx,
@@ -134,7 +167,9 @@ async fn main() -> Result<()> {
         user_id: user_id.as_ref(),
         initial_streamers: &initial_streamers,
         observability: &observability,
+        health: &health,
     })?;
+    let status = status::StatusReporter::ready(&active_paths.work_dir, health)?;
     let summary = runtime.runtime_summary().await?;
 
     log_startup(
@@ -146,8 +181,14 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    wait_for_shutdown_signal().await?;
-    tracing::info!(session_id = %session_id, "shutdown requested");
+    let runtime_failure = wait_for_shutdown_or_task_failure(&tasks, &status)
+        .await
+        .err();
+    if let Some(error) = runtime_failure.as_ref() {
+        tracing::error!(%error, session_id = %session_id, "runtime supervision requested shutdown");
+    } else {
+        tracing::info!(session_id = %session_id, "shutdown requested");
+    }
     shutdown_background_tasks(stop_tx, tasks).await;
     tracing::info!(session_id = %session_id, "background tasks stopped");
     let summary = runtime
@@ -159,6 +200,9 @@ async fn main() -> Result<()> {
     );
     observability.shutdown_pending_tasks().await;
     log_session_summary(&summary);
+    if let Some(error) = runtime_failure {
+        return Err(error);
+    }
     Ok(())
 }
 

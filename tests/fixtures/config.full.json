@@ -1,6 +1,6 @@
 {
   "username": "tester",
-  "auto_update": true,
+  "auto_update": false,
   "debug": false,
   "debug_deep": false,
   "watch_queue_logging": true,

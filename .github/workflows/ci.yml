@@ -5,12 +5,82 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  push:
   pull_request:
-    paths-ignore:
-      - "**/*.md"
 
 jobs:
   rust-qa:
     permissions:
       contents: read
     uses: ./.github/workflows/rust-qa.yml
+
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Validate Markdown links
+        shell: pwsh
+        run: ./scripts/verify-docs.ps1
+      - name: Validate release hygiene
+        shell: pwsh
+        run: ./scripts/verify-release-hygiene.ps1
+      - name: Validate Compose examples
+        env:
+          TWITCH_MINER_IMAGE: ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f deploy/docker-compose.rpi.yml config >/dev/null
+          docker compose -f deploy/docker-compose.volume.yml config >/dev/null
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+
+  dependency-policy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+        with:
+          command: check advisories bans licenses sources
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.94.0
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # main
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure workspace coverage
+        run: cargo llvm-cov --workspace --all-features --locked --fail-under-lines 60 --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-coverage
+          path: lcov.info
+          if-no-files-found: error

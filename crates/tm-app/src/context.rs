@@ -8,6 +8,7 @@ use tm_twitch::TwitchClient;
 
 use crate::observability::AppObservability;
 use crate::runtime_effects::execute_runtime_effects;
+use crate::status::HealthTracker;
 use crate::{CONTEXT_REFRESH_CONCURRENCY, PENDING_CLAIMS_INTERVAL};
 
 pub(crate) fn apply_context_to_streamer(
@@ -63,6 +64,7 @@ pub(crate) fn spawn_context_refresh_loop(
     twitch: Arc<TwitchClient>,
     persistent_user_id: String,
     observability: AppObservability,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval_at(
@@ -87,7 +89,10 @@ pub(crate) fn spawn_context_refresh_loop(
                     )
                     .await
                     {
-                        tracing::warn!(%error, "context refresh snapshot failed");
+                        health.failure("context", "refresh");
+                        tracing::warn!(task = "context", error_class = "refresh", %error, "context refresh snapshot failed");
+                    } else {
+                        health.success("context");
                     }
                 }
             }
@@ -101,6 +106,7 @@ pub(crate) fn spawn_pending_claim_loop(
     twitch: Arc<TwitchClient>,
     persistent_user_id: String,
     observability: AppObservability,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval_at(
@@ -126,7 +132,10 @@ pub(crate) fn spawn_pending_claim_loop(
                     )
                     .await
                     {
-                        tracing::warn!(%error, "pending bonus sweep failed");
+                        health.failure("pending-claims", "refresh");
+                        tracing::warn!(task = "pending-claims", error_class = "refresh", %error, "pending bonus sweep failed");
+                    } else {
+                        health.success("pending-claims");
                     }
                 }
             }

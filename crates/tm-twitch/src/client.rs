@@ -143,7 +143,7 @@ impl TwitchClient {
             let cache = self
                 .client_version
                 .lock()
-                .expect("client version lock poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if cache
                 .fetched_at
                 .is_some_and(|fetched_at| fetched_at.elapsed() < cache.ttl)
@@ -173,7 +173,7 @@ impl TwitchClient {
         let mut cache = self
             .client_version
             .lock()
-            .expect("client version lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.value.clone_from(&build_id);
         cache.fetched_at = Some(Instant::now());
         Ok(build_id)

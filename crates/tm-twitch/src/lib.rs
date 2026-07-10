@@ -18,6 +18,7 @@ pub use contracts::{extract_build_id, extract_settings_script_url, extract_spade
 pub use cookies::claim_bonus_cookie_header;
 pub use gql::{gql_batch_request, gql_headers, gql_request};
 pub use ids::{generate_client_session_id, generate_device_id, generate_transaction_id};
+pub use operations::{PersistedOperationContract, PERSISTED_OPERATION_CONTRACTS};
 pub use parsers::{
     community_goal_contribution_amount, minute_watched_request, operation_names,
     parse_available_drop_campaign_ids, parse_channel_points_context, parse_followers_page,
@@ -217,6 +218,40 @@ mod tests {
             "DropsHighlightService_AvailableDrops"
         );
         assert_eq!(operations::inventory().operation_name, "Inventory");
+    }
+
+    #[test]
+    fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
+        let operations = [
+            operations::get_id_from_login("abc"),
+            operations::channel_follows(1, "DESC"),
+            operations::channel_points_context("abc"),
+            operations::is_stream_live("1"),
+            operations::stream_info_overlay("abc"),
+            operations::claim_community_points("1", "2"),
+            operations::community_moment_claim("moment"),
+            operations::join_raid("raid"),
+            operations::make_prediction("event", "outcome", 1, "transaction"),
+            operations::inventory(),
+            operations::viewer_drops_dashboard(),
+            operations::claim_drop_rewards("drop"),
+            operations::drops_highlight_service_available("1"),
+            operations::user_points_contribution("abc"),
+            operations::contribute_community_goal(1, "1", "goal", "transaction"),
+        ];
+        assert_eq!(operations.len(), PERSISTED_OPERATION_CONTRACTS.len());
+        let mut names = std::collections::HashSet::new();
+        for operation in operations {
+            let contract = PERSISTED_OPERATION_CONTRACTS
+                .iter()
+                .find(|contract| contract.operation_name == operation.operation_name)
+                .expect("operation must be inventoried");
+            assert_eq!(
+                operation.extensions.persisted_query.sha256_hash,
+                contract.sha256_hash
+            );
+            assert!(names.insert(contract.operation_name));
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,14 @@ pub enum ConfigError {
     Io(#[from] io::Error),
     #[error("config validation failed: {0}")]
     Validation(String),
+}
+
+pub const CONFIG_SCHEMA_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigPreview {
+    pub config: ConfigFile,
+    pub migration_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,10 +98,11 @@ pub struct DiscordConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ConfigFile {
+    #[serde(default = "current_schema_version")]
+    pub config_schema_version: u64,
     pub username: String,
     #[serde(default)]
     pub password: String,
-    pub auto_update: bool,
     pub debug: bool,
     pub debug_deep: bool,
     pub watch_queue_logging: bool,
@@ -124,6 +134,10 @@ pub struct ConfigFile {
     pub streamer_overrides: HashMap<String, StreamerSettingsOverride>,
 }
 
+const fn current_schema_version() -> u64 {
+    CONFIG_SCHEMA_VERSION
+}
+
 impl Default for ConfigFile {
     fn default() -> Self {
         serde_json::from_value(default_config_value()).expect("default config must deserialize")
@@ -133,8 +147,8 @@ impl Default for ConfigFile {
 #[must_use]
 pub fn default_config_value() -> Value {
     json!({
+        "config_schema_version": CONFIG_SCHEMA_VERSION,
         "username": "your-twitch-username",
-        "auto_update": false,
         "debug": false,
         "debug_deep": false,
         "watch_queue_logging": false,
@@ -187,7 +201,16 @@ pub fn default_config_value() -> Value {
 }
 
 pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
+    Ok(load_config(path, true)?.config)
+}
+
+pub fn preview_config(path: &Path) -> Result<ConfigPreview, ConfigError> {
+    load_config(path, false)
+}
+
+fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigError> {
     let mut changed = false;
+    let existed = path.is_file();
     let mut value = match fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -205,6 +228,9 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
             ),
         )));
     }
+
+    migrate_removed_options(&mut value, &mut changed)?;
+    validate_schema_version(&value)?;
 
     changed |= fill_missing_top_level(&mut value, &default_config_value());
     validate_object_section(&value, "privacy")?;
@@ -229,7 +255,7 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     let bet_value = value
         .as_object_mut()
         .and_then(|root| root.get_mut("bet"))
-        .expect("bet object must exist");
+        .ok_or_else(|| ConfigError::Validation(String::from("config.bet must be a JSON object")))?;
     changed |= ensure_object_key(
         bet_value,
         "filter_condition",
@@ -239,14 +265,25 @@ pub fn load_or_create_config(path: &Path) -> Result<ConfigFile, ConfigError> {
     changed |=
         ensure_streamer_override_defaults(&mut value, &bet_defaults, &filter_condition_defaults);
 
-    if changed {
+    if write_back && existed {
+        set_private_config_permissions(path)?;
+    }
+    if changed && write_back {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+        if existed {
+            let backup = config_backup_path(path);
+            fs::copy(path, &backup)?;
+            set_private_config_permissions(&backup)?;
+        }
+        atomic_write(path, &serde_json::to_vec_pretty(&value)?)?;
     }
 
-    Ok(serde_json::from_value(value)?)
+    Ok(ConfigPreview {
+        config: serde_json::from_value(value)?,
+        migration_required: changed,
+    })
 }
 
 pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
@@ -267,6 +304,115 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
+}
+
+fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), ConfigError> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| ConfigError::Validation(String::from("config root must be an object")))?;
+    if let Some(auto_update) = root.get("auto_update") {
+        match auto_update.as_bool() {
+            Some(true) => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.auto_update is no longer supported; remove it before starting",
+                )));
+            }
+            Some(false) => {}
+            None => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.auto_update must be a boolean when present",
+                )));
+            }
+        }
+        root.remove("auto_update");
+        *changed = true;
+    }
+    Ok(())
+}
+
+fn validate_schema_version(value: &Value) -> Result<(), ConfigError> {
+    let Some(version) = value.get("config_schema_version") else {
+        return Ok(());
+    };
+    let Some(version) = version.as_u64() else {
+        return Err(ConfigError::Validation(String::from(
+            "config.config_schema_version must be a positive integer",
+        )));
+    };
+    if version > CONFIG_SCHEMA_VERSION {
+        return Err(ConfigError::Validation(format!(
+            "config schema version {version} is newer than supported version {CONFIG_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+fn config_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+fn atomic_write(path: &Path, payload: &[u8]) -> io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.json");
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let mut file = open_private_config_file(&temporary)?;
+    file.write_all(payload)?;
+    file.sync_all()?;
+    match fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(_) if path.exists() => replace_windows_config_file(&temporary, path),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn replace_windows_config_file(temporary: &Path, path: &Path) -> io::Result<()> {
+    let backup = config_backup_path(path);
+    fs::remove_file(path)?;
+    if let Err(error) = fs::rename(temporary, path) {
+        if backup.is_file() {
+            let _ = fs::copy(backup, path);
+            let _ = set_private_config_permissions(path);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_private_config_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_private_config_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn set_private_config_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_config_permissions(path: &Path) -> io::Result<()> {
+    fs::metadata(path).map(|_| ())
 }
 
 pub fn resolve_app_paths(input: &ResolveAppPathsInput) -> io::Result<AppPaths> {
@@ -811,10 +957,11 @@ mod tests {
         let config = load_or_create_config(&path).unwrap();
         assert_eq!(config.chat_presence, "ONLINE");
         assert_eq!(config.password, "");
-        assert!(!config.auto_update);
+        assert_eq!(config.config_schema_version, CONFIG_SCHEMA_VERSION);
         assert!(path.exists());
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(value.get("password").is_none());
+        assert!(value.get("auto_update").is_none());
     }
 
     #[test]
@@ -838,6 +985,93 @@ mod tests {
         assert!(
             matches!(error, ConfigError::Validation(message) if message.contains("disable_ssl_cert_verification"))
         );
+    }
+
+    #[test]
+    fn load_rejects_enabled_legacy_auto_update_without_rewriting() {
+        let dir = unique_temp_dir("auto-update");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"username":"Alice","auto_update":true}"#).unwrap();
+
+        let error = load_or_create_config(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(message) if message.contains("auto_update")
+        ));
+        assert!(fs::read_to_string(path).unwrap().contains("auto_update"));
+    }
+
+    #[test]
+    fn preview_reports_migration_without_writing_and_write_back_creates_backup() {
+        let dir = unique_temp_dir("preview");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let original = br#"{"username":"Alice","auto_update":false}"#;
+        fs::write(&path, original).unwrap();
+
+        let preview = preview_config(&path).unwrap();
+        assert!(preview.migration_required);
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let config = load_or_create_config(&path).unwrap();
+        assert_eq!(config.config_schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(fs::read(config_backup_path(&path)).unwrap(), original);
+        let migrated: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(migrated.get("auto_update").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrated_config_and_backup_use_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("config-permissions");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"username":"Alice","auto_update":false}"#).unwrap();
+        load_or_create_config(&path).unwrap();
+
+        for candidate in [&path, &config_backup_path(&path)] {
+            let mode = fs::metadata(candidate).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_config_uses_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("unchanged-config-permissions");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&default_config_value()).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        load_or_create_config(&path).unwrap();
+
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn rejects_future_config_schema_without_rewriting() {
+        let dir = unique_temp_dir("future-schema");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let original = format!(
+            r#"{{"config_schema_version":{},"username":"Alice"}}"#,
+            CONFIG_SCHEMA_VERSION + 1
+        );
+        fs::write(&path, &original).unwrap();
+
+        assert!(preview_config(&path).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]

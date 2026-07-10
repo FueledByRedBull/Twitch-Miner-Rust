@@ -10,6 +10,7 @@ use tm_observability::Event as DiscordEvent;
 use tm_twitch::TwitchClient;
 
 use crate::observability::{streamer_game_name, AppObservability};
+use crate::status::HealthTracker;
 use crate::utilities::{sleep_or_stop, time_now};
 use crate::watching::{
     minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction,
@@ -23,6 +24,7 @@ pub(crate) fn spawn_minute_watcher_loop(
     twitch: Arc<TwitchClient>,
     user_id: String,
     observability: AppObservability,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let spade_urls = tokio::sync::Mutex::new(HashMap::<String, SpadeCacheEntry>::new());
@@ -52,7 +54,8 @@ pub(crate) fn spawn_minute_watcher_loop(
             )
             .await
             {
-                tracing::warn!(%error, "watch selection metadata refresh failed");
+                health.failure("minute", "metadata-refresh");
+                tracing::warn!(task = "minute", error_class = "metadata-refresh", %error, "watch selection metadata refresh failed");
             }
             let snapshot = match runtime.state_snapshot().await {
                 Ok(snapshot) => snapshot,
@@ -63,6 +66,7 @@ pub(crate) fn spawn_minute_watcher_loop(
             };
             let watch_logins = snapshot.watch_target_logins(now);
             if watch_logins.is_empty() {
+                health.success("minute");
                 if sleep_or_stop(&mut stop, std::time::Duration::from_secs(20)).await {
                     break;
                 }
@@ -113,12 +117,16 @@ pub(crate) fn spawn_minute_watcher_loop(
                 )
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => health.success("minute"),
                     Ok(Err(error)) => {
-                        tracing::warn!(streamer = %streamer.username, %error, "minute watched failed");
+                        health.failure("minute", "watch-request");
+                        tracing::warn!(task = "minute", error_class = "watch-request", streamer = %streamer.username, %error, "minute watched failed");
                     }
                     Err(_) => {
+                        health.failure("minute", "watch-timeout");
                         tracing::warn!(
+                            task = "minute",
+                            error_class = "watch-timeout",
                             streamer = %streamer.username,
                             timeout_seconds = MINUTE_WATCHER_REQUEST_TIMEOUT.as_secs(),
                             "minute watched timed out"

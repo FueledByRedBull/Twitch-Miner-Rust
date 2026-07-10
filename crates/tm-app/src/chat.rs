@@ -4,6 +4,7 @@ use anyhow::Result;
 use tm_irc::ChatClient;
 
 use crate::observability::{AppObservability, TracingChatLogger};
+use crate::status::HealthTracker;
 use crate::utilities::sleep_or_stop;
 
 pub(crate) fn spawn_chat_manager_loop(
@@ -13,6 +14,7 @@ pub(crate) fn spawn_chat_manager_loop(
     username: String,
     disable_at_in_nickname: bool,
     observability: AppObservability,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut watchers: HashMap<
@@ -24,6 +26,8 @@ pub(crate) fn spawn_chat_manager_loop(
         > = HashMap::new();
         let mut stop = stop;
         let mut state_changes = runtime.subscribe_state_changes();
+        let mut idle_heartbeat = tokio::time::interval(std::time::Duration::from_secs(60));
+        idle_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         if let Err(error) = reconcile_chat_watchers(
             &runtime,
@@ -32,12 +36,15 @@ pub(crate) fn spawn_chat_manager_loop(
             &username,
             disable_at_in_nickname,
             &observability,
+            &health,
         )
         .await
         {
-            tracing::warn!(%error, "chat manager snapshot failed");
+            health.failure("chat", "manager-snapshot");
+            tracing::warn!(task = "chat", error_class = "manager-snapshot", %error, "chat manager snapshot failed");
             return;
         }
+        health.success("chat");
 
         loop {
             tokio::select! {
@@ -57,12 +64,18 @@ pub(crate) fn spawn_chat_manager_loop(
                         &username,
                         disable_at_in_nickname,
                         &observability,
+                        &health,
                     )
                     .await
                     {
-                        tracing::warn!(%error, "chat manager snapshot failed");
+                        health.failure("chat", "manager-snapshot");
+                        tracing::warn!(task = "chat", error_class = "manager-snapshot", %error, "chat manager snapshot failed");
                         break;
                     }
+                    health.success("chat");
+                }
+                _ = idle_heartbeat.tick(), if watchers.is_empty() => {
+                    health.success("chat");
                 }
             }
         }
@@ -87,6 +100,7 @@ pub(crate) async fn reconcile_chat_watchers(
     username: &str,
     disable_at_in_nickname: bool,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     let snapshot = runtime.state_snapshot().await?;
     let labels = snapshot
@@ -132,6 +146,7 @@ pub(crate) async fn reconcile_chat_watchers(
             login.clone(),
             disable_at_in_nickname,
             observability.clone(),
+            health.clone(),
         );
         watchers.insert(login.clone(), (watcher_stop, task));
         let message = observability.chat_presence_message(
@@ -153,6 +168,7 @@ pub(crate) fn spawn_chat_watcher_loop(
     channel: String,
     disable_at_in_nickname: bool,
     observability: AppObservability,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stop = stop;
@@ -167,6 +183,7 @@ pub(crate) fn spawn_chat_watcher_loop(
                 &channel,
                 TracingChatLogger {
                     observability: observability.clone(),
+                    health: health.clone(),
                 },
                 disable_at_in_nickname,
             );
@@ -178,7 +195,10 @@ pub(crate) fn spawn_chat_watcher_loop(
                 }
                 result = client.connect_and_run() => {
                     if let Err(error) = result {
-                        tracing::warn!(channel = %channel, %error, "irc watcher disconnected");
+                        health.failure("chat", "irc-disconnect");
+                        tracing::warn!(task = "chat", error_class = "irc-disconnect", channel = %channel, %error, "irc watcher disconnected");
+                    } else {
+                        health.failure("chat", "irc-closed");
                     }
                 }
             }

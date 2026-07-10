@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
+use crate::status::StatusReporter;
 use crate::{BackgroundTasks, SHUTDOWN_TASK_GRACE_PERIOD};
 
 pub(crate) async fn shutdown_background_tasks(
@@ -45,7 +46,30 @@ pub(crate) async fn await_shutdown_task(name: &str, mut task: tokio::task::JoinH
     }
 }
 
-pub(crate) async fn wait_for_shutdown_signal() -> Result<()> {
+pub(crate) async fn wait_for_shutdown_or_task_failure(
+    tasks: &BackgroundTasks,
+    status: &StatusReporter,
+) -> Result<()> {
+    let signal = wait_for_shutdown_signal();
+    tokio::pin!(signal);
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            result = &mut signal => return result,
+            _ = heartbeat.tick() => {
+                let finished = tasks.unexpectedly_finished();
+                if !finished.is_empty() {
+                    return Err(anyhow!("background task exited unexpectedly: {}", finished.join(", ")));
+                }
+                status.heartbeat()?;
+            }
+        }
+    }
+}
+
+async fn wait_for_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
         let mut terminate =
@@ -62,4 +86,18 @@ pub(crate) async fn wait_for_shutdown_signal() -> Result<()> {
         tokio::signal::ctrl_c().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::await_shutdown_task;
+
+    #[tokio::test]
+    async fn shutdown_waiter_handles_completed_and_aborted_tasks() {
+        await_shutdown_task("completed", tokio::spawn(async {})).await;
+
+        let aborted = tokio::spawn(async { std::future::pending::<()>().await });
+        aborted.abort();
+        await_shutdown_task("aborted", aborted).await;
+    }
 }

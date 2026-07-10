@@ -1,5 +1,3 @@
-use std::env;
-
 use anyhow::{Context, Result};
 use tm_config::ConfigFile;
 use tm_domain::{Game, Streamer};
@@ -20,40 +18,6 @@ pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
         debug: config.debug,
         debug_deep: config.debug_deep,
         anonymize_logs: config.privacy.anonymize_logs,
-    }
-}
-
-pub(crate) async fn run_auto_update_if_enabled(config: &ConfigFile) -> Result<bool> {
-    if !config.auto_update {
-        return Ok(false);
-    }
-    let args = env::args().skip(1).collect::<Vec<_>>();
-    match tm_updater::run_auto_update(env!("CARGO_PKG_VERSION"), &args).await {
-        Ok(tm_updater::AutoUpdateOutcome::UpToDate) => Ok(false),
-        Ok(tm_updater::AutoUpdateOutcome::UpdateAvailableForDevRun { latest_version }) => {
-            tracing::warn!(
-                latest_version = %latest_version,
-                "auto-update skipped for development run"
-            );
-            Ok(false)
-        }
-        Ok(tm_updater::AutoUpdateOutcome::UpdatedAndRestarting { latest_version }) => {
-            tracing::info!(
-                latest_version = %latest_version,
-                "auto-update installed a newer version; restarting"
-            );
-            Ok(true)
-        }
-        Err(tm_updater::AutoUpdateError::Update(
-            tm_updater::UpdateError::UnsupportedReleaseContract,
-        )) => {
-            tracing::warn!(
-                repository = %tm_updater::PROJECT_REPOSITORY_URL,
-                "auto-update skipped because no Rust binary release contract is configured"
-            );
-            Ok(false)
-        }
-        Err(error) => Err(error.into()),
     }
 }
 

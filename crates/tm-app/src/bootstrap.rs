@@ -115,6 +115,32 @@ pub(crate) async fn load_or_login_session(
     load_or_login_session_with_auth_client(config, base_dir, &auth_client).await
 }
 
+pub(crate) async fn load_and_validate_existing_session(
+    config: &ConfigFile,
+    base_dir: &Path,
+    client: reqwest::Client,
+) -> Result<AuthSession> {
+    let username = normalized_username(&config.username)?;
+    let mut session =
+        AuthSession::load_from_dir(base_dir, &username).context("load existing canary session")?;
+    let auth_token = session
+        .auth_token()
+        .ok_or_else(|| anyhow!("existing canary session has no auth token"))?
+        .to_string();
+    let auth_client = TwitchAuthClient::with_client(client);
+    let user_id = auth_client
+        .validate_login(
+            &auth_token,
+            &generate_device_id(),
+            &username,
+            DEFAULT_USER_AGENT,
+        )
+        .await
+        .context("validate existing canary session")?;
+    session.set_user_id(user_id);
+    Ok(session)
+}
+
 pub(crate) async fn load_or_login_session_with_auth_client(
     config: &ConfigFile,
     base_dir: &Path,

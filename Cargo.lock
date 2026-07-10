@@ -1483,7 +1483,9 @@ dependencies = [
  "chrono-tz",
  "clap",
  "reqwest",
+ "serde",
  "serde_json",
+ "tempfile",
  "tm-auth",
  "tm-config",
  "tm-domain",
@@ -1492,7 +1494,6 @@ dependencies = [
  "tm-pubsub",
  "tm-runtime",
  "tm-twitch",
- "tm-updater",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1527,7 +1528,10 @@ name = "tm-contract-tests"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "tm-auth",
+ "tm-config",
  "tm-domain",
+ "tm-irc",
  "tm-pubsub",
  "tm-twitch",
 ]
@@ -1615,17 +1619,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tm-domain",
-]
-
-[[package]]
-name = "tm-updater"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
 ]
 
 [[package]]

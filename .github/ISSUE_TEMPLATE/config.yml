@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/FueledByRedBull/Twitch-Miner-Rust/security
+    about: Report sensitive issues privately; never attach credentials or runtime data.

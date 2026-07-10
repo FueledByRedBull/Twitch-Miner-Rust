@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
@@ -25,6 +25,9 @@ use tracing_subscriber::Layer;
 pub const DISCORD_USERNAME: &str = "Twitch Channel Points Miner";
 pub const DISCORD_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/0x8fv/Twitch-Channel-Points-Miner/main/assets/gopher.png";
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_LOG_ARCHIVES: usize = 5;
+const MAX_LOG_ARCHIVE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -399,11 +402,12 @@ pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityErr
     let registry = tracing_subscriber::registry().with(console_layer);
 
     if options.settings.save {
-        let writer = SharedFileWriter::new(open_log_file(
+        let path = log_file_path(
             &options.base_dir,
             &options.username,
             options.settings.anonymize_logs,
-        )?);
+        );
+        let writer = SharedFileWriter::new(path)?;
         let file_layer = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_target(false)
@@ -427,7 +431,7 @@ pub fn open_log_file(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    OpenOptions::new().create(true).append(true).open(path)
+    open_private_log_file(&path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,14 +535,18 @@ fn format_level(level: Level) -> &'static str {
 
 #[derive(Clone)]
 struct SharedFileWriter {
-    file: Arc<Mutex<File>>,
+    file: Arc<Mutex<RotatingFile>>,
 }
 
 impl SharedFileWriter {
-    fn new(file: File) -> Self {
-        Self {
-            file: Arc::new(Mutex::new(file)),
-        }
+    fn new(path: PathBuf) -> io::Result<Self> {
+        Ok(Self {
+            file: Arc::new(Mutex::new(RotatingFile::new(
+                path,
+                MAX_LOG_BYTES,
+                MAX_LOG_ARCHIVES,
+            )?)),
+        })
     }
 }
 
@@ -553,7 +561,7 @@ impl<'a> MakeWriter<'a> for SharedFileWriter {
 }
 
 struct LockedFileWriter {
-    file: Arc<Mutex<File>>,
+    file: Arc<Mutex<RotatingFile>>,
 }
 
 impl Write for LockedFileWriter {
@@ -572,6 +580,149 @@ impl Write for LockedFileWriter {
             .map_err(|_| io::Error::other("log file lock poisoned"))?;
         file.flush()
     }
+}
+
+struct RotatingFile {
+    path: PathBuf,
+    file: Option<File>,
+    size: u64,
+    max_bytes: u64,
+    max_archives: usize,
+}
+
+impl RotatingFile {
+    fn new(path: PathBuf, max_bytes: u64, max_archives: usize) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        prune_old_log_archives(&path, MAX_LOG_ARCHIVE_AGE)?;
+        let file = open_private_log_file(&path)?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            path,
+            file: Some(file),
+            size,
+            max_bytes,
+            max_archives,
+        })
+    }
+
+    fn rotate(&mut self) -> io::Result<()> {
+        self.file.take();
+        for index in (1..=self.max_archives).rev() {
+            let source = archive_path(&self.path, index);
+            if index == self.max_archives {
+                if source.is_file() {
+                    fs::remove_file(source)?;
+                }
+                continue;
+            }
+            if source.is_file() {
+                fs::rename(source, archive_path(&self.path, index + 1))?;
+            }
+        }
+        if self.path.is_file() {
+            fs::rename(&self.path, archive_path(&self.path, 1))?;
+        }
+        self.file = Some(open_private_log_file(&self.path)?);
+        self.size = 0;
+        Ok(())
+    }
+
+    fn active_file(&mut self) -> io::Result<&mut File> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("rotating log file is unavailable"))
+    }
+}
+
+impl Write for RotatingFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let incoming = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        if self.size > 0 && self.size.saturating_add(incoming) > self.max_bytes {
+            self.rotate()?;
+        }
+        let written = self.active_file()?.write(buf)?;
+        self.size = self
+            .size
+            .saturating_add(u64::try_from(written).unwrap_or_default());
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.active_file()?.flush()
+    }
+}
+
+fn archive_path(path: &Path, index: usize) -> PathBuf {
+    path.with_extension(format!("log.{index}"))
+}
+
+fn open_private_log_file(path: &Path) -> io::Result<File> {
+    let file = open_log_append(path)?;
+    set_private_log_permissions(path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_log_append(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_log_append(path: &Path) -> io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+#[cfg(unix)]
+fn set_private_log_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_log_permissions(path: &Path) -> io::Result<()> {
+    fs::metadata(path).map(|_| ())
+}
+
+fn prune_old_log_archives(path: &Path, max_age: Duration) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{file_name}.");
+    let now = SystemTime::now();
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let archive_index = name
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.parse::<usize>().ok());
+        if archive_index.is_none() || !entry.file_type()?.is_file() {
+            continue;
+        }
+        set_private_log_permissions(&entry.path())?;
+        let old = entry
+            .metadata()?
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if old {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn form_url_encode(pairs: &[(&str, &str)]) -> String {
@@ -774,6 +925,44 @@ mod tests {
         assert!(path.exists());
         let metadata = fs::metadata(path).unwrap();
         assert!(metadata.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_files_use_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let _file = open_log_file(dir.path(), "alice", false).unwrap();
+        let path = dir.path().join("log").join("alice.log");
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn rotating_log_writer_bounds_file_size_and_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("miner.log");
+        let mut writer = RotatingFile::new(path.clone(), 10, 2).unwrap();
+        writer.write_all(b"12345678").unwrap();
+        writer.write_all(b"abcdefgh").unwrap();
+        writer.flush().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "abcdefgh");
+        assert_eq!(
+            fs::read_to_string(archive_path(&path, 1)).unwrap(),
+            "12345678"
+        );
+        assert!(!archive_path(&path, 3).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for candidate in [&path, &archive_path(&path, 1)] {
+                let mode = fs::metadata(candidate).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+        }
     }
 
     #[test]

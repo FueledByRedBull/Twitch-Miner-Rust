@@ -5,7 +5,7 @@
 Use the workspace root and point the app at the checked-in data directory:
 
 ```powershell
-cd C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust
+cd Twitch-Miner-Rust
 cargo run -p tm-app -- --config ./data/config.json --data-dir ./data
 ```
 
@@ -14,7 +14,8 @@ If you want to watch logs in the foreground, run the command directly in the ter
 ## First-Time Login
 
 - Set `username` in `data/config.json`.
-- Keep `auto_update=false` if you want to stay on the local source build.
+- `auto_update` was removed. A legacy `false` value is migrated away and `true`
+  is rejected.
 - Remove `password` from older configs; device-code login does not use it.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
@@ -47,16 +48,18 @@ If you are migrating a Linux bind mount from an older root-run image, make sure 
 Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64`, `linux/arm64`, and `linux/arm/v7`, matching the GitHub Actions workflow.
 
 ```powershell
-cd C:/Users/ancha/Documents/Projects/TwitchMiner/Twitch-Miner-Rust
+cd Twitch-Miner-Rust
 ./scripts/build-multiarch.ps1
-docker run --rm ghcr.io/fueledbyredbull/twitch-miner-rust:latest --help
+docker run --rm twitch-miner-rust:local --help
 ./scripts/build-multiarch.ps1 -Push
 ```
 
 GitHub Actions also publishes the GHCR image on pushes to `main` and `v*` tags.
+Deploy the recorded manifest digest, not `latest`; see [release-process.md](../release-process.md).
 
 ## Notes
 
 - Treat `data/cookies/<username>.json` as an authentication secret.
 - This is unofficial Twitch automation; prefer a dedicated account if account risk matters.
-- Docker and Raspberry Pi smoke validation were not performed in this environment.
+- Use `tm-app --check-config` before a migration, `--health` after startup, and
+  `--support-bundle ./support.json` for a privacy-safe support artifact.

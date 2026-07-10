@@ -23,6 +23,7 @@ pub struct PubSubClientSettings {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PubSubConnectionEvent {
+    Heartbeat,
     Event(Box<PubSubEvent>),
     ResponseError {
         error: String,
@@ -131,6 +132,10 @@ impl PubSubClient {
                         }
                         Message::Pong(_) => {
                             last_pong = Instant::now();
+                            sender
+                                .send(PubSubConnectionEvent::Heartbeat)
+                                .await
+                                .map_err(|_| PubSubError::EventChannelClosed)?;
                         }
                         Message::Close(_) => return Ok(()),
                         Message::Frame(_) => {}
@@ -160,6 +165,10 @@ async fn handle_transport_frame(
     match parse_transport_message(raw, tracked_streamers)? {
         IncomingTransportMessage::Pong => {
             *last_pong = Instant::now();
+            sender
+                .send(PubSubConnectionEvent::Heartbeat)
+                .await
+                .map_err(|_| PubSubError::EventChannelClosed)?;
         }
         IncomingTransportMessage::Reconnect => {
             return Err(PubSubError::ReconnectRequested);

@@ -7,6 +7,7 @@ use tm_observability::Event as DiscordEvent;
 use tm_twitch::{InventoryDrop, TwitchClient};
 
 use crate::observability::AppObservability;
+use crate::status::HealthTracker;
 
 pub(crate) async fn claim_startup_drops_if_enabled(
     config: &ConfigFile,
@@ -37,6 +38,7 @@ pub(crate) fn spawn_drop_claim_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     twitch: Arc<TwitchClient>,
     observability: AppObservability,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
@@ -53,7 +55,10 @@ pub(crate) fn spawn_drop_claim_loop(
                     if let Err(error) =
                         claim_available_drops(twitch.as_ref(), "periodic", &observability).await
                     {
-                        tracing::warn!(%error, "periodic drop claim failed");
+                        health.failure("drop", "inventory-or-claim");
+                        tracing::warn!(task = "drop", error_class = "inventory-or-claim", %error, "periodic drop claim failed");
+                    } else {
+                        health.success("drop");
                     }
                 }
             }

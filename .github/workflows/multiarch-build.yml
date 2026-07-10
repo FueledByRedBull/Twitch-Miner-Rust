@@ -35,39 +35,58 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - id: build_metadata
+        run: |
+          "time=$(git show -s --format=%cI $env:GITHUB_SHA)" >> $env:GITHUB_OUTPUT
+        shell: pwsh
 
       - if: matrix.platform != 'linux/amd64'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - id: image
         run: |
           "name=ghcr.io/$($env:GITHUB_REPOSITORY.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=multiarch-${{ matrix.platform_tag }}
           cache-to: type=gha,mode=max,scope=multiarch-${{ matrix.platform_tag }}
-          provenance: false
-          sbom: false
+          build-args: |
+            BUILD_REVISION=${{ github.sha }}
+            BUILD_TIME=${{ steps.build_metadata.outputs.time }}
+          provenance: mode=max
+          sbom: true
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Smoke test image
         run: |
           docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --help
+          $version = docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --version 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch 'built [^)]+' ) {
+            throw "Version metadata smoke test failed for ${{ matrix.platform }}: $($version -join ' ')"
+          }
+          $health = docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --health 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            throw 'Health validation unexpectedly passed without a runtime status file.'
+          }
+          if (($health -join "`n") -notmatch 'runtime[- ]status|runtime status') {
+            throw "Health validation failed for an unexpected reason on ${{ matrix.platform }}: $($health -join ' ')"
+          }
         shell: pwsh
 
       - name: Export digest
@@ -80,7 +99,7 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         id: digest_file
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digests-${{ matrix.platform_tag }}
           path: ${{ runner.temp }}/digests/*
@@ -93,7 +112,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - id: image
         run: |
@@ -101,7 +122,7 @@ jobs:
         shell: pwsh
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
@@ -109,19 +130,20 @@ jobs:
             type=ref,event=tag
             type=ref,event=branch
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
 
-      - name: Create manifest list
+      - id: manifest
+        name: Create manifest list
         run: |
           $images = Get-ChildItem '${{ runner.temp }}/digests' -File | ForEach-Object {
             "${{ steps.image.outputs.name }}@sha256:$($_.BaseName)"
@@ -129,10 +151,40 @@ jobs:
           if (-not $images) {
             throw 'No image digests were produced.'
           }
+          New-Item -ItemType Directory -Path '${{ runner.temp }}/manifest' -Force | Out-Null
+          $metadata = '${{ runner.temp }}/manifest/metadata.json'
           $tags = ($env:IMAGE_TAGS -split "\r?\n") | Where-Object { $_ }
-          foreach ($tag in $tags) {
-            docker buildx imagetools create --tag $tag @images
+          for ($index = 0; $index -lt $tags.Count; $index++) {
+            $arguments = @('buildx', 'imagetools', 'create', '--tag', $tags[$index])
+            if ($index -eq 0) {
+              $arguments += '--metadata-file', $metadata
+            }
+            $arguments += $images
+            docker @arguments
           }
+          $digest = ((Get-Content -Raw $metadata | ConvertFrom-Json).'containerimage.descriptor'.digest
+          if ($digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            throw 'Manifest publication did not provide a valid digest.'
+          }
+          "digest=$digest" >> $env:GITHUB_OUTPUT
         shell: pwsh
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+
+      - name: Smoke test published manifest digest
+        shell: pwsh
+        run: |
+          $digest = '${{ steps.manifest.outputs.digest }}'
+          foreach ($platform in @('linux/amd64', 'linux/arm64', 'linux/arm/v7')) {
+            docker run --rm --platform $platform "${{ steps.image.outputs.name }}@$digest" --help
+            if ($LASTEXITCODE -ne 0) {
+              throw "Published manifest smoke test failed for $platform."
+            }
+          }
+          Set-Content -Path '${{ runner.temp }}/manifest/digest.txt' -Value $digest -NoNewline
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-manifest-digest
+          path: ${{ runner.temp }}/manifest/digest.txt
+          if-no-files-found: error

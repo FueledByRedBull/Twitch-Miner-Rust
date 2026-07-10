@@ -28,6 +28,7 @@ mod tests {
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
     use crate::startup::{bootstrap_runtime_state, load_targets};
+    use crate::status::HealthTracker;
     use crate::utilities::new_session_id;
     use crate::watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry};
     use crate::Cli;
@@ -340,12 +341,20 @@ mod tests {
         let cli = Cli {
             config: None,
             data_dir: None,
+            health: false,
+            check_config: false,
+            support_bundle: None,
+            canary: false,
         };
         assert!(!has_override(&cli));
 
         let cli = Cli {
             config: Some(PathBuf::from("config.json")),
             data_dir: None,
+            health: false,
+            check_config: false,
+            support_bundle: None,
+            canary: false,
         };
         assert!(has_override(&cli));
     }
@@ -637,16 +646,20 @@ mod tests {
         let clean_close = Ok(Ok(()));
 
         assert_eq!(
-            pubsub_reconnect_delay(&reconnect_requested, 0, 1),
+            pubsub_reconnect_delay(&reconnect_requested, 0, 1, 1),
             Some(Duration::from_secs(60))
         );
         assert_eq!(
-            pubsub_reconnect_delay(&generic_failure, 0, 1),
-            Some(Duration::from_secs(10))
+            pubsub_reconnect_delay(&generic_failure, 0, 1, 1),
+            Some(Duration::from_secs(16))
         );
         assert_eq!(
-            pubsub_reconnect_delay(&clean_close, 0, 1),
-            Some(Duration::from_secs(5))
+            pubsub_reconnect_delay(&clean_close, 0, 1, 1),
+            Some(Duration::from_secs(11))
+        );
+        assert_eq!(
+            pubsub_reconnect_delay(&generic_failure, 0, 1, 6),
+            Some(Duration::from_secs(300))
         );
     }
 
@@ -898,6 +911,7 @@ mod tests {
             twitch,
             String::from("user-1"),
             test_observability(),
+            HealthTracker::default(),
         );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -966,6 +980,7 @@ mod tests {
             twitch,
             String::from("user-1"),
             test_observability(),
+            HealthTracker::default(),
         );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1256,6 +1271,50 @@ mod tests {
             sent_urls.lock().unwrap().as_slice(),
             ["https://spade-1.example", "https://spade-2.example"]
         );
+    }
+
+    #[tokio::test]
+    async fn spade_cache_recovers_from_unauthorized_rate_limit_and_server_errors() {
+        for failure in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let cache = tokio::sync::Mutex::new(HashMap::new());
+            let fetches = Arc::new(AtomicUsize::new(0));
+            let sends = Arc::new(AtomicUsize::new(0));
+            let status = send_minute_watched_with_spade_cache(
+                &cache,
+                "alice",
+                {
+                    let fetches = Arc::clone(&fetches);
+                    move |_login| {
+                        let attempt = fetches.fetch_add(1, Ordering::SeqCst) + 1;
+                        async move {
+                            Ok::<_, std::io::Error>(format!("https://spade-{attempt}.example"))
+                        }
+                    }
+                },
+                {
+                    let sends = Arc::clone(&sends);
+                    move |_url| {
+                        let attempt = sends.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            Ok::<_, std::io::Error>(if attempt == 0 {
+                                failure
+                            } else {
+                                StatusCode::NO_CONTENT
+                            })
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert_eq!(fetches.load(Ordering::SeqCst), 2);
+            assert_eq!(sends.load(Ordering::SeqCst), 2);
+        }
     }
 
     #[tokio::test]

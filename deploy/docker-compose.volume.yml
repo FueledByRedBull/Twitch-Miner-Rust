@@ -1,9 +1,17 @@
 services:
   twitch-miner:
-    image: ghcr.io/fueledbyredbull/twitch-miner-rust:latest
+    image: "${TWITCH_MINER_IMAGE:?Set TWITCH_MINER_IMAGE to ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<digest>}"
+    user: "${UID:-1000}:${GID:-1000}"
     init: true
     restart: unless-stopped
     stop_grace_period: 30s
+    read_only: true
+    healthcheck:
+      test: ["CMD", "/twitch-miner", "--health"]
+      interval: 60s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
     environment:
       TCPM_CONFIG: /data/config.json
       TCPM_DATA_DIR: /data

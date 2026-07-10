@@ -1,8 +1,8 @@
 use std::fs;
-use std::io;
-use std::path::Path;
 #[cfg(unix)]
-use std::{fs::OpenOptions, io::Write};
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::Path;
 
 use thiserror::Error;
 
@@ -57,7 +57,16 @@ impl AuthSession {
             fs::create_dir_all(parent)?;
         }
         let payload = encode_cookie_store(&self.store)?;
-        write_cookie_file(&path, payload.as_bytes())?;
+        if fs::read(&path).is_ok_and(|current| current == payload.as_bytes()) {
+            set_private_cookie_permissions(&path)?;
+            return Ok(());
+        }
+        if path.is_file() {
+            let backup = path.with_extension("json.bak");
+            fs::copy(&path, &backup)?;
+            set_private_cookie_permissions(&backup)?;
+        }
+        atomic_write_cookie_file(&path, payload.as_bytes())?;
         Ok(())
     }
 
@@ -150,23 +159,68 @@ impl AuthSession {
     }
 }
 
+fn atomic_write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cookies.json");
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let mut file = open_private_cookie_file(&temporary)?;
+    file.write_all(payload)?;
+    file.sync_all()?;
+    match fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(_) if path.exists() => replace_windows_cookie_file(&temporary, path),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn replace_windows_cookie_file(temporary: &Path, path: &Path) -> io::Result<()> {
+    let backup = path.with_extension("json.bak");
+    fs::remove_file(path)?;
+    if let Err(error) = fs::rename(temporary, path) {
+        if backup.is_file() {
+            let _ = fs::copy(backup, path);
+            let _ = set_private_cookie_permissions(path);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
-fn write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
+fn open_private_cookie_file(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let mut file = OpenOptions::new()
+    OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
-        .open(path)?;
-    file.write_all(payload)?;
-    file.flush()
+        .open(path)
+}
+
+#[cfg(unix)]
+fn set_private_cookie_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(not(unix))]
-fn write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
-    fs::write(path, payload)
+fn set_private_cookie_permissions(path: &Path) -> io::Result<()> {
+    fs::metadata(path).map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn open_private_cookie_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
 }
 
 fn host_matches_cookie_domain(host: &str, domain: &str) -> bool {
@@ -250,6 +304,27 @@ mod tests {
         assert_eq!(loaded.store()["session"].value, "abc");
     }
 
+    #[test]
+    fn changed_cookie_file_keeps_previous_version_as_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = sample_session();
+        session.save_to_dir(dir.path()).unwrap();
+        session.set_auth_token("replacement-token");
+        session.save_to_dir(dir.path()).unwrap();
+
+        let path = cookie_file_path(dir.path(), session.username());
+        let backup =
+            AuthSession::from_bytes("alice", &fs::read(path.with_extension("json.bak")).unwrap())
+                .unwrap();
+        assert_eq!(backup.auth_token(), Some("token"));
+        assert_eq!(
+            AuthSession::load_from_dir(dir.path(), "alice")
+                .unwrap()
+                .auth_token(),
+            Some("replacement-token")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn session_cookie_file_uses_private_unix_permissions() {
@@ -260,6 +335,39 @@ mod tests {
         session.save_to_dir(dir.path()).unwrap();
 
         let path = cookie_file_path(dir.path(), session.username());
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_cookie_file_tightens_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = sample_session();
+        session.save_to_dir(dir.path()).unwrap();
+
+        let path = cookie_file_path(dir.path(), session.username());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        session.save_to_dir(dir.path()).unwrap();
+
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cookie_backup_uses_private_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = sample_session();
+        session.save_to_dir(dir.path()).unwrap();
+        session.set_auth_token("replacement-token");
+        session.save_to_dir(dir.path()).unwrap();
+
+        let path = cookie_file_path(dir.path(), session.username()).with_extension("json.bak");
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
