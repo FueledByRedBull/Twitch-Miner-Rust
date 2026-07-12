@@ -99,11 +99,16 @@ async fn run_read_only_canary_inner(
         "channel-points-context",
         twitch.fetch_channel_points_context(target).await,
     )?;
-    let _ = canary_step(
+    let target_is_live = canary_step(
         "stream-live",
         twitch.is_stream_live(&target_channel_id).await,
     )?;
-    let _ = canary_step("stream-info", twitch.fetch_stream_info(target).await)?;
+    // The overlay operation validly returns `stream: null` while a channel is
+    // offline. Match the runtime path and validate its live-only fields only
+    // when Twitch reports that the target is currently live.
+    if target_is_live {
+        let _ = canary_step("stream-info", twitch.fetch_stream_info(target).await)?;
+    }
     let _ = canary_step("inventory", twitch.fetch_inventory_typed().await)?;
     let _ = canary_step(
         "drops-dashboard",
@@ -125,7 +130,8 @@ async fn run_read_only_canary_inner(
     )?;
 
     tracing::info!(
-        read_operations = 10,
+        read_operations = if target_is_live { 10 } else { 9 },
+        stream_info_applicable = target_is_live,
         own_channel_id_present = !own_channel_id.is_empty(),
         "credential-safe Twitch canary passed"
     );
