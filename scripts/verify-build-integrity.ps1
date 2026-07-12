@@ -31,11 +31,15 @@ try {
     $env:BUILD_TIME = $oldBuildTime
 }
 
-$binary = Join-Path 'target/release' 'tm-app.exe'
+$isWindowsHost = $env:OS -eq 'Windows_NT' -or
+    [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+$binaryName = if ($isWindowsHost) { 'tm-app.exe' } else { 'tm-app' }
+$binary = Join-Path 'target/release' $binaryName
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
     throw "Release binary was not produced: $binary"
 }
-$version = (& $binary --version 2>&1) -join "`n"
+$binaryPath = (Resolve-Path -LiteralPath $binary).Path
+$version = (& $binaryPath --version 2>&1) -join "`n"
 if ($LASTEXITCODE -ne 0 -or $version -notmatch [regex]::Escape($revision) -or $version -notmatch 'built ') {
     throw 'Release binary metadata does not identify the source revision and build timestamp.'
 }
