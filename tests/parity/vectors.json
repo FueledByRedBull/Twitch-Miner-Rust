@@ -1,0 +1,120 @@
+{
+  "settings": {
+    "betting_make_predictions": true,
+    "follow_raid": false,
+    "claim_drops": true,
+    "community_goals": true,
+    "chat_presence": "OFFLINE",
+    "bet": {
+      "strategy": "MOST_VOTED",
+      "percentage": 11,
+      "percentage_gap": 18,
+      "max_points": 1234,
+      "minimum_points": 20,
+      "stealth_mode": true,
+      "deduct_stake_on_place": false,
+      "delay_mode": "FROM_START",
+      "delay": 3.5
+    },
+    "expected": {
+      "make_predictions": true,
+      "follow_raid": false,
+      "claim_drops": true,
+      "claim_moments": true,
+      "watch_streak": true,
+      "community_goals": true,
+      "chat_presence": "OFFLINE",
+      "strategy": "MOST_VOTED",
+      "percentage": 11,
+      "percentage_gap": 18,
+      "max_points": 1234,
+      "minimum_points": 20,
+      "stealth_mode": true,
+      "deduct_stake_on_place": false,
+      "delay_mode": "FROM_START",
+      "delay": 3.5
+    }
+  },
+  "prediction": {
+    "balance": 1000,
+    "settings": {
+      "strategy": "MOST_VOTED",
+      "percentage": 11,
+      "max_points": 1234,
+      "stealth_mode": true
+    },
+    "result": {
+      "type": "WIN",
+      "points_won": 150
+    },
+    "outcomes": [
+      {
+        "id": "a",
+        "title": "Yes",
+        "color": "blue",
+        "total_users": 10,
+        "total_points": 100,
+        "top_points": 20,
+        "top_predictors": [{"points": 20}]
+      },
+      {
+        "id": "b",
+        "title": "No",
+        "color": "pink",
+        "total_users": 5,
+        "total_points": 50,
+        "top_points": 10,
+        "top_predictors": [{"points": 10}]
+      }
+    ],
+    "expected": {
+      "choice": 0,
+      "outcome_id": "a",
+      "amount": 19,
+      "gained": 131,
+      "placed": 19,
+      "won": 150,
+      "result_type": "WIN",
+      "result_string": "WIN, Gained: +131"
+    }
+  },
+  "points": {
+    "initial_balance": 1000,
+    "earned": 50,
+    "reason": "WATCH",
+    "balance": 1050,
+    "expected": {
+      "balance": 1050,
+      "delta": 50,
+      "history_count": 1,
+      "history_amount": 50
+    }
+  },
+  "watch": {
+    "priority_names": ["POINTS_ASC"],
+    "game_priority": [],
+    "game_exclude": [],
+    "streamers": [
+      {"username": "alpha", "channel_id": "100", "channel_points": 500, "game": "Game A", "online": true},
+      {"username": "beta", "channel_id": "200", "channel_points": 100, "game": "Game B", "online": true},
+      {"username": "gamma", "channel_id": "300", "channel_points": 900, "game": "Game C", "online": false}
+    ],
+    "expected": [1, 0]
+  },
+  "pubsub": {
+    "raw": {
+      "type": "MESSAGE",
+      "data": {
+        "topic": "community-points-user-v1.user",
+        "message": "{\"type\":\"points-earned\",\"data\":{\"channel_id\":\"100\",\"point_gain\":{\"total_points\":50,\"reason_code\":\"WATCH\"},\"balance\":{\"balance\":1050}}}"
+      }
+    },
+    "expected": {
+      "kind": "PointsEarned",
+      "channel_id": "100",
+      "earned": 50,
+      "reason": "WATCH",
+      "balance": 1050
+    }
+  }
+}

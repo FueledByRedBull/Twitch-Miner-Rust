@@ -8,7 +8,7 @@ This project keeps the behavior that matters in day-to-day use:
 - automatic bonus chest claims
 - minute-watched farming and streak handling
 - prediction betting with configurable strategies and delays
-- drops, raids, chat-presence, Discord notifications, and privacy-aware logging
+- drops, raid observation, chat-presence, Discord notifications, and privacy-aware logging
 - Docker-friendly runtime layout and multi-arch delivery paths
 
 It is not a toy rewrite. The workspace is split into focused crates, the Twitch parsers are fixture-backed, and the runtime is organized around a single-writer state model instead of a pile of ad-hoc side effects.
@@ -19,7 +19,7 @@ The point was not to rewrite working behavior for the sake of language preferenc
 
 - `tm-runtime` owns mutable state instead of scattering it across the process
 - `tm-domain` keeps decision logic pure and testable
-- `tm-twitch`, `tm-pubsub`, and `tm-irc` isolate protocol boundaries
+- `tm-twitch`, `tm-events`, `tm-pubsub`, and `tm-irc` isolate protocol boundaries
 - `tm-auth` and `tm-config` make startup, persistence, and local operation predictable
 - `tm-observability` keeps logging, anonymization, and Discord plumbing out of the hot path
 
@@ -32,7 +32,7 @@ flowchart LR
     C --> D["Watch Live Channels"]
     D --> E["Claim Bonuses, Drops, Moments"]
     D --> F["Track Predictions + Place Bets"]
-    D --> G["PubSub / IRC Events"]
+    D --> G["EventSub / GQL polling / IRC Events"]
     E --> H["Logs / Discord / Shutdown Summary"]
     F --> H
     G --> H
@@ -88,6 +88,7 @@ The miner will create and extend its config automatically, but a minimal manual 
   "streamers": ["StreamerHouse"],
   "claim_drops": true,
   "claim_drops_startup": true,
+  "followers_order": "DESC",
   "community_goals": false,
   "privacy": {
     "anonymize_logs": false
@@ -99,6 +100,7 @@ Notes:
 
 - Remove `password` from older configs if it is still present; device-code login does not use it and startup will reject a non-empty value.
 - `disable_ssl_cert_verification` is intentionally unsupported and will be rejected at startup/config validation.
+- Prediction bet percentages must be `0`-`100`; delays must be finite and non-negative, and `PERCENTAGE` delay mode accepts `0`-`1`. Invalid values are rejected before runtime.
 
 Important paths:
 
@@ -109,6 +111,8 @@ Important paths:
 
 `auto_update` was removed. A legacy `false` value is migrated away; `true` is rejected.
 Use `tm-app --check-config --data-dir ./data` to preview a migration without writing.
+Use `tm-app --check-config --json --data-dir ./data` for scripts, and
+`tm-app --status --data-dir ./data` for a sanitized human-readable status file.
 
 ## Workspace map
 
@@ -118,9 +122,10 @@ Use `tm-app --check-config --data-dir ./data` to preview a migration without wri
 | `tm-auth` | device auth, session loading, cookie persistence |
 | `tm-config` | config creation, resolution, normalization, write-back |
 | `tm-domain` | pure logic, prediction math, shared types |
+| `tm-events` | transport-neutral runtime event model |
 | `tm-irc` | Twitch IRC transport and chat events |
 | `tm-observability` | logging, anonymization, Discord payloads |
-| `tm-pubsub` | PubSub batching, parsing, connection handling |
+| `tm-pubsub` | EventSub WebSocket plus legacy PubSub compatibility |
 | `tm-runtime` | single-writer runtime state |
 | `tm-twitch` | Twitch HTTP, GQL, scraping, parser contracts |
 
@@ -135,6 +140,7 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
 - release and rollback: [docs/release-process.md](docs/release-process.md)
+- performance measurement: [docs/performance.md](docs/performance.md)
 - Go-to-Rust migration: [docs/migration.md](docs/migration.md)
 
 ## Validation
@@ -146,6 +152,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --workspace --release --locked
+./scripts/verify-build-integrity.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
 
@@ -157,6 +164,8 @@ The running process writes a privacy-safe `runtime-status.json` in the data
 directory. `twitch-miner --health` checks process and task freshness; Docker
 uses that command as its health check. `tm-app --support-bundle ./support.json`
 writes version/status and file-count metadata without cookies, config values, or log contents.
+EventSub raid notifications are recorded as observations; Twitch does not expose
+the legacy raid identifier needed for a safe automatic join mutation.
 
 ## Safety notes
 

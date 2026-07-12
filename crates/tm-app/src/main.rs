@@ -16,6 +16,7 @@ mod chat;
 mod context;
 mod drops;
 mod effects;
+mod eventsub;
 mod minute_watcher;
 mod observability;
 mod prediction;
@@ -52,19 +53,24 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SESSION_SUMMARY_INDENT: usize = 25;
 
 #[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(version = build_info::VERSION_BANNER)]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long = "data-dir")]
     data_dir: Option<PathBuf>,
-    #[arg(long, conflicts_with_all = ["check_config", "support_bundle", "canary"])]
+    #[arg(long, conflicts_with_all = ["status", "check_config", "support_bundle", "canary"])]
     health: bool,
-    #[arg(long, conflicts_with_all = ["health", "support_bundle", "canary"])]
+    #[arg(long, conflicts_with_all = ["health", "status", "support_bundle", "canary"])]
     check_config: bool,
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["health", "check_config", "canary"])]
+    #[arg(long, conflicts_with = "check_config")]
+    status: bool,
+    #[arg(long, requires = "check_config")]
+    json: bool,
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["health", "status", "check_config", "canary"])]
     support_bundle: Option<PathBuf>,
-    #[arg(long, conflicts_with_all = ["health", "check_config", "support_bundle"])]
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle"])]
     canary: bool,
 }
 
@@ -77,13 +83,40 @@ async fn main() -> Result<()> {
     if cli.health {
         return status::check_health(&requested_paths.work_dir);
     }
+    if cli.status {
+        return status::print_status(&requested_paths.work_dir);
+    }
     if cli.check_config {
-        let preview = tm_config::preview_config(&requested_paths.config_path)?;
-        tm_config::validate_config(&preview.config)?;
-        println!(
-            "config valid; schema_version={}; migration_required={}",
-            preview.config.config_schema_version, preview.migration_required
-        );
+        let result = tm_config::preview_config(&requested_paths.config_path).and_then(|preview| {
+            tm_config::validate_config(&preview.config)?;
+            Ok(preview)
+        });
+        let preview = match result {
+            Ok(preview) => preview,
+            Err(error) if cli.json => {
+                println!(
+                    "{}",
+                    serde_json::json!({"valid": false, "error": error.to_string()})
+                );
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "valid": true,
+                    "schema_version": preview.config.config_schema_version,
+                    "migration_required": preview.migration_required
+                })
+            );
+        } else {
+            println!(
+                "config valid; schema_version={}; migration_required={}",
+                preview.config.config_schema_version, preview.migration_required
+            );
+        }
         return Ok(());
     }
     if let Some(destination) = cli.support_bundle.as_deref() {
@@ -169,7 +202,8 @@ async fn main() -> Result<()> {
         observability: &observability,
         health: &health,
     })?;
-    let status = status::StatusReporter::ready(&active_paths.work_dir, health)?;
+    let status =
+        status::StatusReporter::ready(&active_paths.work_dir, health, runtime.metrics_handle())?;
     let summary = runtime.runtime_summary().await?;
 
     log_startup(
@@ -191,6 +225,7 @@ async fn main() -> Result<()> {
     }
     shutdown_background_tasks(stop_tx, tasks).await;
     tracing::info!(session_id = %session_id, "background tasks stopped");
+    observability.shutdown_pending_tasks().await;
     let summary = runtime
         .shutdown(config.privacy.anonymize_logs, time_now())
         .await?;

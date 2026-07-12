@@ -31,6 +31,7 @@ pub(crate) async fn claim_startup_drops_if_enabled(
 pub(crate) fn drop_is_claimable(drop: &InventoryDrop) -> bool {
     !drop.is_claimed
         && !drop.drop_instance_id.trim().is_empty()
+        && drop.required_minutes_watched > 0
         && drop.current_minutes_watched >= drop.required_minutes_watched
 }
 
@@ -53,7 +54,13 @@ pub(crate) fn spawn_drop_claim_loop(
                 }
                 _ = ticker.tick() => {
                     if let Err(error) =
-                        claim_available_drops(twitch.as_ref(), "periodic", &observability).await
+                        claim_available_drops_with_health(
+                            twitch.as_ref(),
+                            "periodic",
+                            &observability,
+                            Some(&health),
+                        )
+                        .await
                     {
                         health.failure("drop", "inventory-or-claim");
                         tracing::warn!(task = "drop", error_class = "inventory-or-claim", %error, "periodic drop claim failed");
@@ -71,15 +78,37 @@ pub(crate) async fn claim_available_drops(
     mode: &str,
     observability: &AppObservability,
 ) -> Result<()> {
+    claim_available_drops_with_health(twitch, mode, observability, None).await
+}
+
+async fn claim_available_drops_with_health(
+    twitch: &TwitchClient,
+    mode: &str,
+    observability: &AppObservability,
+    health: Option<&HealthTracker>,
+) -> Result<()> {
     let drops = twitch
         .fetch_claimable_drops()
         .await
         .with_context(|| format!("load {mode} drops inventory"))?;
+    if let Some(health) = health {
+        health.clear_drop_progress();
+        for drop in &drops {
+            health.record_drop_progress(
+                drop.current_minutes_watched,
+                drop.required_minutes_watched,
+                drop.is_claimed,
+            );
+        }
+    }
     for drop in drops.into_iter().filter(drop_is_claimable) {
         twitch
             .claim_drop(&drop.drop_instance_id)
             .await
             .with_context(|| format!("claim drop {}", drop.drop_instance_id))?;
+        if let Some(health) = health {
+            health.record_claim();
+        }
         let message = observability.drop_claim_message(mode, &drop);
         tracing::info!("{message}");
         observability

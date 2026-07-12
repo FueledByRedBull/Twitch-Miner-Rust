@@ -1,17 +1,21 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
 
 use crate::build_info;
 
 pub(crate) const STATUS_FILE_NAME: &str = "runtime-status.json";
-const STATUS_SCHEMA_VERSION: u8 = 2;
+const STATUS_SCHEMA_VERSION: u8 = 3;
 const MAX_HEARTBEAT_AGE_SECONDS: u64 = 120;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+const MAX_COUNTER_VALUE: u64 = 1_000_000_000;
+const MAX_DROP_PROGRESS_ENTRIES: usize = 16;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct TaskStatus {
@@ -32,11 +36,32 @@ struct RuntimeStatus {
     revision: String,
     target: String,
     tasks: Vec<TaskStatus>,
+    counters: StatusCounters,
+    runtime_metrics: RuntimeMetricsSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+struct StatusCounters {
+    claims: u64,
+    bets: u64,
+    reconnects: u64,
+    successful_refreshes: u64,
+    last_error_class: Option<String>,
+    #[serde(default)]
+    drop_progress: Vec<DropProgressSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct DropProgressSnapshot {
+    current_minutes_watched: i64,
+    required_minutes_watched: i64,
+    is_claimed: bool,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct HealthTracker {
     tasks: Arc<Mutex<BTreeMap<String, TaskStatus>>>,
+    counters: Arc<Mutex<StatusCounters>>,
 }
 
 impl HealthTracker {
@@ -66,10 +91,82 @@ impl HealthTracker {
             task.consecutive_failures = task.consecutive_failures.saturating_add(1);
             task.last_error_class = Some(error_class.to_string());
         }
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counters.last_error_class = Some(error_class.to_string());
+        if matches!(name, "eventsub" | "pubsub")
+            && matches!(
+                error_class,
+                "connection-closed"
+                    | "connection-error"
+                    | "connection-reset"
+                    | "connection-task"
+                    | "reconnect"
+            )
+        {
+            counters.reconnects = counters.reconnects.saturating_add(1).min(MAX_COUNTER_VALUE);
+        }
+    }
+
+    pub(crate) fn record_claim(&self) {
+        self.increment(|counters| &mut counters.claims);
+    }
+
+    pub(crate) fn record_bet(&self) {
+        self.increment(|counters| &mut counters.bets);
+    }
+
+    pub(crate) fn record_refresh(&self) {
+        self.increment(|counters| &mut counters.successful_refreshes);
+    }
+
+    pub(crate) fn record_drop_progress(
+        &self,
+        current_minutes_watched: i64,
+        required_minutes_watched: i64,
+        is_claimed: bool,
+    ) {
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if counters.drop_progress.len() < MAX_DROP_PROGRESS_ENTRIES {
+            counters.drop_progress.push(DropProgressSnapshot {
+                current_minutes_watched: current_minutes_watched.max(0),
+                required_minutes_watched: required_minutes_watched.max(0),
+                is_claimed,
+            });
+        }
+    }
+
+    pub(crate) fn clear_drop_progress(&self) {
+        self.counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drop_progress
+            .clear();
+    }
+
+    fn increment(&self, selector: impl FnOnce(&mut StatusCounters) -> &mut u64) {
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let value = selector(&mut counters);
+        *value = value.saturating_add(1).min(MAX_COUNTER_VALUE);
     }
 
     fn snapshot(&self) -> Vec<TaskStatus> {
         self.lock_tasks().values().cloned().collect()
+    }
+
+    fn counters_snapshot(&self) -> StatusCounters {
+        self.counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn lock_tasks(&self) -> MutexGuard<'_, BTreeMap<String, TaskStatus>> {
@@ -83,14 +180,20 @@ pub(crate) struct StatusReporter {
     path: PathBuf,
     started_at_unix: u64,
     health: HealthTracker,
+    metrics: Arc<RuntimeMetrics>,
 }
 
 impl StatusReporter {
-    pub(crate) fn ready(work_dir: &Path, health: HealthTracker) -> Result<Self> {
+    pub(crate) fn ready(
+        work_dir: &Path,
+        health: HealthTracker,
+        metrics: Arc<RuntimeMetrics>,
+    ) -> Result<Self> {
         let reporter = Self {
             path: work_dir.join(STATUS_FILE_NAME),
             started_at_unix: unix_now()?,
             health,
+            metrics,
         };
         reporter.heartbeat()?;
         Ok(reporter)
@@ -107,6 +210,8 @@ impl StatusReporter {
             revision: String::from(build_info::GIT_REVISION),
             target: String::from(build_info::TARGET),
             tasks: self.health.snapshot(),
+            counters: self.health.counters_snapshot(),
+            runtime_metrics: self.metrics.snapshot(),
         };
         atomic_json_write(&self.path, &status)?;
         validate_status(&status, now)
@@ -117,6 +222,12 @@ pub(crate) fn check_health(work_dir: &Path) -> Result<()> {
     let path = work_dir.join(STATUS_FILE_NAME);
     let status = read_status(&path)?;
     validate_status(&status, unix_now()?)
+}
+
+pub(crate) fn print_status(work_dir: &Path) -> Result<()> {
+    let status = read_status(&work_dir.join(STATUS_FILE_NAME))?;
+    println!("{}", serde_json::to_string_pretty(&status)?);
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -199,14 +310,50 @@ fn count_files(path: &Path) -> usize {
 }
 
 fn atomic_json_write(path: &Path, value: &impl Serialize) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(value)?)
-        .with_context(|| format!("write {}", temporary.display()))?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path).with_context(|| format!("replace {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("runtime-status.json");
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.write_all(&serde_json::to_vec_pretty(value)?)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temporary.display()))?;
+        #[cfg(windows)]
+        if path.is_file() {
+            replace_windows_status_file(&temporary, path)
+                .with_context(|| format!("replace {}", path.display()))?;
+        } else {
+            fs::rename(&temporary, path).with_context(|| format!("publish {}", path.display()))?;
+        }
+        #[cfg(not(windows))]
+        fs::rename(&temporary, path).with_context(|| format!("publish {}", path.display()))?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    fs::rename(&temporary, path).with_context(|| format!("publish {}", path.display()))?;
+    result
+}
+
+#[cfg(windows)]
+fn replace_windows_status_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("runtime-status.json");
+    let replacement_backup =
+        path.with_file_name(format!(".{file_name}.{}.replace.tmp", std::process::id()));
+
+    fs::rename(path, &replacement_backup)?;
+    if let Err(error) = fs::rename(temporary, path) {
+        let _ = fs::rename(&replacement_backup, path);
+        return Err(error);
+    }
+    let _ = fs::remove_file(replacement_backup);
     Ok(())
 }
 
@@ -224,8 +371,9 @@ fn unix_now_infallible() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_health, validate_status, write_support_bundle, HealthTracker, RuntimeStatus,
-        StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
+        atomic_json_write, check_health, validate_status, write_support_bundle, HealthTracker,
+        RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus, StatusCounters, StatusReporter,
+        TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
     };
 
     #[test]
@@ -233,7 +381,11 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let health = HealthTracker::default();
         health.register("minute", std::time::Duration::from_secs(60));
-        let reporter = StatusReporter::ready(directory.path(), health)?;
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
         reporter.heartbeat()?;
         check_health(directory.path())?;
         assert!(directory.path().join(STATUS_FILE_NAME).is_file());
@@ -264,6 +416,8 @@ mod tests {
                 stale_after_seconds: 10,
                 last_error_class: None,
             }],
+            counters: StatusCounters::default(),
+            runtime_metrics: RuntimeMetricsSnapshot::default(),
         };
         assert!(validate_status(&status, 100).is_err());
         status.tasks[0].last_success_unix = 100;
@@ -276,13 +430,59 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let health = HealthTracker::default();
         health.register("pubsub", std::time::Duration::from_secs(60));
-        let reporter = StatusReporter::ready(directory.path(), health.clone())?;
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health.clone(),
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
         for _ in 0..5 {
             health.failure("pubsub", "connection-error");
         }
 
         assert!(reporter.heartbeat().is_err());
         assert!(check_health(directory.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn status_counters_are_bounded_and_redacted() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let health = HealthTracker::default();
+        health.record_claim();
+        health.record_bet();
+        health.record_refresh();
+        health.failure("eventsub", "connection-reset");
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+        let status = std::fs::read_to_string(directory.path().join(STATUS_FILE_NAME))?;
+        assert!(status.contains("\"claims\": 1"));
+        assert!(status.contains("\"bets\": 1"));
+        assert!(status.contains("connection-reset"));
+        assert!(!status.contains("auth-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn status_atomic_write_replaces_files_and_cleans_failed_temporary_files() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(STATUS_FILE_NAME);
+        atomic_json_write(&path, &serde_json::json!({"old": true}))?;
+        atomic_json_write(&path, &serde_json::json!({"new": true}))?;
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(value["new"], true);
+
+        let target_directory = directory.path().join("directory-target.json");
+        std::fs::create_dir_all(&target_directory)?;
+        assert!(atomic_json_write(&target_directory, &serde_json::json!({})).is_err());
+        let temporary = directory
+            .path()
+            .join(format!(".directory-target.json.{}.tmp", std::process::id()));
+        assert!(!temporary.exists());
         Ok(())
     }
 

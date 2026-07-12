@@ -7,12 +7,23 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FollowersOrder {
-    #[serde(rename = "ASC")]
-    Asc,
+    #[default]
     #[serde(rename = "DESC")]
     Desc,
+    #[serde(rename = "ASC")]
+    Asc,
+}
+
+impl FollowersOrder {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

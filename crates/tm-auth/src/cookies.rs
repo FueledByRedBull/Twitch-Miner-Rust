@@ -347,4 +347,13 @@ mod tests {
         let decoded = decode_cookie_store(&bytes).unwrap();
         assert_eq!(decoded["session"].domain.as_deref(), Some(".example.com"));
     }
+
+    #[test]
+    fn rejects_truncated_and_non_object_cookie_payloads() {
+        assert!(matches!(
+            decode_cookie_store(br#"{"auth-token":{"value":"unterminated"}"#),
+            Err(CookieStoreError::InvalidStore(_))
+        ));
+        assert!(decode_cookie_store(br"[]").is_err());
+    }
 }

@@ -30,12 +30,24 @@ pub use types::{
     ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage,
     GqlPersistedExtensions, GqlPersistedOperation, GqlPersistedQuery, GqlRequest, InventoryDrop,
     MinuteWatchedRequest, StreamInfo, TwitchClientError, TwitchContractError, TwitchEndpoints,
+    TwitchFailureClass, ViewerDropsDashboard,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::{
+        available_drop_campaign_ids_from_typed, channel_points_context_from_typed,
+        inventory_drops_from_typed, user_contributions_from_typed,
+    };
     use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
+    use reqwest::StatusCode;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
     use tm_domain::{CommunityGoal, Stream};
 
     #[test]
@@ -457,6 +469,229 @@ mod tests {
     }
 
     #[test]
+    fn classifies_sanitized_failure_categories() {
+        assert_eq!(
+            TwitchClientError::UnexpectedStatus {
+                status: StatusCode::UNAUTHORIZED,
+                context: "test",
+            }
+            .failure_class(),
+            TwitchFailureClass::Unauthorized
+        );
+        assert_eq!(
+            TwitchClientError::UnexpectedStatus {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                context: "test",
+            }
+            .failure_class(),
+            TwitchFailureClass::RateLimited
+        );
+        assert_eq!(
+            TwitchClientError::UnexpectedStatus {
+                status: StatusCode::BAD_GATEWAY,
+                context: "test",
+            }
+            .failure_class(),
+            TwitchFailureClass::ServerError
+        );
+    }
+
+    #[test]
+    fn parses_numeric_and_http_date_retry_after_values() {
+        assert_eq!(
+            crate::client::retry_after_duration("0"),
+            Some(Duration::from_secs(0))
+        );
+        assert!(crate::client::retry_after_duration("Wed, 31 Dec 2099 23:59:59 GMT").is_some());
+        assert!(crate::client::retry_after_duration("not-a-date").is_none());
+    }
+
+    #[tokio::test]
+    async fn retries_read_only_requests_and_honors_retry_after() {
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (429, ""),
+            (200, r#"{"data":{"user":{"id":"100"}}}"#),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: format!("{base_url}/gql"),
+            },
+        );
+
+        assert_eq!(client.fetch_channel_id("tester").await.unwrap(), "100");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutation_failure_is_not_replayed_after_an_uncertain_response() {
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (503, ""),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: format!("{base_url}/gql"),
+            },
+        );
+
+        let error = client.claim_moment("moment-1").await.unwrap_err();
+        assert!(matches!(
+            error,
+            TwitchClientError::UnexpectedStatus {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                ..
+            }
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutation_inputs_fail_closed_before_network_io() {
+        let client = TwitchClient::new("token", "ua").unwrap();
+        for error in [
+            client.claim_bonus("", "claim-1", None).await.unwrap_err(),
+            client.claim_moment("").await.unwrap_err(),
+            client.join_raid("").await.unwrap_err(),
+            client
+                .make_prediction("event", "outcome", 9)
+                .await
+                .unwrap_err(),
+            client.claim_drop("").await.unwrap_err(),
+            client
+                .contribute_community_goal(0, "channel", "goal")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, TwitchClientError::MutationRejected { .. }));
+        }
+
+        let unauthenticated = TwitchClient::new("", "ua").unwrap();
+        assert!(matches!(
+            unauthenticated.claim_moment("moment-1").await.unwrap_err(),
+            TwitchClientError::MutationRejected { context, .. } if context == "mutation"
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_timeout_is_bounded_and_classified() {
+        let (base_url, server) = spawn_fault_server(true);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(20))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: format!("{base_url}/gql"),
+            },
+        );
+
+        let error = client.fetch_channel_id("tester").await.unwrap_err();
+        assert_eq!(error.failure_class(), TwitchFailureClass::Timeout);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_reset_is_bounded_and_classified() {
+        let (base_url, server) = spawn_fault_server(false);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: format!("{base_url}/gql"),
+            },
+        );
+
+        let error = client.fetch_channel_id("tester").await.unwrap_err();
+        assert_eq!(error.failure_class(), TwitchFailureClass::ConnectionReset);
+        server.join().unwrap();
+    }
+
+    fn spawn_http_server<const N: usize>(
+        responses: [(u16, &'static str); N],
+    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
+        let server = thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_http_request(&mut stream);
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let reason = match status {
+                    200 => "OK",
+                    429 => "Too Many Requests",
+                    503 => "Service Unavailable",
+                    _ => "Response",
+                };
+                let retry_after = if status == 429 {
+                    "Retry-After: 0\r\n"
+                } else {
+                    ""
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n{retry_after}Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{address}"), requests, server)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) {
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer);
+    }
+
+    fn spawn_fault_server(timeout: bool) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().unwrap();
+                if timeout {
+                    thread::sleep(Duration::from_millis(100));
+                } else {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[test]
     fn parses_channel_points_context_shape() {
         let payload = serde_json::json!({
             "data": {
@@ -552,6 +787,341 @@ mod tests {
         assert_eq!(drops[0].current_minutes_watched, 30);
         assert_eq!(drops[0].required_minutes_watched, 60);
         assert!(!drops[0].is_claimed);
+    }
+
+    fn protocol_fixture(name: &str) -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name);
+        serde_json::from_slice(&std::fs::read(path).expect("fixture must be readable"))
+            .expect("fixture must be valid JSON")
+    }
+
+    fn typed_identity_and_stream_fixtures() {
+        let user_id: types::GqlResponse<types::UserIdData> =
+            serde_json::from_value(protocol_fixture("twitch.user_id.json")).unwrap();
+        assert_eq!(
+            user_id.data.unwrap().user.unwrap().id.as_deref(),
+            Some("100")
+        );
+
+        let context: types::GqlResponse<types::ChannelPointsData> =
+            serde_json::from_value(protocol_fixture("twitch.channel_points_context.json")).unwrap();
+        let context = context.data.unwrap();
+        assert_eq!(
+            context
+                .community
+                .unwrap()
+                .channel
+                .unwrap()
+                .self_data
+                .unwrap()
+                .points
+                .unwrap()
+                .balance,
+            Some(1234)
+        );
+
+        let live: types::GqlResponse<types::LiveStatusData> =
+            serde_json::from_value(protocol_fixture("twitch.stream_live.online.json")).unwrap();
+        assert!(live.data.unwrap().user.unwrap().stream.is_some());
+
+        let stream: types::GqlResponse<types::StreamInfoData> =
+            serde_json::from_value(protocol_fixture("twitch.stream_info.json")).unwrap();
+        let stream = stream.data.unwrap().user.unwrap().stream.unwrap();
+        assert_eq!(stream.id.as_deref(), Some("stream-1"));
+        assert_eq!(stream.tags.len(), 2);
+
+        let followers: types::GqlResponse<types::FollowersData> =
+            serde_json::from_value(protocol_fixture("twitch.followers.json")).unwrap();
+        let follows = followers.data.unwrap().user.unwrap().follows.unwrap();
+        assert_eq!(follows.edges.as_ref().unwrap().len(), 2);
+        assert!(follows.page_info.unwrap().has_next_page);
+    }
+
+    fn typed_inventory_fixtures() {
+        let inventory: types::GqlResponse<types::InventoryData> =
+            serde_json::from_value(protocol_fixture("twitch.inventory.json")).unwrap();
+        let campaigns = inventory
+            .data
+            .unwrap()
+            .current_user
+            .unwrap()
+            .inventory
+            .unwrap()
+            .campaigns
+            .unwrap();
+        assert_eq!(campaigns[0].drops.len(), 1);
+        assert_eq!(
+            campaigns[0].drops[0]
+                .self_data
+                .as_ref()
+                .unwrap()
+                .drop_instance_id
+                .as_deref(),
+            Some("drop-1")
+        );
+
+        let campaigns: types::GqlResponse<types::AvailableDropsData> =
+            serde_json::from_value(protocol_fixture("twitch.available_drop_campaigns.json"))
+                .unwrap();
+        assert_eq!(
+            campaigns
+                .data
+                .unwrap()
+                .channel
+                .unwrap()
+                .campaigns
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let contributions: types::GqlResponse<types::UserContributionData> =
+            serde_json::from_value(protocol_fixture("twitch.user_points_contribution.json"))
+                .unwrap();
+        assert_eq!(
+            contributions
+                .data
+                .unwrap()
+                .user
+                .unwrap()
+                .channel
+                .unwrap()
+                .self_data
+                .unwrap()
+                .community_points
+                .unwrap()
+                .contributions
+                .len(),
+            2
+        );
+    }
+
+    fn typed_mutation_fixtures() {
+        let dashboard: types::GqlResponse<types::ViewerDropsDashboard> =
+            serde_json::from_value(protocol_fixture("twitch.viewer_drops_dashboard.json")).unwrap();
+        assert!(dashboard.data.unwrap().fields.contains_key("serverField"));
+
+        let bonus: types::GqlResponse<types::ClaimBonusData> =
+            serde_json::from_value(protocol_fixture("twitch.claim_bonus_success.json")).unwrap();
+        assert_eq!(
+            bonus.data.unwrap().claim.unwrap().status.as_deref(),
+            Some("SUCCESS")
+        );
+
+        let drop: types::GqlResponse<types::ClaimDropData> =
+            serde_json::from_value(protocol_fixture("twitch.claim_drop_success.json")).unwrap();
+        assert_eq!(
+            drop.data.unwrap().claim.unwrap().status.as_deref(),
+            Some("ELIGIBLE_FOR_ALL")
+        );
+
+        let goal: types::GqlResponse<types::CommunityGoalContributionData> =
+            serde_json::from_value(protocol_fixture(
+                "twitch.community_goal_contribution_success.json",
+            ))
+            .unwrap();
+        assert!(goal.data.unwrap().contribution.is_some());
+
+        let empty: types::GqlResponse<types::EmptyMutationData> =
+            serde_json::from_value(protocol_fixture("twitch.empty_mutation_success.json")).unwrap();
+        assert!(empty.data.is_some());
+    }
+
+    #[test]
+    fn typed_protocol_fixtures_cover_all_runtime_response_families() {
+        typed_identity_and_stream_fixtures();
+        typed_inventory_fixtures();
+        typed_mutation_fixtures();
+    }
+
+    #[test]
+    fn typed_context_fails_closed_on_missing_or_invalid_goal_financial_fields() {
+        let context: types::GqlResponse<types::ChannelPointsData> =
+            serde_json::from_value(protocol_fixture("twitch.channel_points_context.json")).unwrap();
+        let context = channel_points_context_from_typed(context.data.unwrap()).unwrap();
+        assert_eq!(context.community_goals[0].points_contributed, 5);
+        assert_eq!(context.community_goals[0].amount_needed, 10);
+
+        let missing_points: types::GqlResponse<types::ChannelPointsData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "community": {
+                        "channel": {
+                            "self": { "communityPoints": { "balance": 0 } },
+                            "communityPointsSettings": {
+                                "goals": [{
+                                    "id": "goal-1",
+                                    "amountNeeded": 10,
+                                    "perStreamUserMaximumContribution": 5
+                                }]
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            channel_points_context_from_typed(missing_points.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.community.channel.communityPointsSettings.goals.pointsContributed"
+            ))
+        ));
+
+        let negative_points: types::GqlResponse<types::ChannelPointsData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "community": {
+                        "channel": {
+                            "self": { "communityPoints": { "balance": 0 } },
+                            "communityPointsSettings": {
+                                "goals": [{
+                                    "id": "goal-1",
+                                    "pointsContributed": -1,
+                                    "amountNeeded": 10,
+                                    "perStreamUserMaximumContribution": 5
+                                }]
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            channel_points_context_from_typed(negative_points.data.unwrap()),
+            Err(TwitchClientError::InvalidField(
+                "data.community.channel.communityPointsSettings.goals.pointsContributed"
+            ))
+        ));
+    }
+
+    #[test]
+    fn typed_inventory_fixtures_fail_closed_on_claim_safety_fields() {
+        let missing_required: types::GqlResponse<types::InventoryData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "timeBasedDrops": [{
+                                    "self": {
+                                        "dropInstanceID": "drop-1",
+                                        "isClaimed": false
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            inventory_drops_from_typed(missing_required.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.currentUser.inventory.timeBasedDrops.requiredMinutesWatched"
+            ))
+        ));
+
+        let missing_claimed: types::GqlResponse<types::InventoryData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "timeBasedDrops": [{
+                                    "requiredMinutesWatched": 60,
+                                    "self": { "dropInstanceID": "drop-1" }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            inventory_drops_from_typed(missing_claimed.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.currentUser.inventory.timeBasedDrops.self.isClaimed"
+            ))
+        ));
+    }
+
+    #[test]
+    fn typed_campaign_and_contribution_lists_fail_closed_on_missing_ids() {
+        let campaigns: types::GqlResponse<types::AvailableDropsData> =
+            serde_json::from_value(protocol_fixture("twitch.available_drop_campaigns.json"))
+                .unwrap();
+        assert_eq!(
+            available_drop_campaign_ids_from_typed(campaigns.data.unwrap()).unwrap(),
+            vec![String::from("campaign-1"), String::from("campaign-2")]
+        );
+
+        let missing_campaign_id: types::GqlResponse<types::AvailableDropsData> =
+            serde_json::from_value(serde_json::json!({
+                "data": { "channel": { "viewerDropCampaigns": [{ "id": " " }] } }
+            }))
+            .unwrap();
+        assert!(matches!(
+            available_drop_campaign_ids_from_typed(missing_campaign_id.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.channel.viewerDropCampaigns.id"
+            ))
+        ));
+
+        let contributions: types::GqlResponse<types::UserContributionData> =
+            serde_json::from_value(protocol_fixture("twitch.user_points_contribution.json"))
+                .unwrap();
+        assert_eq!(
+            user_contributions_from_typed(contributions.data.unwrap()).unwrap(),
+            vec![(String::from("goal-1"), 25), (String::from("goal-2"), 10)]
+        );
+
+        let missing_goal_id: types::GqlResponse<types::UserContributionData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "user": {
+                        "channel": {
+                            "self": {
+                                "communityPoints": {
+                                    "goalContributions": [{ "goal": {} }]
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            user_contributions_from_typed(missing_goal_id.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.user.channel.self.communityPoints.goalContributions.goal.id"
+            ))
+        ));
+
+        let missing_points: types::GqlResponse<types::UserContributionData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "user": {
+                        "channel": {
+                            "self": {
+                                "communityPoints": {
+                                    "goalContributions": [{
+                                        "goal": { "id": "goal-1" }
+                                    }]
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert!(matches!(
+            user_contributions_from_typed(missing_points.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.user.channel.self.communityPoints.goalContributions.userPointsContributedThisStream"
+            ))
+        ));
     }
 
     #[test]

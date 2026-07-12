@@ -14,6 +14,8 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
 tm-domain = { path = "../tm-domain", version = "0.1.0" }
 
 [lints]

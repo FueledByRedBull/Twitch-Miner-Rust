@@ -14,6 +14,14 @@ use time::OffsetDateTime;
 use crate::formatting::trim_trailing_zeros;
 use crate::types::{BetSettings, Condition, OutcomeKey, Strategy, Streamer};
 
+fn safe_duration_from_seconds(seconds: f64) -> std::time::Duration {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return std::time::Duration::ZERO;
+    }
+    let milliseconds = (seconds * 1_000.0).min(u64::MAX as f64) as u64;
+    std::time::Duration::from_millis(milliseconds)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PredictionOutcome {
     pub id: String,
@@ -95,7 +103,7 @@ impl PredictionEvent {
     #[must_use]
     pub fn closing_after(&self, now: OffsetDateTime) -> std::time::Duration {
         let elapsed = (now - self.created_at).whole_milliseconds() as f64 / 1_000.0;
-        std::time::Duration::from_secs_f64((self.window_seconds - elapsed).max(0.0))
+        safe_duration_from_seconds(self.window_seconds - elapsed)
     }
 
     pub fn decide(&mut self, balance: i64) -> PredictionDecision {
@@ -395,6 +403,30 @@ mod tests {
 
     fn assert_f64_eq(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn closing_after_is_safe_for_invalid_prediction_windows() {
+        for window_seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let event = PredictionEvent {
+                streamer: Streamer::default(),
+                event_id: String::new(),
+                title: String::new(),
+                status: String::new(),
+                created_at: datetime!(2026-03-27 06:00 UTC),
+                window_seconds,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            };
+            assert_eq!(
+                event.closing_after(datetime!(2026-03-27 06:00 UTC)),
+                std::time::Duration::ZERO
+            );
+        }
     }
 
     #[test]

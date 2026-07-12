@@ -10,8 +10,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::device_flow::{
-    build_device_code_request, build_token_poll_request, build_validate_login_request,
-    DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
+    build_device_code_request_with_scope, build_token_poll_request, build_validate_login_request,
+    device_flow_scope, DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
 };
 use crate::session::AuthSession;
 use crate::CookieStore;
@@ -108,7 +108,16 @@ impl TwitchAuthClient {
         &self,
         device_id: &str,
     ) -> Result<DeviceCodePrompt, AuthClientError> {
-        let mut request = build_device_code_request(device_id);
+        self.request_device_code_with_scope(device_id, device_flow_scope())
+            .await
+    }
+
+    pub async fn request_device_code_with_scope(
+        &self,
+        device_id: &str,
+        scopes: &str,
+    ) -> Result<DeviceCodePrompt, AuthClientError> {
+        let mut request = build_device_code_request_with_scope(device_id, scopes);
         request.url.clone_from(&self.endpoints.device_code_url);
         let response = self
             .client

@@ -2,6 +2,7 @@ pub const WEBSOCKET_URL: &str = "wss://pubsub-edge.twitch.tv";
 
 mod client;
 mod errors;
+mod eventsub;
 mod parse;
 mod prediction;
 mod topics;
@@ -9,17 +10,21 @@ mod types;
 
 pub use client::{PubSubClient, PubSubClientSettings, PubSubConnectionEvent};
 pub use errors::PubSubError;
+pub use eventsub::{
+    parse_eventsub_message, EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
+    EventSubError, EventSubMessage, EVENTSUB_SUBSCRIPTIONS_URL, EVENTSUB_WEBSOCKET_URL,
+};
 pub use parse::{
     bad_auth_cookie_file, channel_id_from_payload, parse_message, parse_transport_message,
+};
+pub use tm_events::{
+    CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
 };
 pub use topics::{
     build_topic_batches, build_topics, chunk_topics, listen_payload, listen_payload_with_nonce,
     listen_payloads, ping_payload, topic_requires_auth,
 };
-pub use types::{
-    CommunityGoalKind, IncomingTransportMessage, PlaybackType, PredictionChannelKind,
-    PredictionUserKind, PubSubEvent,
-};
+pub use types::{IncomingTransportMessage, PubSubEvent};
 
 #[cfg(test)]
 mod tests {

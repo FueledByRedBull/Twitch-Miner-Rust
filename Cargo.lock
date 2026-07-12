@@ -1533,6 +1533,7 @@ dependencies = [
  "tm-domain",
  "tm-irc",
  "tm-pubsub",
+ "tm-runtime",
  "tm-twitch",
 ]
 
@@ -1544,6 +1545,15 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+]
+
+[[package]]
+name = "tm-events"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tm-domain",
 ]
 
 [[package]]
@@ -1586,13 +1596,16 @@ name = "tm-pubsub"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "time",
  "tm-domain",
+ "tm-events",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
@@ -1603,6 +1616,7 @@ dependencies = [
  "thiserror",
  "tm-config",
  "tm-domain",
+ "tm-events",
  "tm-pubsub",
  "tokio",
  "tracing",
@@ -1618,7 +1632,9 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "time",
  "tm-domain",
+ "tokio",
 ]
 
 [[package]]

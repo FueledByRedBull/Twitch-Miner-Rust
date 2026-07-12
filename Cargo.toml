@@ -4,6 +4,7 @@ members = [
     "crates/tm-auth",
     "crates/tm-config",
     "crates/tm-domain",
+    "crates/tm-events",
     "crates/tm-irc",
     "crates/tm-observability",
     "crates/tm-pubsub",

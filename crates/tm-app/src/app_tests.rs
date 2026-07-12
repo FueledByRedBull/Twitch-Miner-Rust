@@ -32,6 +32,7 @@ mod tests {
     use crate::utilities::new_session_id;
     use crate::watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry};
     use crate::Cli;
+    use clap::Parser;
     use reqwest::StatusCode;
     use tm_auth::{AuthEndpoints, TwitchAuthClient};
     use tm_config::{AppPaths, ConfigError, ConfigFile};
@@ -63,6 +64,20 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn operator_cli_requires_explicit_config_json_and_status_modes() {
+        let status = Cli::try_parse_from(["tm-app", "--status"]).unwrap();
+        assert!(status.status);
+        assert!(!status.json);
+
+        let config_json = Cli::try_parse_from(["tm-app", "--check-config", "--json"]).unwrap();
+        assert!(config_json.check_config);
+        assert!(config_json.json);
+
+        assert!(Cli::try_parse_from(["tm-app", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["tm-app", "--status", "--check-config"]).is_err());
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -343,6 +358,8 @@ mod tests {
             data_dir: None,
             health: false,
             check_config: false,
+            status: false,
+            json: false,
             support_bundle: None,
             canary: false,
         };
@@ -353,6 +370,8 @@ mod tests {
             data_dir: None,
             health: false,
             check_config: false,
+            status: false,
+            json: false,
             support_bundle: None,
             canary: false,
         };
@@ -447,9 +466,16 @@ mod tests {
 
         let incomplete = InventoryDrop {
             current_minutes_watched: 59,
-            ..claimable
+            ..claimable.clone()
         };
         assert!(!drop_is_claimable(&incomplete));
+
+        let missing_requirement = InventoryDrop {
+            required_minutes_watched: 0,
+            current_minutes_watched: 0,
+            ..claimable
+        };
+        assert!(!drop_is_claimable(&missing_requirement));
     }
 
     #[test]
@@ -710,6 +736,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prediction_wait_duration_fails_safe_for_invalid_delay_values() {
+        let mut event = PredictionEvent {
+            streamer: Streamer::default(),
+            event_id: String::from("event-1"),
+            title: String::from("Prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(0),
+            window_seconds: 100.0,
+            outcomes: vec![PredictionOutcome::default()],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+
+        for (delay_mode, delay) in [
+            (DelayMode::FromStart, -1.0),
+            (DelayMode::Percentage, f64::INFINITY),
+            (DelayMode::Percentage, f64::NEG_INFINITY),
+        ] {
+            event.streamer.settings.bet.delay_mode = delay_mode;
+            event.streamer.settings.bet.delay = Some(delay);
+            assert_eq!(prediction_wait_duration(&event, ts(10)), Duration::ZERO);
+        }
+    }
+
     #[tokio::test]
     async fn load_targets_uses_mocked_followers_in_follower_mode() {
         let (endpoints, requests, server) = spawn_twitch_server(2);
@@ -856,9 +910,15 @@ mod tests {
         }];
         let runtime = tm_runtime::spawn_runtime_state(state);
 
-        refresh_snapshot_streamers(&runtime, &twitch, "user-1", &test_observability())
-            .await
-            .unwrap();
+        refresh_snapshot_streamers(
+            &runtime,
+            &twitch,
+            "user-1",
+            &test_observability(),
+            &HealthTracker::default(),
+        )
+        .await
+        .unwrap();
 
         let snapshot = runtime.state_snapshot().await.unwrap();
         server.join().unwrap();

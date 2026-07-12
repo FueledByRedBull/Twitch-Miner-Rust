@@ -20,7 +20,10 @@ $buildRevision = (git rev-parse --short=12 HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildRevision)) {
     throw "Unable to determine the source revision for build metadata."
 }
-$buildTime = [DateTime]::UtcNow.ToString("o")
+$buildTime = (git show -s --format=%cI HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildTime)) {
+    throw "Unable to determine the deterministic source timestamp for build metadata."
+}
 
 function Get-LocalLinuxPlatform {
     $dockerPlatform = docker info --format '{{.OSType}}/{{.Architecture}}'

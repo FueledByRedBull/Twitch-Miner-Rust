@@ -46,13 +46,27 @@ pub fn device_flow_scope() -> &'static str {
 }
 
 #[must_use]
+pub fn device_flow_scope_for_eventsub(include_predictions: bool) -> String {
+    let mut scopes = device_flow_scope().to_string();
+    if include_predictions {
+        scopes.push_str(" channel:read:predictions");
+    }
+    scopes
+}
+
+#[must_use]
 pub fn build_device_code_request(device_id: &str) -> OAuthRequest {
+    build_device_code_request_with_scope(device_id, device_flow_scope())
+}
+
+#[must_use]
+pub fn build_device_code_request_with_scope(device_id: &str, scopes: &str) -> OAuthRequest {
     OAuthRequest {
         url: DEVICE_URL.to_string(),
         headers: device_headers(device_id),
         form: vec![
             ("client_id".into(), CLIENT_ID.into()),
-            ("scopes".into(), device_flow_scope().into()),
+            ("scopes".into(), scopes.into()),
         ],
     }
 }
@@ -146,6 +160,12 @@ mod tests {
         assert!(request
             .form
             .contains(&("scopes".into(), device_flow_scope().into())));
+    }
+
+    #[test]
+    fn eventsub_scope_is_added_only_for_prediction_subscriptions() {
+        assert_eq!(device_flow_scope_for_eventsub(false), device_flow_scope());
+        assert!(device_flow_scope_for_eventsub(true).contains("channel:read:predictions"));
     }
 
     #[test]

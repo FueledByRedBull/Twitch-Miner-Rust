@@ -13,7 +13,8 @@ pub use cookies::{
     SessionCookie,
 };
 pub use device_flow::{
-    build_device_code_request, build_token_poll_request, build_validate_login_request,
-    device_flow_scope, DeviceCodeResponse, DeviceFlowState, LoginValidationRequest, OAuthRequest,
+    build_device_code_request, build_device_code_request_with_scope, build_token_poll_request,
+    build_validate_login_request, device_flow_scope, device_flow_scope_for_eventsub,
+    DeviceCodeResponse, DeviceFlowState, LoginValidationRequest, OAuthRequest,
 };
 pub use session::{AuthSession, AuthSessionError};

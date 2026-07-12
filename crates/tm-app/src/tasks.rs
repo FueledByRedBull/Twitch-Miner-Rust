@@ -8,13 +8,13 @@ use crate::bootstrap::normalized_username;
 use crate::chat::spawn_chat_manager_loop;
 use crate::context::{spawn_context_refresh_loop, spawn_pending_claim_loop};
 use crate::drops::spawn_drop_claim_loop;
+use crate::eventsub::spawn_eventsub_loop;
 use crate::minute_watcher::spawn_minute_watcher_loop;
 use crate::observability::AppObservability;
-use crate::pubsub::spawn_pubsub_loop;
 use crate::status::HealthTracker;
 
 pub(crate) struct BackgroundTasks {
-    pub(crate) pubsub: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) eventsub: Option<tokio::task::JoinHandle<()>>,
     pub(crate) context: Option<tokio::task::JoinHandle<()>>,
     pub(crate) pending_claims: Option<tokio::task::JoinHandle<()>>,
     pub(crate) minute: Option<tokio::task::JoinHandle<()>>,
@@ -25,7 +25,7 @@ pub(crate) struct BackgroundTasks {
 impl BackgroundTasks {
     pub(crate) fn unexpectedly_finished(&self) -> Vec<&'static str> {
         [
-            ("pubsub", self.pubsub.as_ref()),
+            ("eventsub", self.eventsub.as_ref()),
             ("context", self.context.as_ref()),
             ("pending-claims", self.pending_claims.as_ref()),
             ("minute", self.minute.as_ref()),
@@ -58,7 +58,7 @@ pub(crate) fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result
     if params.user_id.is_some() {
         params
             .health
-            .register("pubsub", std::time::Duration::from_secs(8 * 60));
+            .register("eventsub", std::time::Duration::from_secs(8 * 60));
         params
             .health
             .register("context", std::time::Duration::from_secs(30 * 60));
@@ -73,14 +73,12 @@ pub(crate) fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result
     params
         .health
         .register("chat", std::time::Duration::from_secs(8 * 60));
-    let pubsub = params.user_id.map(|user_id| {
-        spawn_pubsub_loop(
+    let eventsub = params.user_id.map(|user_id| {
+        spawn_eventsub_loop(
             params.stop_rx.clone(),
             params.runtime.clone(),
             Arc::clone(params.twitch),
             params.auth_token.to_string(),
-            user_id.clone(),
-            username.clone(),
             params.initial_streamers.to_vec(),
             user_id.clone(),
             params.observability.clone(),
@@ -142,7 +140,7 @@ pub(crate) fn spawn_background_tasks(params: BackgroundTaskParams<'_>) -> Result
         params.health.clone(),
     ));
     Ok(BackgroundTasks {
-        pubsub,
+        eventsub,
         context,
         pending_claims,
         minute,
@@ -157,7 +155,7 @@ mod tests {
 
     fn empty_tasks() -> BackgroundTasks {
         BackgroundTasks {
-            pubsub: None,
+            eventsub: None,
             context: None,
             pending_claims: None,
             minute: None,
@@ -169,11 +167,11 @@ mod tests {
     #[tokio::test]
     async fn reports_unexpectedly_finished_tasks() {
         let mut tasks = empty_tasks();
-        tasks.pubsub = Some(tokio::spawn(async {}));
+        tasks.eventsub = Some(tokio::spawn(async {}));
 
         tokio::task::yield_now().await;
 
-        assert_eq!(tasks.unexpectedly_finished(), vec!["pubsub"]);
+        assert_eq!(tasks.unexpectedly_finished(), vec!["eventsub"]);
     }
 
     #[tokio::test]

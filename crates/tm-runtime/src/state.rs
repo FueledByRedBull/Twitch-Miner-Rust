@@ -5,8 +5,8 @@ use tm_domain::{
     normalize_game_list, normalize_streamer_list, parse_watch_priorities, pick_streamers_to_watch,
     should_join_chat, CommunityGoal, Game, OffsetDateTime, PredictionDecision, Stream, Streamer,
 };
-use tm_pubsub::{
-    CommunityGoalKind, PlaybackType, PredictionChannelKind, PredictionUserKind, PubSubEvent,
+use tm_events::{
+    CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
 };
 
 use crate::effect::RuntimeEffect;
@@ -137,13 +137,9 @@ impl RuntimeState {
     }
 
     #[allow(clippy::too_many_lines, clippy::redundant_closure_for_method_calls)]
-    pub fn apply_pubsub_event(
-        &mut self,
-        event: &PubSubEvent,
-        now: OffsetDateTime,
-    ) -> Vec<RuntimeEffect> {
+    pub fn apply_event(&mut self, event: &MinerEvent, now: OffsetDateTime) -> Vec<RuntimeEffect> {
         match event {
-            PubSubEvent::PointsEarned {
+            MinerEvent::PointsEarned {
                 channel_id,
                 earned,
                 reason,
@@ -155,7 +151,7 @@ impl RuntimeState {
                     Vec::new()
                 })
                 .unwrap_or_default(),
-            PubSubEvent::ClaimAvailable {
+            MinerEvent::ClaimAvailable {
                 channel_id,
                 claim_id,
             } => self
@@ -167,7 +163,7 @@ impl RuntimeState {
                     }]
                 })
                 .unwrap_or_default(),
-            PubSubEvent::Playback { channel_id, kind } => match kind {
+            MinerEvent::Playback { channel_id, kind } => match kind {
                 PlaybackType::StreamUp => {
                     self.apply_presence(channel_id, true, now);
                     Vec::new()
@@ -178,7 +174,7 @@ impl RuntimeState {
                 }
                 PlaybackType::Viewcount => Vec::new(),
             },
-            PubSubEvent::Raid {
+            MinerEvent::Raid {
                 channel_id,
                 raid_id,
                 target_login,
@@ -199,7 +195,7 @@ impl RuntimeState {
                     target_login: target_login.clone(),
                 }]
             }
-            PubSubEvent::Moment {
+            MinerEvent::Moment {
                 channel_id,
                 moment_id,
             } => {
@@ -214,7 +210,7 @@ impl RuntimeState {
                     moment_id: moment_id.clone(),
                 }]
             }
-            PubSubEvent::PredictionChannel {
+            MinerEvent::PredictionChannel {
                 kind,
                 event,
                 winning_outcome_id,
@@ -262,7 +258,7 @@ impl RuntimeState {
                     vec![effect]
                 }
             },
-            PubSubEvent::PredictionUser {
+            MinerEvent::PredictionUser {
                 event_id,
                 kind,
                 result,
@@ -303,7 +299,7 @@ impl RuntimeState {
                     }]
                 }
             },
-            PubSubEvent::CommunityGoal {
+            MinerEvent::CommunityGoal {
                 channel_id,
                 kind,
                 goal,
@@ -336,6 +332,15 @@ impl RuntimeState {
                 }
             }
         }
+    }
+
+    /// Compatibility wrapper for callers that still use the former transport name.
+    pub fn apply_pubsub_event(
+        &mut self,
+        event: &MinerEvent,
+        now: OffsetDateTime,
+    ) -> Vec<RuntimeEffect> {
+        self.apply_event(event, now)
     }
 
     fn streamer_by_channel_id(&self, channel_id: &str) -> Option<&Streamer> {

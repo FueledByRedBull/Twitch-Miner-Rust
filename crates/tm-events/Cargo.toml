@@ -1,0 +1,16 @@
+[package]
+name = "tm-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tm-domain = { path = "../tm-domain", version = "0.1.0" }
+
+[lints]
+workspace = true

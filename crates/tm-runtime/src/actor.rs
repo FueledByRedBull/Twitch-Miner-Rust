@@ -1,5 +1,10 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
 use tm_domain::{OffsetDateTime, PredictionDecision};
-use tm_pubsub::PubSubEvent;
+use tm_events::MinerEvent;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::effect::RuntimeEffect;
@@ -12,13 +17,72 @@ use crate::types::{
 pub struct RuntimeHandle {
     sender: mpsc::Sender<RuntimeCommand>,
     state_revision: watch::Receiver<u64>,
+    metrics: Arc<RuntimeMetrics>,
+}
+
+const RUNTIME_QUEUE_CAPACITY: u64 = 64;
+
+#[derive(Debug, Default)]
+pub struct RuntimeMetrics {
+    processed_events: AtomicU64,
+    total_command_wait_micros: AtomicU64,
+    max_queue_depth: AtomicU64,
+    transport_events: AtomicU64,
+    total_transport_latency_micros: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RuntimeMetricsSnapshot {
+    pub processed_events: u64,
+    pub total_command_wait_micros: u64,
+    pub max_queue_depth: u64,
+    pub transport_events: u64,
+    pub total_transport_latency_micros: u64,
+}
+
+impl RuntimeMetrics {
+    fn record_enqueued(&self, available_capacity: usize) {
+        let depth = RUNTIME_QUEUE_CAPACITY
+            .saturating_sub(available_capacity as u64)
+            .saturating_add(1)
+            .min(RUNTIME_QUEUE_CAPACITY);
+        self.max_queue_depth.fetch_max(depth, Ordering::Relaxed);
+    }
+
+    fn record_processed(&self, wait: std::time::Duration) {
+        self.processed_events.fetch_add(1, Ordering::Relaxed);
+        let micros = wait.as_micros().try_into().unwrap_or(u64::MAX);
+        self.total_command_wait_micros
+            .fetch_add(micros, Ordering::Relaxed);
+    }
+
+    pub fn record_transport_latency(&self, latency: std::time::Duration) {
+        self.transport_events.fetch_add(1, Ordering::Relaxed);
+        let micros = latency.as_micros().try_into().unwrap_or(u64::MAX);
+        self.total_transport_latency_micros
+            .fetch_add(micros, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
+        RuntimeMetricsSnapshot {
+            processed_events: self.processed_events.load(Ordering::Relaxed),
+            total_command_wait_micros: self.total_command_wait_micros.load(Ordering::Relaxed),
+            max_queue_depth: self.max_queue_depth.load(Ordering::Relaxed),
+            transport_events: self.transport_events.load(Ordering::Relaxed),
+            total_transport_latency_micros: self
+                .total_transport_latency_micros
+                .load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug)]
 enum RuntimeCommand {
-    ApplyPubSub {
-        event: PubSubEvent,
+    ApplyEvent {
+        event: MinerEvent,
         now: OffsetDateTime,
+        enqueued_at: Instant,
         respond_to: oneshot::Sender<Vec<RuntimeEffect>>,
     },
     SessionSummary {
@@ -69,20 +133,24 @@ enum RuntimeCommand {
 pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
     let (sender, mut receiver) = mpsc::channel(64);
     let (state_revision_tx, state_revision_rx) = watch::channel(0_u64);
+    let metrics = Arc::new(RuntimeMetrics::default());
+    let actor_metrics = Arc::clone(&metrics);
     tokio::spawn(async move {
         let RuntimeSession { summary, mut state } = session;
         let mut state_revision = 0_u64;
         while let Some(command) = receiver.recv().await {
             match command {
-                RuntimeCommand::ApplyPubSub {
+                RuntimeCommand::ApplyEvent {
                     event,
                     now,
+                    enqueued_at,
                     respond_to,
                 } => {
+                    actor_metrics.record_processed(enqueued_at.elapsed());
                     log_dropped_runtime_reply(&send_runtime_reply(
-                        "ApplyPubSub",
+                        "ApplyEvent",
                         respond_to,
-                        state.apply_pubsub_event(&event, now),
+                        state.apply_event(&event, now),
                     ));
                     notify_state_change(&state_revision_tx, &mut state_revision);
                 }
@@ -168,6 +236,7 @@ pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
     RuntimeHandle {
         sender,
         state_revision: state_revision_rx,
+        metrics,
     }
 }
 
@@ -198,25 +267,47 @@ impl RuntimeHandle {
         self.state_revision.clone()
     }
 
-    pub async fn apply_pubsub_event(
+    pub async fn apply_event(
         &self,
-        event: PubSubEvent,
+        event: MinerEvent,
         now: OffsetDateTime,
     ) -> Result<Vec<RuntimeEffect>> {
         let (send, recv) = oneshot::channel();
+        let enqueued_at = Instant::now();
+        self.metrics.record_enqueued(self.sender.capacity());
         self.sender
-            .send(RuntimeCommand::ApplyPubSub {
+            .send(RuntimeCommand::ApplyEvent {
                 event,
                 now,
+                enqueued_at,
                 respond_to: send,
             })
             .await
             .map_err(|_| RuntimeError::SendFailed {
-                command: "ApplyPubSub",
+                command: "ApplyEvent",
             })?;
         recv.await.map_err(|_| RuntimeError::ActorClosed {
-            command: "ApplyPubSub",
+            command: "ApplyEvent",
         })
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> RuntimeMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    #[must_use]
+    pub fn metrics_handle(&self) -> Arc<RuntimeMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// Compatibility wrapper for callers that still use the former transport name.
+    pub async fn apply_pubsub_event(
+        &self,
+        event: MinerEvent,
+        now: OffsetDateTime,
+    ) -> Result<Vec<RuntimeEffect>> {
+        self.apply_event(event, now).await
     }
 
     pub async fn runtime_summary(&self) -> Result<RuntimeSummary> {

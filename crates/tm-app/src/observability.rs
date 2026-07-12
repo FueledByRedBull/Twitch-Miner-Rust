@@ -219,11 +219,20 @@ impl AppObservability {
         let task = tokio::spawn(async move {
             this.send_event(event, &message).await;
         });
+        self.track_task(task);
+    }
+
+    pub(crate) fn track_task(&self, task: tokio::task::JoinHandle<()>) {
         match self.pending_tasks.lock() {
-            Ok(mut pending) => pending.push(task),
+            Ok(mut pending) => {
+                pending.retain(|task| !task.is_finished());
+                pending.push(task);
+            }
             Err(poisoned) => {
                 tracing::warn!("observability task list lock poisoned");
-                poisoned.into_inner().push(task);
+                let mut pending = poisoned.into_inner();
+                pending.retain(|task| !task.is_finished());
+                pending.push(task);
             }
         }
     }
@@ -238,15 +247,21 @@ impl AppObservability {
             }
         };
         for task in tasks {
-            match tokio::time::timeout(Duration::from_secs(5), task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "observability task failed while stopping");
-                }
-                Err(_) => {
-                    tracing::warn!("observability task exceeded grace period");
-                }
-            }
+            await_observability_task(task, Duration::from_secs(5)).await;
+        }
+    }
+}
+
+async fn await_observability_task(mut task: tokio::task::JoinHandle<()>, grace: Duration) {
+    match tokio::time::timeout(grace, &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "observability task failed while stopping");
+        }
+        Err(_) => {
+            tracing::warn!("observability task exceeded grace period; aborting");
+            task.abort();
+            let _ = task.await;
         }
     }
 }
@@ -390,5 +405,16 @@ impl ChatLogger for TracingChatLogger {
             self.observability
                 .spawn_event(DiscordEvent::ChatMention, message.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::await_observability_task;
+
+    #[tokio::test]
+    async fn timed_out_observability_tasks_are_aborted() {
+        let task = tokio::spawn(async { std::future::pending::<()>().await });
+        await_observability_task(task, std::time::Duration::ZERO).await;
     }
 }

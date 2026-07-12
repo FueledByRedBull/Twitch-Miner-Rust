@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use reqwest::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tm_domain::{ActiveMultiplier, CommunityGoal};
 
@@ -23,6 +23,12 @@ pub enum TwitchClientError {
     Http(#[from] reqwest::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("protocol response decode failed for {context}: {detail} ({shape})")]
+    ProtocolDecode {
+        context: String,
+        detail: String,
+        shape: String,
+    },
     #[error("twitch contract error: {0}")]
     Contract(#[from] TwitchContractError),
     #[error("unexpected status {status} for {context}")]
@@ -32,10 +38,44 @@ pub enum TwitchClientError {
     },
     #[error("missing response field: {0}")]
     MissingField(&'static str),
+    #[error("invalid response field: {0}")]
+    InvalidField(&'static str),
     #[error("graphql errors for {context}: {errors}")]
     GqlErrors { context: String, errors: String },
     #[error("mutation rejected for {context}: {detail}")]
     MutationRejected { context: String, detail: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwitchFailureClass {
+    Unauthorized,
+    RateLimited,
+    ServerError,
+    Timeout,
+    ConnectionReset,
+    Other,
+}
+
+impl TwitchClientError {
+    #[must_use]
+    pub fn failure_class(&self) -> TwitchFailureClass {
+        match self {
+            Self::UnexpectedStatus { status, .. } if *status == StatusCode::UNAUTHORIZED => {
+                TwitchFailureClass::Unauthorized
+            }
+            Self::UnexpectedStatus { status, .. } if *status == StatusCode::TOO_MANY_REQUESTS => {
+                TwitchFailureClass::RateLimited
+            }
+            Self::UnexpectedStatus { status, .. } if status.is_server_error() => {
+                TwitchFailureClass::ServerError
+            }
+            Self::Http(error) if error.is_timeout() => TwitchFailureClass::Timeout,
+            Self::Http(error) if error.is_connect() || error.is_request() => {
+                TwitchFailureClass::ConnectionReset
+            }
+            _ => TwitchFailureClass::Other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -111,6 +151,344 @@ pub struct StreamInfo {
     pub game_id: Option<String>,
     pub viewers_count: u32,
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GqlResponse<T> {
+    pub(crate) data: Option<T>,
+    #[serde(default)]
+    pub(crate) errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GqlError {
+    #[serde(rename = "message")]
+    pub(crate) _message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserIdData {
+    pub(crate) user: Option<UserIdUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserIdUser {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LiveStatusData {
+    pub(crate) user: Option<LiveStatusUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LiveStatusUser {
+    pub(crate) stream: Option<LiveStatusStream>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LiveStatusStream {
+    pub(crate) _id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ChannelPointsData {
+    pub(crate) community: Option<CommunityData>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CommunityData {
+    pub(crate) channel: Option<ChannelPointsChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ChannelPointsChannel {
+    #[serde(rename = "self")]
+    pub(crate) self_data: Option<ChannelSelfData>,
+    #[serde(rename = "communityPointsSettings")]
+    pub(crate) settings: Option<CommunityPointsSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ChannelSelfData {
+    #[serde(rename = "communityPoints")]
+    pub(crate) points: Option<CommunityPointsData>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CommunityPointsData {
+    pub(crate) balance: Option<i64>,
+    #[serde(rename = "availableClaim")]
+    pub(crate) available_claim: Option<AvailableClaim>,
+    #[serde(rename = "activeMultipliers", default)]
+    pub(crate) active_multipliers: Vec<ActiveMultiplier>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AvailableClaim {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CommunityPointsSettings {
+    #[serde(default)]
+    pub(crate) goals: Vec<ProtocolCommunityGoal>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProtocolCommunityGoal {
+    pub(crate) id: Option<String>,
+    pub(crate) title: Option<String>,
+    #[serde(alias = "isInStock", default)]
+    pub(crate) is_in_stock: bool,
+    #[serde(alias = "pointsContributed")]
+    pub(crate) points_contributed: Option<i64>,
+    #[serde(alias = "amountNeeded", alias = "goal_amount")]
+    pub(crate) amount_needed: Option<i64>,
+    #[serde(
+        alias = "perStreamUserMaximumContribution",
+        alias = "per_stream_maximum_user_contribution"
+    )]
+    pub(crate) per_stream_user_maximum_contribution: Option<i64>,
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StreamInfoData {
+    pub(crate) user: Option<StreamInfoUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StreamInfoUser {
+    #[serde(rename = "broadcastSettings")]
+    pub(crate) broadcast_settings: Option<BroadcastSettings>,
+    pub(crate) stream: Option<ProtocolStream>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BroadcastSettings {
+    pub(crate) title: Option<String>,
+    pub(crate) game: Option<ProtocolGame>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProtocolGame {
+    pub(crate) id: Option<String>,
+    #[serde(rename = "displayName")]
+    pub(crate) display_name: Option<String>,
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProtocolStream {
+    pub(crate) id: Option<String>,
+    #[serde(rename = "viewersCount")]
+    pub(crate) viewers_count: Option<u64>,
+    #[serde(default)]
+    pub(crate) tags: Vec<ProtocolTag>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProtocolTag {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FollowersData {
+    pub(crate) user: Option<FollowersUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FollowersUser {
+    pub(crate) follows: Option<FollowersConnection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FollowersConnection {
+    pub(crate) edges: Option<Vec<FollowerEdge>>,
+    #[serde(rename = "pageInfo")]
+    pub(crate) page_info: Option<PageInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FollowerEdge {
+    pub(crate) cursor: Option<String>,
+    pub(crate) node: Option<FollowerNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FollowerNode {
+    pub(crate) login: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PageInfo {
+    #[serde(rename = "hasNextPage", default)]
+    pub(crate) has_next_page: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryData {
+    #[serde(rename = "currentUser")]
+    pub(crate) current_user: Option<InventoryUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryUser {
+    pub(crate) inventory: Option<InventoryState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryState {
+    #[serde(rename = "dropCampaignsInProgress")]
+    pub(crate) campaigns: Option<Vec<InventoryCampaign>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryCampaign {
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(rename = "displayName", default)]
+    pub(crate) display_name: Option<String>,
+    #[serde(rename = "timeBasedDrops", default)]
+    pub(crate) drops: Vec<InventoryTimeDrop>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryTimeDrop {
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    pub(crate) benefit: Option<InventoryBenefit>,
+    #[serde(rename = "self")]
+    pub(crate) self_data: Option<InventoryDropSelf>,
+    #[serde(rename = "requiredMinutesWatched", default)]
+    pub(crate) required_minutes_watched: Option<i64>,
+    #[serde(rename = "requiredProgress", default)]
+    pub(crate) required_progress: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryBenefit {
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryDropSelf {
+    #[serde(rename = "dropInstanceID")]
+    pub(crate) drop_instance_id: Option<String>,
+    #[serde(rename = "currentMinutesWatched", default)]
+    pub(crate) current_minutes_watched: Option<i64>,
+    #[serde(rename = "currentProgress", default)]
+    pub(crate) current_progress: Option<i64>,
+    #[serde(rename = "isClaimed")]
+    pub(crate) is_claimed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AvailableDropsData {
+    pub(crate) channel: Option<AvailableDropsChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AvailableDropsChannel {
+    #[serde(rename = "viewerDropCampaigns")]
+    pub(crate) campaigns: Option<Vec<AvailableDropCampaign>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AvailableDropCampaign {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ViewerDropsDashboard {
+    /// Twitch changes this experimental dashboard shape frequently. The
+    /// envelope is typed while unknown fields are intentionally retained for
+    /// forward compatibility and are never logged.
+    #[serde(flatten)]
+    pub fields: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContributionData {
+    pub(crate) user: Option<UserContributionUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContributionUser {
+    pub(crate) channel: Option<UserContributionChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContributionChannel {
+    #[serde(rename = "self")]
+    pub(crate) self_data: Option<UserContributionSelf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContributionSelf {
+    #[serde(rename = "communityPoints")]
+    pub(crate) community_points: Option<UserContributionPoints>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContributionPoints {
+    #[serde(rename = "goalContributions", default)]
+    pub(crate) contributions: Vec<UserContribution>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContribution {
+    pub(crate) goal: Option<UserContributionGoal>,
+    #[serde(rename = "userPointsContributedThisStream")]
+    pub(crate) points: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserContributionGoal {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct EmptyMutationData {}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaimBonusData {
+    #[serde(rename = "claimCommunityPoints")]
+    pub(crate) claim: Option<ClaimBonusMutation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaimBonusMutation {
+    pub(crate) status: Option<String>,
+    pub(crate) error: Option<MutationError>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaimDropData {
+    #[serde(rename = "claimDropRewards")]
+    pub(crate) claim: Option<ClaimDropMutation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaimDropMutation {
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CommunityGoalContributionData {
+    #[serde(rename = "contributeCommunityPointsCommunityGoal")]
+    pub(crate) contribution: Option<CommunityGoalContributionMutation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CommunityGoalContributionMutation {
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MutationError {
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

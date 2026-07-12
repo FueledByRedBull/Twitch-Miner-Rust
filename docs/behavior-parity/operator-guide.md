@@ -33,6 +33,20 @@ The container expects:
 - `TCPM_CONFIG=/data/config.json`
 - `TCPM_DATA_DIR=/data`
 
+For automation and diagnostics:
+
+```powershell
+docker exec twitch-miner /twitch-miner --check-config --json --data-dir /data
+docker exec twitch-miner /twitch-miner --status --data-dir /data
+docker exec twitch-miner /twitch-miner --health --data-dir /data
+```
+
+`--status` prints only the sanitized runtime-status document. It includes task
+freshness, bounded claim/bet/reconnect/refresh counters, the last redacted error
+class, and runtime queue/processing measurements. It never prints cookies,
+tokens, request headers, or raw account payloads. `followers_order` accepts
+`ASC` or `DESC`; `DESC` remains the default.
+
 Published images are static Rust binaries in a `scratch` runtime. There is no shell, package manager, or OS certificate bundle inside the image; TLS trust is provided by the Rust TLS stack.
 
 If you are migrating a Linux bind mount from an older root-run image, make sure existing `config/`, `cookies/`, and `log/` files are readable and writable by the UID/GID configured in Compose before restarting the Rust container.
@@ -57,9 +71,20 @@ docker run --rm twitch-miner-rust:local --help
 GitHub Actions also publishes the GHCR image on pushes to `main` and `v*` tags.
 Deploy the recorded manifest digest, not `latest`; see [release-process.md](../release-process.md).
 
+## Go/Rust Parity Gate
+
+The normalized vectors in `tests/parity/vectors.json` cover common streamer
+settings, prediction decisions and settlements, point-history updates, watch
+selection, and a legacy PubSub point event. Rust runs them through the contract
+test package. `scripts/verify-go-baseline.ps1` temporarily copies the matching
+Go test harness into the pinned baseline checkout, runs the same vectors, and
+removes the generated files before returning. The gate fails if either
+implementation diverges; it does not read credentials or live Twitch data.
+
 ## Notes
 
 - Treat `data/cookies/<username>.json` as an authentication secret.
 - This is unofficial Twitch automation; prefer a dedicated account if account risk matters.
 - Use `tm-app --check-config` before a migration, `--health` after startup, and
-  `--support-bundle ./support.json` for a privacy-safe support artifact.
+  `--status` for sanitized diagnostics and `--support-bundle ./support.json`
+  for a privacy-safe support artifact. Use `--check-config --json` in scripts.

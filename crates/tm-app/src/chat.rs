@@ -7,6 +7,8 @@ use crate::observability::{AppObservability, TracingChatLogger};
 use crate::status::HealthTracker;
 use crate::utilities::sleep_or_stop;
 
+const CHAT_WATCHER_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(crate) fn spawn_chat_manager_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -82,7 +84,7 @@ pub(crate) fn spawn_chat_manager_loop(
 
         for (_, (watcher_stop, task)) in watchers {
             let _ = watcher_stop.send(true);
-            let _ = task.await;
+            await_chat_watcher_task("chat-watcher", task).await;
         }
     })
 }
@@ -123,7 +125,7 @@ pub(crate) async fn reconcile_chat_watchers(
         }
         if let Some((watcher_stop, task)) = watchers.remove(&login) {
             let _ = watcher_stop.send(true);
-            let _ = task.await;
+            await_chat_watcher_task("chat-watcher", task).await;
             let message = observability.chat_presence_message(
                 false,
                 labels
@@ -159,6 +161,22 @@ pub(crate) async fn reconcile_chat_watchers(
     }
 
     Ok(())
+}
+
+async fn await_chat_watcher_task(name: &str, mut task: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(CHAT_WATCHER_STOP_GRACE, &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(task = name, %error, "chat watcher failed while stopping"),
+        Err(_) => {
+            tracing::warn!(
+                task = name,
+                timeout_seconds = CHAT_WATCHER_STOP_GRACE.as_secs(),
+                "chat watcher exceeded stop grace period; aborting"
+            );
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 pub(crate) fn spawn_chat_watcher_loop(

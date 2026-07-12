@@ -187,7 +187,10 @@ pub(crate) async fn load_or_login_session_with_auth_client(
         }
     }
 
-    let prompt = auth_client.request_device_code(&device_id).await?;
+    let scopes = tm_auth::device_flow_scope_for_eventsub(config.betting_make_predictions);
+    let prompt = auth_client
+        .request_device_code_with_scope(&device_id, &scopes)
+        .await?;
     tracing::info!(
         verification_uri = %prompt.verification_uri,
         user_code = %prompt.user_code,

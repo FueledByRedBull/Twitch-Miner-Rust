@@ -165,28 +165,38 @@ fn atomic_write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
         .and_then(|name| name.to_str())
         .unwrap_or("cookies.json");
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    let mut file = open_private_cookie_file(&temporary)?;
-    file.write_all(payload)?;
-    file.sync_all()?;
-    match fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(_) if path.exists() => replace_windows_cookie_file(&temporary, path),
-        Err(error) => Err(error),
+    let result = (|| {
+        let mut file = open_private_cookie_file(&temporary)?;
+        file.write_all(payload)?;
+        file.sync_all()?;
+        match fs::rename(&temporary, path) {
+            Ok(()) => Ok(()),
+            #[cfg(windows)]
+            Err(_) if path.is_file() => replace_windows_cookie_file(&temporary, path),
+            Err(error) => Err(error),
+        }
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
+    result
 }
 
 #[cfg(windows)]
 fn replace_windows_cookie_file(temporary: &Path, path: &Path) -> io::Result<()> {
-    let backup = path.with_extension("json.bak");
-    fs::remove_file(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cookies.json");
+    let replacement_backup =
+        path.with_file_name(format!(".{file_name}.{}.replace.tmp", std::process::id()));
+
+    fs::rename(path, &replacement_backup)?;
     if let Err(error) = fs::rename(temporary, path) {
-        if backup.is_file() {
-            let _ = fs::copy(backup, path);
-            let _ = set_private_cookie_permissions(path);
-        }
+        let _ = fs::rename(&replacement_backup, path);
         return Err(error);
     }
+    let _ = fs::remove_file(replacement_backup);
     Ok(())
 }
 
@@ -305,6 +315,21 @@ mod tests {
     }
 
     #[test]
+    fn cookie_atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = cookie_file_path(dir.path(), "tester");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"old").unwrap();
+
+        atomic_write_cookie_file(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let temporary =
+            path.with_file_name(format!(".{}.{}.tmp", "tester.json", std::process::id()));
+        assert!(!temporary.exists());
+    }
+
+    #[test]
     fn changed_cookie_file_keeps_previous_version_as_backup() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = sample_session();
@@ -412,5 +437,17 @@ mod tests {
             session.cookie_header_for_host("twitch.tv").unwrap(),
             "session=abc; auth-token=token"
         );
+    }
+
+    #[test]
+    fn corrupted_cookie_file_is_reported_without_fallback_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = cookie_file_path(dir.path(), "tester");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{\"auth-token\":").unwrap();
+        assert!(matches!(
+            AuthSession::load_from_dir(dir.path(), "tester"),
+            Err(AuthSessionError::CookieStore(_))
+        ));
     }
 }

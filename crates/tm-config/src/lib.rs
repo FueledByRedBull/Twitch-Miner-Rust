@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tm_domain::{
-    BetSettings, Condition, DelayMode, FilterCondition, IrcMode, OutcomeKey, Strategy,
-    StreamerSettings,
+    BetSettings, Condition, DelayMode, FilterCondition, FollowersOrder, IrcMode, OutcomeKey,
+    Strategy, StreamerSettings,
 };
 
 #[derive(Debug, Error)]
@@ -127,6 +127,8 @@ pub struct ConfigFile {
     pub game_priority: Vec<String>,
     pub game_exclude: Vec<String>,
     pub watch_priority: Vec<String>,
+    #[serde(default)]
+    pub followers_order: FollowersOrder,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
@@ -172,6 +174,7 @@ pub fn default_config_value() -> Value {
         "game_priority": [],
         "game_exclude": [],
         "watch_priority": ["STREAK", "DROPS", "ORDER"],
+        "followers_order": "DESC",
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": false
@@ -303,6 +306,54 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
             "config.disable_ssl_cert_verification is no longer supported; remove it or set it to false",
         )));
     }
+    validate_bet_config("config.bet", &config.bet)?;
+    for (login, override_settings) in &config.streamer_overrides {
+        validate_bet_config(
+            &format!("config.streamer_overrides.{login}.bet"),
+            &override_settings.bet,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_bet_config(path: &str, bet: &BetConfig) -> Result<(), ConfigError> {
+    if bet.percentage.is_some_and(|value| value > 100) {
+        return Err(ConfigError::Validation(format!(
+            "{path}.percentage must be between 0 and 100"
+        )));
+    }
+    if bet.percentage_gap.is_some_and(|value| value > 100) {
+        return Err(ConfigError::Validation(format!(
+            "{path}.percentage_gap must be between 0 and 100"
+        )));
+    }
+    if let Some(delay) = bet.delay {
+        if !delay.is_finite() || delay < 0.0 {
+            return Err(ConfigError::Validation(format!(
+                "{path}.delay must be a finite, non-negative number"
+            )));
+        }
+        if bet
+            .delay_mode
+            .as_deref()
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("PERCENTAGE"))
+            && delay > 1.0
+        {
+            return Err(ConfigError::Validation(format!(
+                "{path}.delay must be between 0 and 1 for PERCENTAGE delay_mode"
+            )));
+        }
+    }
+    if bet
+        .filter_condition
+        .as_ref()
+        .and_then(|condition| condition.value)
+        .is_some_and(|value| !value.is_finite())
+    {
+        return Err(ConfigError::Validation(format!(
+            "{path}.filter_condition.value must be a finite number"
+        )));
+    }
     Ok(())
 }
 
@@ -357,28 +408,38 @@ fn atomic_write(path: &Path, payload: &[u8]) -> io::Result<()> {
         .and_then(|name| name.to_str())
         .unwrap_or("config.json");
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    let mut file = open_private_config_file(&temporary)?;
-    file.write_all(payload)?;
-    file.sync_all()?;
-    match fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(_) if path.exists() => replace_windows_config_file(&temporary, path),
-        Err(error) => Err(error),
+    let result = (|| {
+        let mut file = open_private_config_file(&temporary)?;
+        file.write_all(payload)?;
+        file.sync_all()?;
+        match fs::rename(&temporary, path) {
+            Ok(()) => Ok(()),
+            #[cfg(windows)]
+            Err(_) if path.is_file() => replace_windows_config_file(&temporary, path),
+            Err(error) => Err(error),
+        }
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
+    result
 }
 
 #[cfg(windows)]
 fn replace_windows_config_file(temporary: &Path, path: &Path) -> io::Result<()> {
-    let backup = config_backup_path(path);
-    fs::remove_file(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.json");
+    let replacement_backup =
+        path.with_file_name(format!(".{file_name}.{}.replace.tmp", std::process::id()));
+
+    fs::rename(path, &replacement_backup)?;
     if let Err(error) = fs::rename(temporary, path) {
-        if backup.is_file() {
-            let _ = fs::copy(backup, path);
-            let _ = set_private_config_permissions(path);
-        }
+        let _ = fs::rename(&replacement_backup, path);
         return Err(error);
     }
+    let _ = fs::remove_file(replacement_backup);
     Ok(())
 }
 
@@ -962,6 +1023,31 @@ mod tests {
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(value.get("password").is_none());
         assert!(value.get("auto_update").is_none());
+        assert_eq!(config.followers_order, FollowersOrder::Desc);
+    }
+
+    #[test]
+    fn follower_order_accepts_asc_and_preserves_desc_default() {
+        let dir = unique_temp_dir("followers-order");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"username":"Alice","followers_order":"ASC"}"#).unwrap();
+        let config = load_or_create_config(&path).unwrap();
+        assert_eq!(config.followers_order, FollowersOrder::Asc);
+
+        let default_path = dir.join("default.json");
+        fs::write(&default_path, br#"{"username":"Alice"}"#).unwrap();
+        let default = load_or_create_config(&default_path).unwrap();
+        assert_eq!(default.followers_order, FollowersOrder::Desc);
+    }
+
+    #[test]
+    fn follower_order_rejects_unknown_values() {
+        let dir = unique_temp_dir("followers-order-invalid");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"username":"Alice","followers_order":"MIDDLE"}"#).unwrap();
+        assert!(load_or_create_config(&path).is_err());
     }
 
     #[test]
@@ -985,6 +1071,62 @@ mod tests {
         assert!(
             matches!(error, ConfigError::Validation(message) if message.contains("disable_ssl_cert_verification"))
         );
+    }
+
+    #[test]
+    fn validation_rejects_unsafe_prediction_bet_values() {
+        let mut config = ConfigFile {
+            username: String::from("Alice"),
+            ..ConfigFile::default()
+        };
+
+        config.bet.percentage = Some(101);
+        assert!(matches!(
+            validate_config(&config),
+            Err(ConfigError::Validation(message)) if message.contains("percentage must be between")
+        ));
+
+        config.bet.percentage = None;
+        config.bet.delay = Some(-1.0);
+        assert!(matches!(
+            validate_config(&config),
+            Err(ConfigError::Validation(message)) if message.contains("delay must be a finite")
+        ));
+
+        config.bet.delay = Some(2.0);
+        config.bet.delay_mode = Some(String::from("PERCENTAGE"));
+        assert!(matches!(
+            validate_config(&config),
+            Err(ConfigError::Validation(message)) if message.contains("for PERCENTAGE")
+        ));
+
+        config.bet.delay = None;
+        config.bet.delay_mode = None;
+        config.bet.filter_condition = Some(FilterConditionConfig {
+            value: Some(f64::NAN),
+            ..FilterConditionConfig::default()
+        });
+        assert!(matches!(
+            validate_config(&config),
+            Err(ConfigError::Validation(message)) if message.contains("filter_condition.value")
+        ));
+
+        config.bet.filter_condition = None;
+        config.streamer_overrides.insert(
+            String::from("alice"),
+            StreamerSettingsOverride {
+                bet: BetConfig {
+                    percentage_gap: Some(101),
+                    ..BetConfig::default()
+                },
+                ..StreamerSettingsOverride::default()
+            },
+        );
+        assert!(matches!(
+            validate_config(&config),
+            Err(ConfigError::Validation(message))
+                if message.contains("config.streamer_overrides.alice.bet.percentage_gap")
+        ));
     }
 
     #[test]
@@ -1019,6 +1161,23 @@ mod tests {
         assert_eq!(fs::read(config_backup_path(&path)).unwrap(), original);
         let migrated: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert!(migrated.get("auto_update").is_none());
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file_and_cleans_failed_temporary_files() {
+        let dir = unique_temp_dir("atomic-write");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, br#"{"old":true}"#).unwrap();
+
+        atomic_write(&path, br#"{"new":true}"#).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), br#"{"new":true}"#);
+
+        let target_directory = dir.join("directory-target");
+        fs::create_dir_all(&target_directory).unwrap();
+        assert!(atomic_write(&target_directory, b"{} ").is_err());
+        let temporary = dir.join(format!(".directory-target.{}.tmp", std::process::id()));
+        assert!(!temporary.exists());
     }
 
     #[cfg(unix)]

@@ -33,6 +33,55 @@ try {
     Pop-Location
 }
 
+$parityVector = Join-Path $rustRoot 'tests/parity/vectors.json'
+if (-not (Test-Path -LiteralPath $parityVector -PathType Leaf)) {
+    throw "Parity vector file not found: $parityVector"
+}
+$parityMappings = @(
+    @{ Source = 'go/settings_test.go'; Destination = 'tm_rust_parity_settings_test.go' },
+    @{ Source = 'go/prediction_test.go'; Destination = 'TwitchChannelPointsMiner/classes/tm_rust_parity_prediction_test.go' },
+    @{ Source = 'go/event_test.go'; Destination = 'TwitchChannelPointsMiner/classes/tm_rust_parity_event_test.go' },
+    @{ Source = 'go/watch_test.go'; Destination = 'TwitchChannelPointsMiner/tm_rust_parity_watch_test.go' },
+    @{ Source = 'go/points_test.go'; Destination = 'TwitchChannelPointsMiner/tm_rust_parity_points_test.go' }
+)
+$createdParityFiles = @()
+$oldParityVector = $env:TM_PARITY_VECTOR
+try {
+    foreach ($mapping in $parityMappings) {
+        $source = Join-Path $rustRoot "tests/parity/$($mapping.Source)"
+        $destination = Join-Path $goRoot $mapping.Destination
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Parity harness source not found: $source"
+        }
+        if (Test-Path -LiteralPath $destination) {
+            throw "Refusing to overwrite an existing Go parity file: $destination"
+        }
+        $destinationParent = Split-Path -Parent $destination
+        if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+            throw "Go parity destination directory not found: $destinationParent"
+        }
+        Copy-Item -LiteralPath $source -Destination $destination
+        $createdParityFiles += $destination
+    }
+    $env:TM_PARITY_VECTOR = $parityVector
+    Push-Location $goRoot
+    try {
+        go test ./... -run '^TestParity' -count=1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Go/Rust normalized parity fixtures failed with exit code $LASTEXITCODE."
+        }
+    } finally {
+        Pop-Location
+    }
+} finally {
+    foreach ($path in $createdParityFiles) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+    $env:TM_PARITY_VECTOR = $oldParityVector
+}
+
 $goText = Get-Content -Raw -LiteralPath $goConstants
 $rustText = Get-Content -Raw -LiteralPath $rustOperations
 $goMatches = [regex]::Matches(

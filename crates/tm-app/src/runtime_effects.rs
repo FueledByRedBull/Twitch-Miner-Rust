@@ -13,6 +13,7 @@ use crate::context::{
 use crate::effects::runtime_streamer_by_channel_id;
 use crate::observability::AppObservability;
 use crate::prediction::prediction_wait_duration;
+use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
 pub(crate) async fn execute_runtime_effects(
@@ -21,9 +22,18 @@ pub(crate) async fn execute_runtime_effects(
     persistent_user_id: &str,
     effects: Vec<tm_runtime::RuntimeEffect>,
     observability: &AppObservability,
+    health: HealthTracker,
 ) -> Result<()> {
     for effect in effects {
-        execute_runtime_effect(runtime, twitch, persistent_user_id, effect, observability).await?;
+        execute_runtime_effect(
+            runtime,
+            twitch,
+            persistent_user_id,
+            effect,
+            observability,
+            &health,
+        )
+        .await?;
     }
 
     Ok(())
@@ -35,6 +45,7 @@ pub(crate) async fn execute_runtime_effect(
     persistent_user_id: &str,
     effect: tm_runtime::RuntimeEffect,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     match effect {
         tm_runtime::RuntimeEffect::ClaimBonus {
@@ -48,6 +59,7 @@ pub(crate) async fn execute_runtime_effect(
                 &channel_id,
                 &claim_id,
                 observability,
+                health,
             )
             .await?;
         }
@@ -61,6 +73,7 @@ pub(crate) async fn execute_runtime_effect(
                 &channel_id,
                 &moment_id,
                 observability,
+                health,
             )
             .await?;
         }
@@ -86,11 +99,12 @@ pub(crate) async fn execute_runtime_effect(
                 persistent_user_id,
                 &channel_id,
                 observability,
+                health,
             )
             .await?;
         }
         tm_runtime::RuntimeEffect::EvaluatePrediction { event_id } => {
-            spawn_prediction_evaluation(runtime, twitch, &event_id, observability);
+            spawn_prediction_evaluation(runtime, twitch, &event_id, observability, health.clone());
         }
         tm_runtime::RuntimeEffect::PredictionSettled {
             event_id,
@@ -122,10 +136,12 @@ pub(crate) async fn handle_claim_bonus_effect(
     channel_id: &str,
     claim_id: &str,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     twitch
         .claim_bonus(channel_id, claim_id, Some(persistent_user_id))
         .await?;
+    health.record_claim();
     let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
         return Ok(());
     };
@@ -145,8 +161,10 @@ pub(crate) async fn handle_claim_moment_effect(
     channel_id: &str,
     moment_id: &str,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     twitch.claim_moment(moment_id).await?;
+    health.record_claim();
     let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
         return Ok(());
     };
@@ -184,6 +202,7 @@ pub(crate) async fn handle_community_goal_effect(
     persistent_user_id: &str,
     channel_id: &str,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
         return Ok(());
@@ -195,6 +214,7 @@ pub(crate) async fn handle_community_goal_effect(
             &streamer,
             Some(persistent_user_id),
             observability,
+            health,
         )
         .await?;
     }
@@ -206,18 +226,26 @@ pub(crate) fn spawn_prediction_evaluation(
     twitch: &Arc<TwitchClient>,
     event_id: &str,
     observability: &AppObservability,
+    health: HealthTracker,
 ) {
     let runtime = runtime.clone();
     let twitch = Arc::clone(twitch);
-    let observability = observability.clone();
+    let task_observability = observability.clone();
     let event_id = event_id.to_string();
-    tokio::spawn(async move {
-        if let Err(error) =
-            evaluate_prediction_after_delay(&runtime, &twitch, &event_id, &observability).await
+    let task = tokio::spawn(async move {
+        if let Err(error) = evaluate_prediction_after_delay(
+            &runtime,
+            &twitch,
+            &event_id,
+            &task_observability,
+            &health,
+        )
+        .await
         {
             tracing::warn!(event_id = %event_id, %error, "prediction evaluation failed");
         }
     });
+    observability.track_task(task);
 }
 
 pub(crate) fn handle_prediction_settled_effect(
@@ -246,6 +274,7 @@ pub(crate) async fn evaluate_prediction_after_delay(
     twitch: &TwitchClient,
     event_id: &str,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     let Some(wait) = prediction_wait_for_event(runtime, event_id).await? else {
         return Ok(());
@@ -253,7 +282,7 @@ pub(crate) async fn evaluate_prediction_after_delay(
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
-    evaluate_prediction(runtime, twitch, event_id, observability).await
+    evaluate_prediction(runtime, twitch, event_id, observability, health).await
 }
 
 pub(crate) async fn prediction_wait_for_event(
@@ -273,6 +302,7 @@ pub(crate) async fn evaluate_prediction(
     twitch: &TwitchClient,
     event_id: &str,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     let snapshot = runtime.state_snapshot().await?;
     let Some(mut event) = snapshot.predictions.get(event_id).cloned() else {
@@ -356,6 +386,7 @@ pub(crate) async fn evaluate_prediction(
         &decision,
         &streamer,
         observability,
+        health,
     )
     .await
 }
@@ -419,6 +450,7 @@ pub(crate) async fn skip_prediction(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn place_prediction(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
@@ -427,12 +459,14 @@ pub(crate) async fn place_prediction(
     decision: &PredictionDecision,
     streamer: &Streamer,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     match twitch
         .make_prediction(&event.event_id, &decision.outcome_id, decision.amount)
         .await
     {
         Ok(()) => {
+            health.record_bet();
             let deduct_stake = streamer.settings.bet.deduct_stake_on_place.unwrap_or(true);
             runtime
                 .record_prediction_placed(&event.event_id, decision.clone(), deduct_stake)

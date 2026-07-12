@@ -200,6 +200,14 @@ pub fn parse_inventory_drops(payload: &serde_json::Value) -> Vec<InventoryDrop> 
                         .pointer("/self/dropInstanceID")
                         .and_then(serde_json::Value::as_str)?
                         .to_string();
+                    let required_minutes_watched = drop
+                        .get("requiredMinutesWatched")
+                        .or_else(|| drop.get("requiredProgress"))
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|required| *required > 0)?;
+                    let is_claimed = drop
+                        .pointer("/self/isClaimed")
+                        .and_then(serde_json::Value::as_bool)?;
                     Some(InventoryDrop {
                         drop_instance_id,
                         reward_name: drop
@@ -214,15 +222,8 @@ pub fn parse_inventory_drops(payload: &serde_json::Value) -> Vec<InventoryDrop> 
                             .or_else(|| drop.pointer("/self/currentProgress"))
                             .and_then(serde_json::Value::as_i64)
                             .unwrap_or_default(),
-                        required_minutes_watched: drop
-                            .get("requiredMinutesWatched")
-                            .or_else(|| drop.get("requiredProgress"))
-                            .and_then(serde_json::Value::as_i64)
-                            .unwrap_or_default(),
-                        is_claimed: drop
-                            .pointer("/self/isClaimed")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
+                        required_minutes_watched,
+                        is_claimed,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -278,9 +279,10 @@ pub fn validate_gql_mutation_response(
     if errors.as_array().is_some_and(Vec::is_empty) {
         return Ok(());
     }
+    let count = errors.as_array().map_or(1, Vec::len);
     Err(TwitchClientError::GqlErrors {
         context: context.to_string(),
-        errors: errors.to_string(),
+        errors: format!("{count} error(s)"),
     })
 }
 

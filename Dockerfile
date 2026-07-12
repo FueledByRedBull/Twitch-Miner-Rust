@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.94.0-bookworm AS chef
+FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS chef
 WORKDIR /workspace
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
@@ -7,7 +7,7 @@ RUN apt-get update \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/tmp/cargo-install-target \
-    CARGO_TARGET_DIR=/tmp/cargo-install-target cargo install cargo-chef --locked
+    CARGO_TARGET_DIR=/tmp/cargo-install-target cargo install cargo-chef --version 0.1.77 --locked
 
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
@@ -16,6 +16,7 @@ COPY crates/tm-app/build.rs crates/tm-app/build.rs
 COPY crates/tm-auth/Cargo.toml crates/tm-auth/Cargo.toml
 COPY crates/tm-config/Cargo.toml crates/tm-config/Cargo.toml
 COPY crates/tm-domain/Cargo.toml crates/tm-domain/Cargo.toml
+COPY crates/tm-events/Cargo.toml crates/tm-events/Cargo.toml
 COPY crates/tm-irc/Cargo.toml crates/tm-irc/Cargo.toml
 COPY crates/tm-observability/Cargo.toml crates/tm-observability/Cargo.toml
 COPY crates/tm-pubsub/Cargo.toml crates/tm-pubsub/Cargo.toml
@@ -23,11 +24,12 @@ COPY crates/tm-runtime/Cargo.toml crates/tm-runtime/Cargo.toml
 COPY crates/tm-twitch/Cargo.toml crates/tm-twitch/Cargo.toml
 COPY tests/contract/Cargo.toml tests/contract/Cargo.toml
 COPY tests/integration/Cargo.toml tests/integration/Cargo.toml
-RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm-domain/src crates/tm-irc/src crates/tm-observability/src crates/tm-pubsub/src crates/tm-runtime/src crates/tm-twitch/src tests/contract/src tests/integration/src \
+RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm-domain/src crates/tm-events/src crates/tm-irc/src crates/tm-observability/src crates/tm-pubsub/src crates/tm-runtime/src crates/tm-twitch/src tests/contract/src tests/integration/src \
     && printf 'fn main() {}\n' > crates/tm-app/src/main.rs \
     && printf '\n' > crates/tm-auth/src/lib.rs \
     && printf '\n' > crates/tm-config/src/lib.rs \
     && printf '\n' > crates/tm-domain/src/lib.rs \
+    && printf '\n' > crates/tm-events/src/lib.rs \
     && printf '\n' > crates/tm-irc/src/lib.rs \
     && printf '\n' > crates/tm-observability/src/lib.rs \
     && printf '\n' > crates/tm-pubsub/src/lib.rs \

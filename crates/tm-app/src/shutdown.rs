@@ -10,7 +10,7 @@ pub(crate) async fn shutdown_background_tasks(
     let _ = stop_tx.send(true);
     let mut waits = tokio::task::JoinSet::new();
     for (name, task) in [
-        ("pubsub", tasks.pubsub),
+        ("eventsub", tasks.eventsub),
         ("context", tasks.context),
         ("pending-claims", tasks.pending_claims),
         ("minute", tasks.minute),
@@ -27,7 +27,15 @@ pub(crate) async fn shutdown_background_tasks(
 }
 
 pub(crate) async fn await_shutdown_task(name: &str, mut task: tokio::task::JoinHandle<()>) {
-    match tokio::time::timeout(SHUTDOWN_TASK_GRACE_PERIOD, &mut task).await {
+    await_shutdown_task_with_grace(name, &mut task, SHUTDOWN_TASK_GRACE_PERIOD).await;
+}
+
+async fn await_shutdown_task_with_grace(
+    name: &str,
+    task: &mut tokio::task::JoinHandle<()>,
+    grace: std::time::Duration,
+) {
+    match tokio::time::timeout(grace, &mut *task).await {
         Ok(Ok(())) => {
             tracing::info!(task = name, "shutdown task stopped");
         }
@@ -90,7 +98,20 @@ async fn wait_for_shutdown_signal() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::await_shutdown_task;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use super::{await_shutdown_task, await_shutdown_task_with_grace};
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[tokio::test]
     async fn shutdown_waiter_handles_completed_and_aborted_tasks() {
@@ -99,5 +120,25 @@ mod tests {
         let aborted = tokio::spawn(async { std::future::pending::<()>().await });
         aborted.abort();
         await_shutdown_task("aborted", aborted).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_waiter_aborts_a_stuck_active_operation() {
+        let started = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_started = Arc::clone(&started);
+        let task_dropped = Arc::clone(&dropped);
+        let mut task = tokio::spawn(async move {
+            let _probe = DropProbe(task_dropped);
+            task_started.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        });
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+
+        await_shutdown_task_with_grace("active-operation", &mut task, std::time::Duration::ZERO)
+            .await;
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

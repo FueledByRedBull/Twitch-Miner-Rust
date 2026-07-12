@@ -50,7 +50,7 @@ pub(crate) async fn load_targets(
         return Ok(config.streamers.clone());
     }
     twitch
-        .fetch_followers(100, "DESC")
+        .fetch_followers(100, config.followers_order.as_str())
         .await
         .context("load followers")
 }

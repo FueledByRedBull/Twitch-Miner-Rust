@@ -10,6 +10,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
@@ -27,3 +29,7 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace --locked --quiet
+
+      - name: Verify deterministic release metadata and build integrity
+        shell: pwsh
+        run: ./scripts/verify-build-integrity.ps1

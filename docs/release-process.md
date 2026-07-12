@@ -3,6 +3,10 @@
 Releases are source-and-digest based. Mutable image tags are convenience
 labels, never deployment input.
 
+The Docker builder also pins the Rust toolchain to an immutable manifest
+digest and pins `cargo-chef` to an exact locked version;
+`scripts/verify-release-hygiene.ps1` rejects mutable builder inputs.
+
 1. Update `CHANGELOG.md` with behavior, configuration, migration, and known
    compatibility changes.
 2. Run the local QA commands in `CONTRIBUTING.md`, run
@@ -21,6 +25,20 @@ labels, never deployment input.
 6. After deployment, verify `--version`, `--health`, container health, and a
    normal `SIGTERM` restart. Keep the previous digest until the new deployment
    has remained healthy through its monitoring window.
+
+If the previous image bytes are unavailable, rebuild the known-good source
+revision into a new, explicitly named rollback image. The helper never pushes
+unless `-Push` is supplied:
+
+```powershell
+./scripts/build-rollback-image.ps1 -Revision 1c10f11
+./scripts/build-rollback-image.ps1 -Revision 1c10f11 -Push
+docker buildx imagetools inspect ghcr.io/fueledbyredbull/twitch-miner-rust:rollback-<resolved-sha>
+```
+
+Record the newly produced digest; the old digest cannot be recreated from its
+hex string alone. Run `--check-config` against the rollback digest on the Pi
+before placing it in the rollback Compose file.
 
 ## Raspberry Pi verification commands
 

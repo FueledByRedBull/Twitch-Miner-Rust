@@ -9,7 +9,7 @@ mod state;
 mod summary;
 mod types;
 
-pub use actor::RuntimeHandle;
+pub use actor::{RuntimeHandle, RuntimeMetrics, RuntimeMetricsSnapshot};
 pub use effect::RuntimeEffect;
 pub use error::{Result, RuntimeError};
 pub use summary::{apply_pubsub_gain, build_session_summary, update_history};
@@ -628,6 +628,83 @@ mod tests {
 
         changes.changed().await.unwrap();
         assert_eq!(*changes.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_metrics_capture_event_processing_and_queue_depth() {
+        let config = ConfigFile {
+            streamers: vec!["tester".into()],
+            ..ConfigFile::default()
+        };
+        let runtime = spawn_runtime(&config, ts(10));
+        runtime
+            .apply_event(
+                PubSubEvent::Playback {
+                    channel_id: String::from("missing"),
+                    kind: PlaybackType::Viewcount,
+                },
+                ts(11),
+            )
+            .await
+            .unwrap();
+        let metrics = runtime.metrics();
+        assert_eq!(metrics.processed_events, 1);
+        assert!(metrics.max_queue_depth >= 1);
+        assert!(metrics.max_queue_depth <= 64);
+    }
+
+    #[tokio::test]
+    async fn queued_commands_and_dropped_callers_do_not_block_orderly_shutdown() {
+        let config = ConfigFile {
+            streamers: vec!["tester".into()],
+            ..ConfigFile::default()
+        };
+        let runtime = spawn_runtime(&config, ts(10));
+        let mut queued = Vec::new();
+        for index in 0_i64..64 {
+            let handle = runtime.clone();
+            queued.push(tokio::spawn(async move {
+                handle
+                    .apply_event(
+                        PubSubEvent::PointsEarned {
+                            channel_id: String::new(),
+                            earned: 1,
+                            reason: String::from("WATCH"),
+                            balance: index,
+                        },
+                        ts(20 + index),
+                    )
+                    .await
+            }));
+        }
+        tokio::task::yield_now().await;
+        let dropped = tokio::spawn({
+            let handle = runtime.clone();
+            async move {
+                let _ = handle
+                    .apply_event(
+                        PubSubEvent::Playback {
+                            channel_id: String::new(),
+                            kind: PlaybackType::Viewcount,
+                        },
+                        ts(100),
+                    )
+                    .await;
+            }
+        });
+        dropped.abort();
+
+        let shutdown = tokio::spawn({
+            let handle = runtime.clone();
+            async move { handle.shutdown(false, ts(200)).await }
+        });
+        for task in queued {
+            let _ = task.await;
+        }
+        let summary = shutdown.await.unwrap().unwrap();
+        assert_eq!(summary.streamers.len(), 1);
+        assert!(runtime.metrics().processed_events <= 65);
+        assert!(runtime.metrics().max_queue_depth > 0);
     }
 
     #[tokio::test]

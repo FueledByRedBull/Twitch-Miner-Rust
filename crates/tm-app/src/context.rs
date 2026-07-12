@@ -68,8 +68,8 @@ pub(crate) fn spawn_context_refresh_loop(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(20 * 60),
-            std::time::Duration::from_secs(20 * 60),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5 * 60),
+            std::time::Duration::from_secs(5 * 60),
         );
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut stop = stop;
@@ -86,6 +86,7 @@ pub(crate) fn spawn_context_refresh_loop(
                         &twitch,
                         &persistent_user_id,
                         &observability,
+                        &health,
                     )
                     .await
                     {
@@ -93,6 +94,7 @@ pub(crate) fn spawn_context_refresh_loop(
                         tracing::warn!(task = "context", error_class = "refresh", %error, "context refresh snapshot failed");
                     } else {
                         health.success("context");
+                        health.record_refresh();
                     }
                 }
             }
@@ -129,6 +131,7 @@ pub(crate) fn spawn_pending_claim_loop(
                         &twitch,
                         &persistent_user_id,
                         &observability,
+                        &health,
                     )
                     .await
                     {
@@ -136,6 +139,7 @@ pub(crate) fn spawn_pending_claim_loop(
                         tracing::warn!(task = "pending-claims", error_class = "refresh", %error, "pending bonus sweep failed");
                     } else {
                         health.success("pending-claims");
+                        health.record_refresh();
                     }
                 }
             }
@@ -148,6 +152,7 @@ pub(crate) async fn refresh_snapshot_streamers(
     twitch: &Arc<TwitchClient>,
     persistent_user_id: &str,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
     let snapshot = runtime.state_snapshot().await?;
     let mut refreshes = tokio::task::JoinSet::new();
@@ -160,6 +165,7 @@ pub(crate) async fn refresh_snapshot_streamers(
         let twitch = Arc::clone(twitch);
         let persistent_user_id = persistent_user_id.to_string();
         let observability = observability.clone();
+        let health = health.clone();
         refreshes.spawn(async move {
             let username = streamer.username.clone();
             let result = match refresh_streamer_context(
@@ -168,6 +174,7 @@ pub(crate) async fn refresh_snapshot_streamers(
                 &streamer,
                 Some(&persistent_user_id),
                 &observability,
+                &health,
             )
             .await
             {
@@ -178,6 +185,7 @@ pub(crate) async fn refresh_snapshot_streamers(
                         &persistent_user_id,
                         effects,
                         &observability,
+                        health.clone(),
                     )
                     .await
                 }
@@ -214,6 +222,7 @@ pub(crate) async fn refresh_streamer_context(
     streamer: &Streamer,
     persistent_user_id: Option<&str>,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<Vec<tm_runtime::RuntimeEffect>> {
     let mut context = fetch_streamer_context(twitch, streamer).await?;
     if let Some(claim_id) = context.claim_id.as_deref() {
@@ -221,6 +230,7 @@ pub(crate) async fn refresh_streamer_context(
             .claim_bonus(&streamer.channel_id, claim_id, persistent_user_id)
             .await
             .with_context(|| format!("claim refreshed bonus for {}", streamer.username))?;
+        health.record_claim();
         if observability.show_claimed_bonus {
             let message = observability.bonus_claim_message(streamer, false);
             tracing::info!("{message}");
@@ -237,9 +247,17 @@ pub(crate) async fn refresh_streamer_context_without_goal_effects(
     streamer: &Streamer,
     persistent_user_id: Option<&str>,
     observability: &AppObservability,
+    health: &HealthTracker,
 ) -> Result<()> {
-    let _ = refresh_streamer_context(runtime, twitch, streamer, persistent_user_id, observability)
-        .await?;
+    let _ = refresh_streamer_context(
+        runtime,
+        twitch,
+        streamer,
+        persistent_user_id,
+        observability,
+        health,
+    )
+    .await?;
     Ok(())
 }
 
@@ -272,9 +290,9 @@ pub(crate) async fn load_goal_contributions(
     twitch: &TwitchClient,
     username: &str,
 ) -> Result<HashMap<String, i64>> {
-    let response = twitch.fetch_user_points_contribution(username).await?;
-    let contributions = tm_twitch::parse_user_points_contributions(&response)
+    Ok(twitch
+        .fetch_user_points_contribution_typed(username)
+        .await?
         .into_iter()
-        .collect();
-    Ok(contributions)
+        .collect())
 }

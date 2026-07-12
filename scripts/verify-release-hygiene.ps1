@@ -30,8 +30,15 @@ foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.rpi.yml', 'd
     }
 }
 
-if ((Get-Content -Raw Dockerfile) -notmatch 'HEALTHCHECK') {
+$dockerfile = Get-Content -Raw Dockerfile
+if ($dockerfile -notmatch 'HEALTHCHECK') {
     throw 'Dockerfile has no health check.'
+}
+if ($dockerfile -notmatch '(?m)^\s*FROM\s+rust:[^\s@]+@sha256:[0-9a-f]{64}\s+AS\s+chef') {
+    throw 'Dockerfile builder image must be pinned by immutable digest.'
+}
+if ($dockerfile -notmatch 'cargo install cargo-chef --version \d+\.\d+\.\d+ --locked') {
+    throw 'Dockerfile cargo-chef install must use an explicit locked version.'
 }
 
 git check-ignore -q FINISHING_TOUCHES.md

@@ -14,4 +14,5 @@ tm-config = { path = "../../crates/tm-config", version = "0.1.0" }
 tm-domain = { path = "../../crates/tm-domain", version = "0.1.0" }
 tm-irc = { path = "../../crates/tm-irc", version = "0.1.0" }
 tm-pubsub = { path = "../../crates/tm-pubsub", version = "0.1.0" }
+tm-runtime = { path = "../../crates/tm-runtime", version = "0.1.0" }
 tm-twitch = { path = "../../crates/tm-twitch", version = "0.1.0" }

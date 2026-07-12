@@ -3,10 +3,8 @@ use tm_domain::{CommunityGoal, Streamer};
 
 use crate::errors::PubSubError;
 use crate::prediction::{parse_prediction_event, winning_outcome_id};
-use crate::types::{
-    CommunityGoalKind, IncomingTransportMessage, PlaybackType, PredictionChannelKind,
-    PredictionUserKind, PubSubEvent,
-};
+use crate::types::{IncomingTransportMessage, PubSubEvent};
+use tm_events::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PredictionUserKind};
 
 pub fn parse_message(
     raw: &str,

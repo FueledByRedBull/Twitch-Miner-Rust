@@ -10,11 +10,11 @@ gap before each release.
 | --- | --- | --- |
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
-| Channel-points context, bonus chest, streaks, and minute watching | Parity | GQL fixtures, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Direct GQL calls are intentionally not retried because mutations share the client path. |
+| Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed GQL fixtures, five-minute private polling, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
 | Drops and moments | Parity | Inventory, campaign, claim-status, and PubSub fixtures. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
-| Raids, PubSub, IRC presence, and chat mentions | Parity | Topic, reconnect, IRC transport, and event fixtures. |
+| EventSub stream presence/predictions, legacy PubSub fixtures, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/deduplication tests, transport-neutral runtime events, legacy parser fixtures, and IRC transport tests. Unsupported private events remain GQL/polling-backed; EventSub raid notifications are observed but cannot safely invoke the legacy join mutation because Twitch does not provide its required raid ID. |
 | Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
 | Runtime supervision and health | Improved | Task-exit/panic supervision plus task-specific freshness/failure thresholds. |
@@ -31,7 +31,8 @@ working Rust implementation:
 | --- | --- |
 | Username, streamers, follower/game/watch selection | Preserved. |
 | Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
-| Drops, raid, community goals, chat presence, `disable_at_in_nickname` | Preserved. |
+| Drops, community goals, chat presence, `disable_at_in_nickname` | Preserved. |
+| Raid observation and auto-join | Partial | EventSub can report source/target raids, but its payload has no legacy raid ID; Rust deliberately skips the unsafe `JoinRaid` mutation until a supported identifier-bearing path exists. |
 | Prediction and per-streamer override settings | Preserved. |
 | `password` | Rejected when non-empty; device login does not need it. |
 | `disable_ssl_cert_verification` | Rejected when true; TLS verification is mandatory. |
@@ -46,6 +47,11 @@ Go contains a few unused operation definitions (`PlaybackAccessToken`,
 `ModViewChannelQuery`, `DropCampaignDetails`, and `PersonalSections`); they are
 not part of either miner's exercised runtime behavior and are intentionally not
 copied into Rust.
+
+The normalized cross-process vectors in `tests/parity/vectors.json` are run by
+the Rust contract tests and by the pinned Go baseline through
+`scripts/verify-go-baseline.ps1`. The Go harness is copied only for the duration
+of that command and is removed afterward.
 
 Before publication, run all fixture tests and the read-only canary. A successful
 canary proves only the listed read operations for that account at that time;

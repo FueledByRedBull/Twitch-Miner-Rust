@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +43,7 @@ pub(crate) fn spawn_pubsub_loop(
             persistent_user_id.clone(),
             observability.clone(),
             effect_receiver,
+            health.clone(),
         );
         let event_task = spawn_pubsub_event_task(
             stop.clone(),
@@ -82,6 +85,7 @@ fn spawn_pubsub_effect_task(
     persistent_user_id: String,
     observability: AppObservability,
     mut receiver: tokio::sync::mpsc::Receiver<Vec<tm_runtime::RuntimeEffect>>,
+    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(effects) = receiver.recv().await {
@@ -91,6 +95,7 @@ fn spawn_pubsub_effect_task(
                 &persistent_user_id,
                 effects,
                 &observability,
+                health.clone(),
             )
             .await
             {
@@ -140,8 +145,12 @@ async fn handle_pubsub_message(
         PubSubConnectionEvent::Heartbeat => health.success("pubsub"),
         PubSubConnectionEvent::Event(event) => {
             let log_event = (*event).clone();
-            match runtime.apply_pubsub_event(*event, time_now()).await {
+            let received_at = std::time::Instant::now();
+            match runtime.apply_event(*event, time_now()).await {
                 Ok(effects) => {
+                    runtime
+                        .metrics_handle()
+                        .record_transport_latency(received_at.elapsed());
                     health.success("pubsub");
                     if let Err(error) = log_pubsub_event(runtime, observability, &log_event).await {
                         tracing::warn!(task = "pubsub", error_class = "log-handling", %error, "pubsub log handling failed");
