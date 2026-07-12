@@ -24,7 +24,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: FueledByRedBull/Twitch-Channel-Points-Miner
+          repository: 0x8fv/Twitch-Channel-Points-Miner
           ref: 940c98409e5821900752815cd9550ae5b750b597
           path: Twitch-Channel-Points-Miner
           persist-credentials: false
