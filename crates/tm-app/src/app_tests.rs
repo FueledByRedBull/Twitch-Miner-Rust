@@ -14,7 +14,7 @@ mod tests {
 
     use crate::bootstrap::{
         env_has_value, has_override, load_config_with_fallback_using,
-        load_or_login_session_with_auth_client, normalized_username,
+        load_or_login_session_with_auth_client, normalized_username, preview_config_with_fallback,
         should_fallback_to_user_config, validate_timezone_override, TimezoneValidation,
         READ_ONLY_FILE_SYSTEM_ERROR,
     };
@@ -431,6 +431,27 @@ mod tests {
 
         fs::remove_dir_all(&requested_dir).unwrap();
         fs::remove_dir_all(&fallback_dir).unwrap();
+    }
+
+    #[test]
+    fn canary_config_preview_does_not_persist_migration() {
+        let requested_dir = unique_temp_dir();
+        fs::create_dir_all(&requested_dir).unwrap();
+        let config_path = requested_dir.join("config.json");
+        let original = br#"{"username":"tester"}"#;
+        fs::write(&config_path, original).unwrap();
+        let requested_paths = AppPaths {
+            work_dir: requested_dir.clone(),
+            config_path: config_path.clone(),
+        };
+
+        let loaded = preview_config_with_fallback(&requested_paths, true).unwrap();
+
+        assert_eq!(loaded.config.username, "tester");
+        assert_eq!(fs::read(&config_path).unwrap(), original);
+        assert!(!config_path.with_extension("json.bak").exists());
+
+        fs::remove_dir_all(&requested_dir).unwrap();
     }
 
     #[test]

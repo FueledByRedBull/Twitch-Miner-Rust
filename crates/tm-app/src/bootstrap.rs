@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use tm_auth::{AuthSession, AuthSessionError, TwitchAuthClient};
 use tm_config::{
-    default_user_config_dir, load_or_create_config, validate_config, AppPaths, ConfigError,
-    ConfigFile,
+    default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
+    ConfigError, ConfigFile,
 };
 use tm_twitch::generate_device_id;
 
@@ -50,6 +50,15 @@ pub(crate) fn load_config_with_fallback(
         default_user_config_dir,
         load_or_create_config,
     )
+}
+
+pub(crate) fn preview_config_with_fallback(
+    paths: &AppPaths,
+    has_override: bool,
+) -> Result<LoadedConfig, ConfigError> {
+    load_config_with_fallback_using(paths, has_override, default_user_config_dir, |path| {
+        preview_config(path).map(|preview| preview.config)
+    })
 }
 
 pub(crate) fn load_config_with_fallback_using<D, F>(

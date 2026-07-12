@@ -479,9 +479,13 @@ fn set_private_config_permissions(path: &Path) -> io::Result<()> {
 pub fn resolve_app_paths(input: &ResolveAppPathsInput) -> io::Result<AppPaths> {
     if let Some(data_dir_flag) = input.data_dir_flag.as_ref() {
         let work_dir = absolutize(data_dir_flag, &input.cwd);
+        let config_path = input.config_flag.as_ref().map_or_else(
+            || work_dir.join("config.json"),
+            |path| absolutize(path, &input.cwd),
+        );
         return Ok(AppPaths {
-            config_path: work_dir.join("config.json"),
             work_dir,
+            config_path,
         });
     }
 
@@ -1285,6 +1289,14 @@ mod tests {
         };
         let paths = resolve_app_paths(&data_dir_input).unwrap();
         assert!(paths.work_dir.ends_with("data-dir"));
+
+        let combined_input = ResolveAppPathsInput {
+            config_flag: Some(PathBuf::from("custom/config.json")),
+            ..data_dir_input.clone()
+        };
+        let paths = resolve_app_paths(&combined_input).unwrap();
+        assert!(paths.work_dir.ends_with("data-dir"));
+        assert!(paths.config_path.ends_with(Path::new("custom/config.json")));
 
         let config_input = ResolveAppPathsInput {
             data_dir_flag: None,

@@ -30,8 +30,8 @@ mod watching;
 
 use bootstrap::{
     build_http_client, has_override, load_config_with_fallback, load_or_login_session,
-    log_timezone_validation, prepare_work_dir, validate_timezone_override, LoadedConfig,
-    DEFAULT_USER_AGENT,
+    log_timezone_validation, prepare_work_dir, preview_config_with_fallback,
+    validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
 };
 use drops::claim_startup_drops_if_enabled;
 use observability::{build_observability, log_session_summary, log_startup};
@@ -127,10 +127,15 @@ async fn main() -> Result<()> {
     set_console_title(DEFAULT_CONSOLE_TITLE);
     clear_console();
 
+    let loaded_config = if cli.canary {
+        preview_config_with_fallback(&requested_paths, has_override)?
+    } else {
+        load_config_with_fallback(&requested_paths, has_override)?
+    };
     let LoadedConfig {
         config,
         active_paths,
-    } = load_config_with_fallback(&requested_paths, has_override)?;
+    } = loaded_config;
     prepare_work_dir(&active_paths)?;
     let timezone_validation = validate_timezone_override(config.timezone.as_deref());
 
