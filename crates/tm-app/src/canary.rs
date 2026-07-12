@@ -1,12 +1,37 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use tm_config::ConfigFile;
 use tm_domain::{Streamer, StreamerSettings};
 use tm_pubsub::{EventSubClient, EventSubClientSettings, EventSubConnectionEvent};
 use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
 use crate::bootstrap::{load_and_validate_existing_session, DEFAULT_USER_AGENT};
+
+#[derive(Debug)]
+struct CanaryCheckError {
+    stage: &'static str,
+    source: anyhow::Error,
+}
+
+impl CanaryCheckError {
+    fn new(stage: &'static str, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            stage,
+            source: source.into(),
+        }
+    }
+}
+
+fn canary_step<T, E>(
+    stage: &'static str,
+    result: std::result::Result<T, E>,
+) -> std::result::Result<T, CanaryCheckError>
+where
+    E: Into<anyhow::Error>,
+{
+    result.map_err(|error| CanaryCheckError::new(stage, error))
+}
 
 pub(crate) async fn run_read_only_canary(
     config: &ConfigFile,
@@ -20,8 +45,8 @@ pub(crate) async fn run_read_only_canary(
     .await
     {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(anyhow!("canary failed: {}", canary_failure_class(&error))),
-        Err(_) => Err(anyhow!("canary failed: timeout")),
+        Ok(Err(error)) => Err(anyhow!("canary failed: {}", canary_failure_message(&error))),
+        Err(_) => Err(anyhow!("canary failed: overall:timeout")),
     }
 }
 
@@ -29,11 +54,17 @@ async fn run_read_only_canary_inner(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
-) -> Result<()> {
-    let session = load_and_validate_existing_session(config, work_dir, http_client.clone()).await?;
-    let auth_token = session
-        .auth_token()
-        .ok_or_else(|| anyhow!("validated canary session has no auth token"))?;
+) -> std::result::Result<(), CanaryCheckError> {
+    let session = canary_step(
+        "session",
+        load_and_validate_existing_session(config, work_dir, http_client.clone()).await,
+    )?;
+    let auth_token = session.auth_token().ok_or_else(|| {
+        CanaryCheckError::new(
+            "session-token",
+            anyhow!("validated canary session has no auth token"),
+        )
+    })?;
     let twitch = TwitchClient::with_client_and_cookie_header(
         http_client,
         auth_token,
@@ -41,18 +72,16 @@ async fn run_read_only_canary_inner(
         session.cookie_header_for_host("twitch.tv"),
     );
 
-    let own_channel_id = twitch
-        .fetch_channel_id(&config.username)
-        .await
-        .context("canary GetIDFromLogin")?;
+    let own_channel_id = canary_step(
+        "own-channel-id",
+        twitch.fetch_channel_id(&config.username).await,
+    )?;
     let target = config
         .streamers
         .first()
         .map_or(config.username.as_str(), String::as_str);
-    let target_channel_id = twitch
-        .fetch_channel_id(target)
-        .await
-        .context("canary target GetIDFromLogin")?;
+    let target_channel_id =
+        canary_step("target-channel-id", twitch.fetch_channel_id(target).await)?;
     let base_settings = tm_config::build_base_streamer_settings(config);
     let override_settings =
         tm_config::build_override_settings(&base_settings, &config.streamer_overrides);
@@ -60,41 +89,40 @@ async fn run_read_only_canary_inner(
         .get(&target.trim().to_lowercase())
         .unwrap_or(&base_settings);
 
-    let _ = twitch
-        .fetch_followers(1, config.followers_order.as_str())
-        .await
-        .context("canary ChannelFollows")?;
-    let _ = twitch
-        .fetch_channel_points_context(target)
-        .await
-        .context("canary ChannelPointsContext")?;
-    let _ = twitch
-        .is_stream_live(&target_channel_id)
-        .await
-        .context("canary WithIsStreamLiveQuery")?;
-    let _ = twitch
-        .fetch_stream_info(target)
-        .await
-        .context("canary VideoPlayerStreamInfoOverlayChannel")?;
-    let _ = twitch
-        .fetch_inventory_typed()
-        .await
-        .context("canary Inventory")?;
-    let _ = twitch
-        .fetch_viewer_drops_dashboard_typed()
-        .await
-        .context("canary ViewerDropsDashboard")?;
-    let _ = twitch
-        .fetch_available_drop_campaigns_typed(&target_channel_id)
-        .await
-        .context("canary DropsHighlightService_AvailableDrops")?;
-    let _ = twitch
-        .fetch_user_points_contribution_typed(target)
-        .await
-        .context("canary UserPointsContribution")?;
-    run_eventsub_canary(&twitch, target_channel_id, target_settings.make_predictions)
-        .await
-        .context("canary EventSub")?;
+    let _ = canary_step(
+        "followers",
+        twitch
+            .fetch_followers(1, config.followers_order.as_str())
+            .await,
+    )?;
+    let _ = canary_step(
+        "channel-points-context",
+        twitch.fetch_channel_points_context(target).await,
+    )?;
+    let _ = canary_step(
+        "stream-live",
+        twitch.is_stream_live(&target_channel_id).await,
+    )?;
+    let _ = canary_step("stream-info", twitch.fetch_stream_info(target).await)?;
+    let _ = canary_step("inventory", twitch.fetch_inventory_typed().await)?;
+    let _ = canary_step(
+        "drops-dashboard",
+        twitch.fetch_viewer_drops_dashboard_typed().await,
+    )?;
+    let _ = canary_step(
+        "available-drops",
+        twitch
+            .fetch_available_drop_campaigns_typed(&target_channel_id)
+            .await,
+    )?;
+    let _ = canary_step(
+        "points-contribution",
+        twitch.fetch_user_points_contribution_typed(target).await,
+    )?;
+    canary_step(
+        "eventsub",
+        run_eventsub_canary(&twitch, target_channel_id, target_settings.make_predictions).await,
+    )?;
 
     tracing::info!(
         read_operations = 10,
@@ -102,6 +130,10 @@ async fn run_read_only_canary_inner(
         "credential-safe Twitch canary passed"
     );
     Ok(())
+}
+
+fn canary_failure_message(error: &CanaryCheckError) -> String {
+    format!("{}:{}", error.stage, canary_failure_class(&error.source))
 }
 
 async fn run_eventsub_canary(
@@ -168,4 +200,22 @@ fn canary_failure_class(error: &anyhow::Error) -> &'static str {
         return "auth";
     }
     "canary-check"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canary_failure_message_keeps_only_fixed_stage_and_failure_class() {
+        let error = CanaryCheckError::new(
+            "inventory",
+            TwitchClientError::MissingField("sensitive-response-field"),
+        );
+
+        let message = canary_failure_message(&error);
+
+        assert_eq!(message, "inventory:contract-or-shape");
+        assert!(!message.contains("sensitive-response-field"));
+    }
 }
