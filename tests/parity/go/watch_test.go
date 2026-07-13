@@ -22,7 +22,7 @@ func TestParityWatchSelection(t *testing.T) {
 	for _, item := range value["game_exclude"].([]interface{}) {
 		gameExclude = append(gameExclude, item.(string))
 	}
-	m := NewMiner("tester", "", false, false, LoggerSettings{}, entities.StreamerSettings{WatchStreak: false}, nil, priorityNames, nil, gamePriority, gameExclude, false, false, false)
+	m := NewMiner("tester", "", false, false, LoggerSettings{}, entities.StreamerSettings{WatchStreak: false}, nil, priorityNames, nil, gamePriority, gameExclude, false, false, false, false)
 	streamers := make([]*entities.Streamer, 0)
 	for _, raw := range value["streamers"].([]interface{}) {
 		item := raw.(map[string]interface{})
