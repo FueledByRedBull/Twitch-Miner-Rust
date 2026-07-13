@@ -17,7 +17,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::policy::{PredictionSource, TransportSourcePolicy};
 
-pub const EVENTSUB_WEBSOCKET_URL: &str = "wss://eventsub.wss.twitch.tv/ws";
+pub const EVENTSUB_WEBSOCKET_URL: &str =
+    "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30";
 pub const EVENTSUB_SUBSCRIPTIONS_URL: &str = "https://api.twitch.tv/helix/eventsub/subscriptions";
 const MAX_SEEN_MESSAGE_IDS: usize = 4096;
 const EVENTSUB_MAX_TOTAL_COST: u32 = 10;
@@ -28,6 +29,7 @@ const EVENTSUB_MAX_READ_ATTEMPTS: usize = 3;
 const EVENTSUB_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const EVENTSUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const EVENTSUB_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const EVENTSUB_KEEPALIVE_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct EventSubClientSettings {
@@ -790,9 +792,12 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     loop {
-        let Some(message) = tokio::time::timeout(keepalive_timeout, socket.next())
-            .await
-            .map_err(|_| EventSubError::Protocol("eventsub keepalive timeout"))?
+        let Some(message) = tokio::time::timeout(
+            keepalive_timeout.saturating_add(EVENTSUB_KEEPALIVE_GRACE),
+            socket.next(),
+        )
+        .await
+        .map_err(|_| EventSubError::Protocol("eventsub keepalive timeout"))?
         else {
             return Ok(());
         };
@@ -1358,9 +1363,10 @@ mod tests {
     };
 
     use super::{
-        event_from_notification, parse_eventsub_message, subscription_plan_with_capacity,
-        subscription_requests, subscription_requests_with_policy, EventSubClient,
-        EventSubClientSettings, EventSubMessage, MessageDeduper,
+        event_from_notification, listen_socket, parse_eventsub_message,
+        subscription_plan_with_capacity, subscription_requests, subscription_requests_with_policy,
+        EventSubClient, EventSubClientSettings, EventSubConnectionEvent, EventSubMessage,
+        MessageDeduper, EVENTSUB_WEBSOCKET_URL,
     };
     use futures_util::SinkExt;
     use serde_json::json;
@@ -1368,8 +1374,8 @@ mod tests {
     use tm_events::MinerEvent;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio_tungstenite::accept_async;
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::{accept_async, connect_async};
 
     fn streamer() -> Streamer {
         Streamer {
@@ -1382,6 +1388,59 @@ mod tests {
             },
             ..Streamer::default()
         }
+    }
+
+    #[test]
+    fn default_websocket_url_requests_setup_safe_keepalive_window() {
+        assert_eq!(
+            EVENTSUB_WEBSOCKET_URL,
+            "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30"
+        );
+    }
+
+    #[tokio::test]
+    async fn keepalive_wait_allows_a_small_delivery_grace() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            socket
+                .send(Message::Text(
+                    json!({
+                        "metadata": {
+                            "message_id": "keepalive-1",
+                            "message_type": "session_keepalive"
+                        },
+                        "payload": {}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            socket.close(None).await.unwrap();
+        });
+
+        let (mut socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let mut deduper = MessageDeduper::default();
+        let result = listen_socket(
+            &mut socket,
+            &[streamer()],
+            &sender,
+            &mut deduper,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(matches!(
+            receiver.recv().await,
+            Some(EventSubConnectionEvent::Heartbeat)
+        ));
+        server.await.unwrap();
     }
 
     async fn read_http_json(stream: &mut tokio::net::TcpStream) -> serde_json::Value {

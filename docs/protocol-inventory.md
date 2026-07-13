@@ -65,7 +65,9 @@ arbitrary tracked channels. Other channels remain on PubSub compatibility.
 EventSub creation and list responses use separate typed envelopes because only
 the list response contains pagination. Both are capacity-planned; overflow or
 failed presence capabilities use bounded GQL polling instead of silently
-dropping channels.
+dropping channels. The WebSocket requests Twitch's supported 30-second
+keepalive window and applies a five-second delivery grace before reconnecting,
+avoiding an edge race at the advertised silence boundary.
 
 The isolated PubSub compatibility path connects to
 `wss://pubsub-edge.twitch.tv/v1`. It supplies viewer prediction discovery and
