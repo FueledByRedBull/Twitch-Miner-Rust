@@ -9,6 +9,7 @@
   "show_seconds": false,
   "claim_drops_startup": true,
   "claim_drops": true,
+  "claim_moments": true,
   "betting(make_predictions)": true,
   "follow_raid": true,
   "community_goals": true,

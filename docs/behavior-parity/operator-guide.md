@@ -17,6 +17,8 @@ If you want to watch logs in the foreground, run the command directly in the ter
 - `auto_update` was removed. A legacy `false` value is migrated away and `true`
   is rejected.
 - Remove `password` from older configs; device-code login does not use it.
+- `claim_moments` is the global moment-discovery/claim default; a streamer
+  override can enable or disable it for one channel.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 
@@ -43,9 +45,25 @@ docker exec twitch-miner /twitch-miner --health --data-dir /data
 
 `--status` prints only the sanitized runtime-status document. It includes task
 freshness, bounded claim/bet/reconnect/refresh counters, the last redacted error
-class, and runtime queue/processing measurements. It never prints cookies,
+class, runtime queue/processing measurements, EventSub planned/active/cost
+capabilities, and PubSub configured/acknowledged/message/reconnect capabilities.
+It never prints topic suffixes, channel/user IDs, cookies,
 tokens, request headers, or raw account payloads. `followers_order` accepts
 `ASC` or `DESC`; `DESC` remains the default.
+
+Human-facing console and saved logs use the Python-compatible envelope
+`HH:MM:SS DD/MM/YY - LEVEL - [operation]: message` (seconds remain controlled
+by `show_seconds`). High-value events use stable operations such as `run`,
+`set_online`, `set_offline`, `on_message`, `claim_bonus`, `update_raid`, and
+`make_predictions`, with the familiar emoji messages when `emojis` is enabled.
+
+On normal shutdown the miner prints the session ID, saved log path, duration in
+`HH:MM:SS.ffffff`, a bounded detailed report for completed predictions, and a
+per-streamer point/history summary. Report blocks use the Python final-report
+shape `HH:MM:SS DD/MM/YY - emoji/content` without the ordinary level/operation
+envelope. Privacy mode substitutes streamer aliases,
+hides channel/event/outcome IDs, titles, points, decisions, and result details,
+and uses `miner.log` rather than an account-named log file.
 
 Published images are static Rust binaries in a `scratch` runtime. There is no shell, package manager, or OS certificate bundle inside the image; TLS trust is provided by the Rust TLS stack.
 
@@ -80,6 +98,20 @@ test package. `scripts/verify-go-baseline.ps1` temporarily copies the matching
 Go test harness into the pinned baseline checkout, runs the same vectors, and
 removes the generated files before returning. The gate fails if either
 implementation diverges; it does not read credentials or live Twitch data.
+
+## Transport health
+
+EventSub and PubSub are separate health entries. EventSub `unauthorized`,
+`revoked`, or `no-subscriptions` means the official subscription path needs
+authorization or contract attention; `rate-limited`, `server-error`,
+`connection-reset`, and `timeout` are bounded recovery states. Presence entries
+whose source is `gql-polling` are intentionally covered by the fallback poller.
+
+PubSub `bad-auth` requires a fresh session. `listen-rejected` means one topic
+class was not accepted. `pong-timeout`, `connection-error`, `connection-closed`,
+and `reconnect` trigger bounded independent reconnection. Check the redacted
+per-class configured versus acknowledged counts; do not copy cookies or raw
+responses into support reports.
 
 ## Notes
 

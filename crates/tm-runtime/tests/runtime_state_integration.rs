@@ -53,6 +53,8 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
         ],
         initial_points: HashMap::new(),
         predictions: HashMap::new(),
+        processed_prediction_ids: std::collections::VecDeque::new(),
+        completed_predictions: std::collections::VecDeque::new(),
     };
 
     state.capture_initial_points();
@@ -202,7 +204,7 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
         ts(56),
     );
     let prediction_result = parse_message(
-        r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\"}}}}"}}"#,
+        r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
         &[],
     )
     .unwrap()
@@ -216,7 +218,7 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
             title: "Prediction".into(),
             decision_label: String::new(),
             result_type: "WIN".into(),
-            result_string: "WIN, Gained: +0".into(),
+            result_string: "WIN, Gained: +250".into(),
         }]
     );
 

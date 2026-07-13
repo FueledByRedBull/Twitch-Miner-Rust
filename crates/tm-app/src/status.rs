@@ -11,7 +11,7 @@ use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use crate::build_info;
 
 pub(crate) const STATUS_FILE_NAME: &str = "runtime-status.json";
-const STATUS_SCHEMA_VERSION: u8 = 3;
+const STATUS_SCHEMA_VERSION: u8 = 4;
 const MAX_HEARTBEAT_AGE_SECONDS: u64 = 120;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const MAX_COUNTER_VALUE: u64 = 1_000_000_000;
@@ -38,6 +38,8 @@ struct RuntimeStatus {
     tasks: Vec<TaskStatus>,
     counters: StatusCounters,
     runtime_metrics: RuntimeMetricsSnapshot,
+    eventsub: Option<tm_pubsub::EventSubSetupReport>,
+    pubsub: Option<tm_pubsub::PubSubSetupReport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -62,6 +64,8 @@ struct DropProgressSnapshot {
 pub(crate) struct HealthTracker {
     tasks: Arc<Mutex<BTreeMap<String, TaskStatus>>>,
     counters: Arc<Mutex<StatusCounters>>,
+    eventsub: Arc<Mutex<Option<tm_pubsub::EventSubSetupReport>>>,
+    pubsub: Arc<Mutex<Option<tm_pubsub::PubSubSetupReport>>>,
 }
 
 impl HealthTracker {
@@ -122,6 +126,89 @@ impl HealthTracker {
         self.increment(|counters| &mut counters.successful_refreshes);
     }
 
+    pub(crate) fn record_eventsub_setup(&self, report: tm_pubsub::EventSubSetupReport) {
+        *self
+            .eventsub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    }
+
+    pub(crate) fn record_pubsub_setup(&self, report: tm_pubsub::PubSubSetupReport) {
+        *self
+            .pubsub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(report);
+    }
+
+    pub(crate) fn record_pubsub_acknowledgement(&self, topic_class: &str) -> bool {
+        self.with_pubsub_capability(topic_class, |capability| {
+            capability.acknowledged_topics = capability
+                .acknowledged_topics
+                .saturating_add(1)
+                .min(capability.configured_topics);
+            if capability.acknowledged_topics == capability.configured_topics {
+                capability.failure_class = None;
+            }
+        });
+        self.pubsub_ready()
+    }
+
+    pub(crate) fn record_pubsub_message(&self, topic_class: &str) {
+        self.with_pubsub_capability(topic_class, |capability| {
+            capability.last_message_unix = Some(unix_now_infallible());
+        });
+    }
+
+    pub(crate) fn record_pubsub_failure(&self, topic_class: &str, failure_class: &str) {
+        self.with_pubsub_capability(topic_class, |capability| {
+            capability.failure_class = Some(failure_class.to_string());
+        });
+    }
+
+    pub(crate) fn record_pubsub_disconnect(
+        &self,
+        topic_class: &str,
+        acknowledged_topics: usize,
+        failure_class: &str,
+    ) {
+        self.with_pubsub_capability(topic_class, |capability| {
+            capability.acknowledged_topics = capability
+                .acknowledged_topics
+                .saturating_sub(acknowledged_topics);
+            capability.reconnects = capability.reconnects.saturating_add(1);
+            capability.failure_class = Some(failure_class.to_string());
+        });
+    }
+
+    pub(crate) fn pubsub_ready(&self) -> bool {
+        self.pubsub_snapshot().is_some_and(|report| {
+            !report.capabilities.is_empty()
+                && report.capabilities.iter().all(|capability| {
+                    capability.acknowledged_topics == capability.configured_topics
+                        && capability.failure_class.is_none()
+                })
+        })
+    }
+
+    fn with_pubsub_capability(
+        &self,
+        topic_class: &str,
+        update: impl FnOnce(&mut tm_pubsub::PubSubCapabilityStatus),
+    ) {
+        let mut report = self
+            .pubsub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(capability) = report.as_mut().and_then(|report| {
+            report
+                .capabilities
+                .iter_mut()
+                .find(|capability| capability.topic_class == topic_class)
+        }) {
+            update(capability);
+        }
+    }
+
     pub(crate) fn record_drop_progress(
         &self,
         current_minutes_watched: i64,
@@ -169,6 +256,20 @@ impl HealthTracker {
             .clone()
     }
 
+    fn eventsub_snapshot(&self) -> Option<tm_pubsub::EventSubSetupReport> {
+        self.eventsub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn pubsub_snapshot(&self) -> Option<tm_pubsub::PubSubSetupReport> {
+        self.pubsub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn lock_tasks(&self) -> MutexGuard<'_, BTreeMap<String, TaskStatus>> {
         self.tasks
             .lock()
@@ -195,11 +296,22 @@ impl StatusReporter {
             health,
             metrics,
         };
-        reporter.heartbeat()?;
+        reporter.supervision_heartbeat()?;
         Ok(reporter)
     }
 
+    #[cfg(test)]
     pub(crate) fn heartbeat(&self) -> Result<()> {
+        let (status, now) = self.publish_heartbeat()?;
+        validate_status(&status, now)
+    }
+
+    pub(crate) fn supervision_heartbeat(&self) -> Result<()> {
+        let (status, now) = self.publish_heartbeat()?;
+        validate_status_for_supervision(&status, now)
+    }
+
+    fn publish_heartbeat(&self) -> Result<(RuntimeStatus, u64)> {
         let now = unix_now()?;
         let status = RuntimeStatus {
             schema_version: STATUS_SCHEMA_VERSION,
@@ -212,9 +324,11 @@ impl StatusReporter {
             tasks: self.health.snapshot(),
             counters: self.health.counters_snapshot(),
             runtime_metrics: self.metrics.snapshot(),
+            eventsub: self.health.eventsub_snapshot(),
+            pubsub: self.health.pubsub_snapshot(),
         };
         atomic_json_write(&self.path, &status)?;
-        validate_status(&status, now)
+        Ok((status, now))
     }
 }
 
@@ -273,6 +387,35 @@ fn read_status(path: &Path) -> Result<RuntimeStatus> {
 }
 
 fn validate_status(status: &RuntimeStatus, now: u64) -> Result<()> {
+    validate_common_status(status, now, false)?;
+    if let Some(pubsub) = &status.pubsub {
+        for capability in &pubsub.capabilities {
+            if capability.acknowledged_topics != capability.configured_topics
+                || capability.failure_class.is_some()
+            {
+                return Err(anyhow!(
+                    "pubsub capability {} is degraded ({}/{})",
+                    capability.topic_class,
+                    capability.acknowledged_topics,
+                    capability.configured_topics
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_status_for_supervision(status: &RuntimeStatus, now: u64) -> Result<()> {
+    // PubSub is a compatibility adapter. Its degradation must remain visible to --health,
+    // but it must not terminate EventSub, polling, IRC, drops, or minute watching.
+    validate_common_status(status, now, true)
+}
+
+fn validate_common_status(
+    status: &RuntimeStatus,
+    now: u64,
+    ignore_pubsub_task: bool,
+) -> Result<()> {
     if status.schema_version != STATUS_SCHEMA_VERSION || status.state != "ready" {
         return Err(anyhow!("runtime status is not ready"));
     }
@@ -281,6 +424,9 @@ fn validate_status(status: &RuntimeStatus, now: u64) -> Result<()> {
         return Err(anyhow!("runtime status is stale ({age}s old)"));
     }
     for task in &status.tasks {
+        if ignore_pubsub_task && task.name == "pubsub" {
+            continue;
+        }
         let task_age = now.saturating_sub(task.last_success_unix);
         if task_age > task.stale_after_seconds {
             return Err(anyhow!(
@@ -371,9 +517,9 @@ fn unix_now_infallible() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_json_write, check_health, validate_status, write_support_bundle, HealthTracker,
-        RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus, StatusCounters, StatusReporter,
-        TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
+        atomic_json_write, check_health, validate_status, validate_status_for_supervision,
+        write_support_bundle, HealthTracker, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus,
+        StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
     };
 
     #[test]
@@ -418,11 +564,17 @@ mod tests {
             }],
             counters: StatusCounters::default(),
             runtime_metrics: RuntimeMetricsSnapshot::default(),
+            eventsub: None,
+            pubsub: None,
         };
         assert!(validate_status(&status, 100).is_err());
+        assert!(validate_status_for_supervision(&status, 100).is_ok());
         status.tasks[0].last_success_unix = 100;
         status.tasks[0].consecutive_failures = 5;
         assert!(validate_status(&status, 100).is_err());
+        assert!(validate_status_for_supervision(&status, 100).is_ok());
+        status.tasks[0].name = String::from("minute");
+        assert!(validate_status_for_supervision(&status, 100).is_err());
     }
 
     #[test]
@@ -440,6 +592,7 @@ mod tests {
         }
 
         assert!(reporter.heartbeat().is_err());
+        reporter.supervision_heartbeat()?;
         assert!(check_health(directory.path()).is_err());
         Ok(())
     }
@@ -467,6 +620,79 @@ mod tests {
     }
 
     #[test]
+    fn status_tracks_pubsub_capability_without_topic_identifiers() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let health = HealthTracker::default();
+        health.record_pubsub_setup(tm_pubsub::PubSubSetupReport {
+            connection_count: 1,
+            total_topics: 1,
+            capabilities: vec![tm_pubsub::PubSubCapabilityStatus {
+                topic_class: String::from("prediction-channel"),
+                configured_topics: 1,
+                acknowledged_topics: 0,
+                last_message_unix: None,
+                reconnects: 0,
+                failure_class: None,
+            }],
+        });
+        assert!(health.record_pubsub_acknowledgement("prediction-channel"));
+        health.record_pubsub_message("prediction-channel");
+        health.record_pubsub_disconnect("prediction-channel", 1, "connection-reset");
+        assert!(!health.pubsub_ready());
+        let degraded_reporter = StatusReporter::ready(
+            directory.path(),
+            health.clone(),
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        assert!(degraded_reporter.heartbeat().is_err());
+        degraded_reporter.supervision_heartbeat()?;
+        let degraded = std::fs::read_to_string(directory.path().join(STATUS_FILE_NAME))?;
+        assert!(degraded.contains("connection-reset"));
+        assert!(degraded.contains("\"acknowledged_topics\": 0"));
+
+        assert!(health.record_pubsub_acknowledgement("prediction-channel"));
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+
+        let status = std::fs::read_to_string(directory.path().join(STATUS_FILE_NAME))?;
+        assert!(status.contains("prediction-channel"));
+        assert!(status.contains("\"acknowledged_topics\": 1"));
+        assert!(status.contains("\"last_message_unix\":"));
+        assert!(status.contains("\"reconnects\": 1"));
+        assert!(!status.contains("channel-456"));
+        assert!(!status.contains("auth-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn pubsub_failure_clears_only_after_every_disconnected_topic_is_reacknowledged() {
+        let health = HealthTracker::default();
+        health.record_pubsub_setup(tm_pubsub::PubSubSetupReport {
+            connection_count: 1,
+            total_topics: 2,
+            capabilities: vec![tm_pubsub::PubSubCapabilityStatus {
+                topic_class: String::from("prediction-channel"),
+                configured_topics: 2,
+                acknowledged_topics: 0,
+                last_message_unix: None,
+                reconnects: 0,
+                failure_class: None,
+            }],
+        });
+
+        assert!(!health.record_pubsub_acknowledgement("prediction-channel"));
+        assert!(health.record_pubsub_acknowledgement("prediction-channel"));
+        health.record_pubsub_disconnect("prediction-channel", 2, "connection-reset");
+        assert!(!health.pubsub_ready());
+        assert!(!health.record_pubsub_acknowledgement("prediction-channel"));
+        assert!(health.record_pubsub_acknowledgement("prediction-channel"));
+    }
+
+    #[test]
     fn status_atomic_write_replaces_files_and_cleans_failed_temporary_files() -> anyhow::Result<()>
     {
         let directory = tempfile::tempdir()?;
@@ -489,16 +715,51 @@ mod tests {
     #[test]
     fn support_bundle_contains_metadata_not_file_contents() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
+        let config_marker = "SHOULD_NOT_APPEAR_CONFIG";
+        let cookie_marker = "SHOULD_NOT_APPEAR_COOKIE";
+        let webhook_marker = "SHOULD_NOT_APPEAR_WEBHOOK";
+        let response_marker = "SHOULD_NOT_APPEAR_RESPONSE";
         std::fs::write(
             directory.path().join("config.json"),
-            r#"{"secret":"value"}"#,
+            format!(r#"{{"private_config":"{config_marker}"}}"#),
         )?;
+        std::fs::create_dir_all(directory.path().join("cookies"))?;
+        std::fs::write(directory.path().join("cookies/fixture.json"), cookie_marker)?;
+        std::fs::create_dir_all(directory.path().join("log"))?;
+        std::fs::write(
+            directory.path().join("log/fixture.log"),
+            format!(
+                "Authorization: {cookie_marker}\nhttps://example.invalid/hooks/{webhook_marker}"
+            ),
+        )?;
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            HealthTracker::default(),
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+        let status_path = directory.path().join(STATUS_FILE_NAME);
+        let mut raw_status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&status_path)?)?;
+        raw_status["raw_twitch_response"] = serde_json::Value::String(response_marker.to_string());
+        atomic_json_write(&status_path, &raw_status)?;
+
         let destination = directory.path().join("support.json");
         write_support_bundle(directory.path(), &destination)?;
         let bundle = std::fs::read_to_string(destination)?;
-        assert!(!bundle.contains("secret"));
-        assert!(!bundle.contains("value"));
+        for marker in [
+            config_marker,
+            cookie_marker,
+            webhook_marker,
+            response_marker,
+            "Authorization",
+            "raw_twitch_response",
+        ] {
+            assert!(!bundle.contains(marker));
+        }
         assert!(bundle.contains("config_size_bytes"));
+        assert!(bundle.contains("cookie_file_count"));
+        assert!(bundle.contains("log_file_count"));
         Ok(())
     }
 }

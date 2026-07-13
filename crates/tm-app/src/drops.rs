@@ -110,7 +110,7 @@ async fn claim_available_drops_with_health(
             health.record_claim();
         }
         let message = observability.drop_claim_message(mode, &drop);
-        tracing::info!("{message}");
+        tracing::info!(operation = "claim_drop", "{message}");
         observability
             .send_event(DiscordEvent::DropClaim, &message)
             .await;

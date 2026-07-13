@@ -2,8 +2,12 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use tm_config::ConfigFile;
-use tm_domain::{Streamer, StreamerSettings};
-use tm_pubsub::{EventSubClient, EventSubClientSettings, EventSubConnectionEvent};
+use tm_domain::Streamer;
+use tm_pubsub::{
+    build_topic_batches_with_policy, EventSubClient, EventSubClientSettings,
+    EventSubConnectionEvent, EventSubSetupReport, PubSubClient, PubSubConnectionEvent,
+    TransportSourcePolicy,
+};
 use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
 use crate::bootstrap::{load_and_validate_existing_session, DEFAULT_USER_AGENT};
@@ -71,23 +75,18 @@ async fn run_read_only_canary_inner(
         DEFAULT_USER_AGENT,
         session.cookie_header_for_host("twitch.tv"),
     );
+    let prediction_eventsub_authorized = prediction_eventsub_authorized(&session);
 
     let own_channel_id = canary_step(
         "own-channel-id",
         twitch.fetch_channel_id(&config.username).await,
     )?;
-    let target = config
-        .streamers
-        .first()
-        .map_or(config.username.as_str(), String::as_str);
+    let target = canary_target(config);
     let target_channel_id =
         canary_step("target-channel-id", twitch.fetch_channel_id(target).await)?;
     let base_settings = tm_config::build_base_streamer_settings(config);
     let override_settings =
         tm_config::build_override_settings(&base_settings, &config.streamer_overrides);
-    let target_settings = override_settings
-        .get(&target.trim().to_lowercase())
-        .unwrap_or(&base_settings);
 
     let _ = canary_step(
         "followers",
@@ -99,6 +98,12 @@ async fn run_read_only_canary_inner(
         "channel-points-context",
         twitch.fetch_channel_points_context(target).await,
     )?;
+    let _ = canary_step(
+        "watch-streak-reward-list",
+        twitch
+            .fetch_watch_streak_achievement(&target_channel_id)
+            .await,
+    )?;
     let target_is_live = canary_step(
         "stream-live",
         twitch.is_stream_live(&target_channel_id).await,
@@ -106,9 +111,10 @@ async fn run_read_only_canary_inner(
     // The overlay operation validly returns `stream: null` while a channel is
     // offline. Match the runtime path and validate its live-only fields only
     // when Twitch reports that the target is currently live.
-    if target_is_live {
-        let _ = canary_step("stream-info", twitch.fetch_stream_info(target).await)?;
-    }
+    let stream_info_checked = canary_step(
+        "stream-info",
+        fetch_stream_info_if_live(&twitch, target, target_is_live).await,
+    )?;
     let _ = canary_step("inventory", twitch.fetch_inventory_typed().await)?;
     let _ = canary_step(
         "drops-dashboard",
@@ -124,18 +130,104 @@ async fn run_read_only_canary_inner(
         "points-contribution",
         twitch.fetch_user_points_contribution_typed(target).await,
     )?;
+    let tracked = resolve_canary_streamers(
+        config,
+        &twitch,
+        target,
+        &target_channel_id,
+        &base_settings,
+        &override_settings,
+    )
+    .await?;
     canary_step(
         "eventsub",
-        run_eventsub_canary(&twitch, target_channel_id, target_settings.make_predictions).await,
+        run_eventsub_canary(
+            &twitch,
+            &own_channel_id,
+            prediction_eventsub_authorized,
+            &tracked,
+        )
+        .await,
+    )?;
+    canary_step(
+        "pubsub",
+        run_pubsub_canary(&twitch, &own_channel_id, &tracked).await,
     )?;
 
     tracing::info!(
-        read_operations = if target_is_live { 10 } else { 9 },
-        stream_info_applicable = target_is_live,
+        read_operations = if stream_info_checked { 11 } else { 10 },
+        stream_info_applicable = stream_info_checked,
         own_channel_id_present = !own_channel_id.is_empty(),
         "credential-safe Twitch canary passed"
     );
     Ok(())
+}
+
+fn prediction_eventsub_authorized(session: &tm_auth::AuthSession) -> bool {
+    session.has_any_scope(&["channel:read:predictions", "channel:manage:predictions"])
+}
+
+fn canary_target(config: &ConfigFile) -> &str {
+    config
+        .streamers
+        .first()
+        .map_or(config.username.as_str(), String::as_str)
+}
+
+async fn resolve_canary_streamers(
+    config: &ConfigFile,
+    twitch: &TwitchClient,
+    primary_login: &str,
+    primary_channel_id: &str,
+    base_settings: &tm_domain::StreamerSettings,
+    override_settings: &std::collections::HashMap<String, tm_domain::StreamerSettings>,
+) -> std::result::Result<Vec<Streamer>, CanaryCheckError> {
+    let targets = if config.streamers.is_empty() {
+        vec![config.username.clone()]
+    } else {
+        config.streamers.clone()
+    };
+    let mut tracked = Vec::with_capacity(targets.len());
+    let mut seen = std::collections::HashSet::new();
+    for login in targets {
+        let normalized = login.trim().to_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        let channel_id = if normalized == primary_login.trim().to_lowercase() {
+            primary_channel_id.to_string()
+        } else {
+            canary_step("tracked-channel-id", twitch.fetch_channel_id(&login).await)?
+        };
+        tracked.push(Streamer {
+            username: login,
+            channel_id,
+            settings: override_settings
+                .get(&normalized)
+                .cloned()
+                .unwrap_or_else(|| base_settings.clone()),
+            ..Streamer::default()
+        });
+    }
+    if tracked.is_empty() {
+        return Err(CanaryCheckError::new(
+            "tracked-streamers",
+            anyhow!("canary has no valid tracked streamers"),
+        ));
+    }
+    Ok(tracked)
+}
+
+async fn fetch_stream_info_if_live(
+    twitch: &TwitchClient,
+    target: &str,
+    target_is_live: bool,
+) -> std::result::Result<bool, TwitchClientError> {
+    if !target_is_live {
+        return Ok(false);
+    }
+    let _ = twitch.fetch_stream_info(target).await?;
+    Ok(true)
 }
 
 fn canary_failure_message(error: &CanaryCheckError) -> String {
@@ -144,31 +236,37 @@ fn canary_failure_message(error: &CanaryCheckError) -> String {
 
 async fn run_eventsub_canary(
     twitch: &TwitchClient,
-    target_channel_id: String,
-    make_predictions: bool,
+    own_channel_id: &str,
+    prediction_eventsub_authorized: bool,
+    tracked: &[Streamer],
 ) -> Result<()> {
-    let tracked = [Streamer {
-        channel_id: target_channel_id,
-        settings: StreamerSettings {
-            make_predictions,
-            ..StreamerSettings::default()
-        },
-        ..Streamer::default()
-    }];
     let client = EventSubClient::new(EventSubClientSettings {
         client_id: tm_twitch::CLIENT_ID.to_string(),
         auth_token: twitch.auth_token().to_string(),
         websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
         subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
         allow_prediction_scope_fallback: false,
+        source_policy: TransportSourcePolicy::viewer_compatibility(),
+        authorized_prediction_broadcaster_id: prediction_eventsub_authorized
+            .then(|| own_channel_id.to_string()),
+        verify_subscriptions: true,
         http_client: reqwest::Client::new(),
     });
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    let tracked = tracked.to_vec();
     let task = tokio::spawn(async move { client.connect_and_listen(&tracked, sender).await });
     let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut setup_verified = false;
         while let Some(message) = receiver.recv().await {
-            if matches!(message, EventSubConnectionEvent::Heartbeat) {
-                return Ok::<(), anyhow::Error>(());
+            match message {
+                EventSubConnectionEvent::Setup(report) => {
+                    validate_eventsub_canary_report(&report)?;
+                    setup_verified = true;
+                }
+                EventSubConnectionEvent::Heartbeat if setup_verified => {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                EventSubConnectionEvent::Heartbeat | EventSubConnectionEvent::Event(_) => {}
             }
         }
         Err(anyhow!(
@@ -181,6 +279,86 @@ async fn run_eventsub_canary(
     match result {
         Ok(result) => result,
         Err(_) => Err(anyhow!("EventSub handshake timeout")),
+    }
+}
+
+fn validate_eventsub_canary_report(report: &EventSubSetupReport) -> Result<()> {
+    if report.planned_subscriptions == 0
+        || report.active_subscriptions != report.planned_subscriptions
+        || report.failed_subscriptions != 0
+        || !report.verified
+        || report.capabilities.iter().any(|capability| {
+            capability.active_subscription_types != capability.planned_subscription_types
+        })
+    {
+        return Err(anyhow!("EventSub subscription verification failed"));
+    }
+    Ok(())
+}
+
+async fn run_pubsub_canary(
+    twitch: &TwitchClient,
+    user_id: &str,
+    tracked: &[Streamer],
+) -> Result<()> {
+    let topic_batches = build_topic_batches_with_policy(
+        user_id,
+        tracked,
+        TransportSourcePolicy::viewer_compatibility(),
+    )?;
+    if topic_batches.is_empty() {
+        return Err(anyhow!("PubSub canary has no configured topics"));
+    }
+
+    let expected_acknowledgements = topic_batches.iter().map(Vec::len).sum::<usize>();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+    let auth_token = twitch.auth_token().to_string();
+    let mut tasks = tokio::task::JoinSet::new();
+    for topics in topic_batches {
+        let sender = sender.clone();
+        let auth_token = auth_token.clone();
+        let tracked = tracked.to_vec();
+        tasks.spawn(async move {
+            PubSubClient::default()
+                .connect_topics_and_listen(&topics, &auth_token, None, &tracked, sender)
+                .await
+        });
+    }
+    drop(sender);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut acknowledged = 0_usize;
+        loop {
+            tokio::select! {
+                message = receiver.recv() => match message {
+                    Some(PubSubConnectionEvent::ListenAcknowledged { .. }) => {
+                        acknowledged += 1;
+                        if acknowledged == expected_acknowledgements {
+                            return Ok(());
+                        }
+                    }
+                    Some(PubSubConnectionEvent::ResponseError { .. }) => {
+                        return Err(anyhow!("PubSub LISTEN rejected"));
+                    }
+                    Some(PubSubConnectionEvent::Heartbeat | PubSubConnectionEvent::Event(_)) => {}
+                    None => return Err(anyhow!("PubSub closed before LISTEN confirmation")),
+                },
+                result = tasks.join_next() => {
+                    return match result {
+                        Some(Ok(Ok(()))) => Err(anyhow!("PubSub closed before LISTEN confirmation")),
+                        Some(Ok(Err(_))) => Err(anyhow!("PubSub connection failed")),
+                        Some(Err(_)) => Err(anyhow!("PubSub connection task failed")),
+                        None => Err(anyhow!("PubSub connections ended before LISTEN confirmation")),
+                    };
+                }
+            }
+        }
+    })
+    .await;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("PubSub LISTEN timeout")),
     }
 }
 
@@ -223,5 +401,54 @@ mod tests {
 
         assert_eq!(message, "inventory:contract-or-shape");
         assert!(!message.contains("sensitive-response-field"));
+    }
+
+    #[tokio::test]
+    async fn offline_to_live_race_does_not_require_live_only_stream_info() {
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "ua",
+            tm_twitch::TwitchEndpoints {
+                twitch_url: String::from("http://127.0.0.1:9"),
+                gql_url: String::from("http://127.0.0.1:9"),
+            },
+        );
+
+        assert!(matches!(
+            fetch_stream_info_if_live(&twitch, "fixture", false).await,
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn eventsub_canary_requires_complete_verified_setup() {
+        let capability = tm_pubsub::EventSubStreamerCapability {
+            streamer_index: 0,
+            presence_source: String::from("eventsub+gql-polling"),
+            prediction_source: String::from("pubsub-compatibility"),
+            raid_source: String::from("disabled"),
+            planned_subscription_types: vec![String::from("stream.online")],
+            active_subscription_types: vec![String::from("stream.online")],
+            skipped_subscription_types: Vec::new(),
+            failure_class: None,
+        };
+        let mut report = EventSubSetupReport {
+            planned_subscriptions: 1,
+            active_subscriptions: 1,
+            failed_subscriptions: 0,
+            overflow_streamers: 0,
+            total_cost: 1,
+            max_total_cost: 10,
+            verified: true,
+            capabilities: vec![capability],
+        };
+
+        assert!(validate_eventsub_canary_report(&report).is_ok());
+        report.failed_subscriptions = 1;
+        assert!(validate_eventsub_canary_report(&report).is_err());
+        report.failed_subscriptions = 0;
+        report.verified = false;
+        assert!(validate_eventsub_canary_report(&report).is_err());
     }
 }

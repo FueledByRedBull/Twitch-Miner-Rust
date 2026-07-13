@@ -294,7 +294,7 @@ pub(crate) async fn handle_minute_watched_info_error(
         .await?;
     if streamer.is_online {
         let message = observability.offline_message(streamer);
-        tracing::info!("{message}");
+        tracing::info!(operation = "set_offline", "{message}");
         observability
             .send_event(DiscordEvent::StreamerOffline, &message)
             .await;
@@ -328,7 +328,7 @@ pub(crate) async fn apply_live_stream_update(
         .await?;
     if !streamer.is_online {
         let message = observability.online_message(streamer);
-        tracing::info!("{message}");
+        tracing::info!(operation = "set_online", "{message}");
         observability
             .send_event(DiscordEvent::StreamerOnline, &message)
             .await;
@@ -345,7 +345,7 @@ pub(crate) fn log_stream_presence_changes(
     if let Some(message) =
         observability.game_change_message(streamer, previous_game.unwrap_or_default(), current_game)
     {
-        tracing::info!("{message}");
+        tracing::info!(operation = "update_stream", "{message}");
     }
 }
 

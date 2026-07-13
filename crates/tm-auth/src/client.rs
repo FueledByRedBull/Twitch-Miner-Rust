@@ -34,6 +34,12 @@ pub struct LoginResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginValidation {
+    pub user_id: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthEndpoints {
     pub device_code_url: String,
     pub token_url: String,
@@ -201,6 +207,19 @@ impl TwitchAuthClient {
         username: &str,
         user_agent: &str,
     ) -> Result<String, AuthClientError> {
+        Ok(self
+            .validate_login_details(auth_token, device_id, username, user_agent)
+            .await?
+            .user_id)
+    }
+
+    pub async fn validate_login_details(
+        &self,
+        auth_token: &str,
+        device_id: &str,
+        username: &str,
+        user_agent: &str,
+    ) -> Result<LoginValidation, AuthClientError> {
         let mut request = build_validate_login_request(auth_token, device_id, user_agent);
         request.url.clone_from(&self.endpoints.validate_url);
         let response = self
@@ -220,24 +239,7 @@ impl TwitchAuthClient {
             .json::<serde_json::Value>()
             .await
             .map_err(AuthClientError::Http)?;
-        let login = payload
-            .get("login")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(AuthClientError::MissingLogin)?
-            .trim()
-            .to_lowercase();
-        let expected_login = username.trim().to_lowercase();
-        if login != expected_login {
-            return Err(AuthClientError::LoginMismatch {
-                expected_login,
-                actual_login: login,
-            });
-        }
-        payload
-            .get("user_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .ok_or(AuthClientError::MissingUserId)
+        login_validation_from_payload(&payload, username)
     }
 
     pub async fn login_with_device_flow(
@@ -262,16 +264,50 @@ impl TwitchAuthClient {
             }
         };
 
-        let user_id = self
-            .validate_login(&token, device_id, username, user_agent)
+        let validation = self
+            .validate_login_details(&token, device_id, username, user_agent)
             .await?;
         let mut session = AuthSession::new(username, CookieStore::new());
         session.set_auth_token(token);
-        session.set_user_id(user_id);
+        session.set_user_id(validation.user_id);
+        session.set_scopes(validation.scopes);
         session.save_to_dir(base_dir)?;
 
         Ok(LoginResult { session, prompt })
     }
+}
+
+fn login_validation_from_payload(
+    payload: &serde_json::Value,
+    username: &str,
+) -> Result<LoginValidation, AuthClientError> {
+    let login = payload
+        .get("login")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(AuthClientError::MissingLogin)?
+        .trim()
+        .to_lowercase();
+    let expected_login = username.trim().to_lowercase();
+    if login != expected_login {
+        return Err(AuthClientError::LoginMismatch {
+            expected_login,
+            actual_login: login,
+        });
+    }
+    let user_id = payload
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or(AuthClientError::MissingUserId)?;
+    let scopes = payload
+        .get("scopes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
+    Ok(LoginValidation { user_id, scopes })
 }
 
 impl Default for AuthEndpoints {
@@ -386,5 +422,27 @@ mod tests {
             expires_in: Duration::from_secs(900),
         };
         assert_eq!(prompt.verification_uri, "https://www.twitch.tv/activate");
+    }
+
+    #[test]
+    fn validation_retains_scopes_without_requiring_them() {
+        let validation = login_validation_from_payload(
+            &serde_json::json!({
+                "login": "Tester",
+                "user_id": "user-123",
+                "scopes": ["chat:read", "channel:read:predictions"]
+            }),
+            "tester",
+        )
+        .unwrap();
+        assert_eq!(validation.user_id, "user-123");
+        assert_eq!(validation.scopes, ["chat:read", "channel:read:predictions"]);
+
+        let validation = login_validation_from_payload(
+            &serde_json::json!({ "login": "tester", "user_id": "user-123" }),
+            "tester",
+        )
+        .unwrap();
+        assert!(validation.scopes.is_empty());
     }
 }

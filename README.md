@@ -32,7 +32,7 @@ flowchart LR
     C --> D["Watch Live Channels"]
     D --> E["Claim Bonuses, Drops, Moments"]
     D --> F["Track Predictions + Place Bets"]
-    D --> G["EventSub / GQL polling / IRC Events"]
+    D --> G["EventSub / PubSub compatibility / GQL polling / IRC"]
     E --> H["Logs / Discord / Shutdown Summary"]
     F --> H
     G --> H
@@ -88,6 +88,7 @@ The miner will create and extend its config automatically, but a minimal manual 
   "streamers": ["StreamerHouse"],
   "claim_drops": true,
   "claim_drops_startup": true,
+  "claim_moments": true,
   "followers_order": "DESC",
   "community_goals": false,
   "privacy": {
@@ -140,6 +141,7 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
 - release and rollback: [docs/release-process.md](docs/release-process.md)
+- signed release evidence template: [docs/release-record-template.md](docs/release-record-template.md)
 - performance measurement: [docs/performance.md](docs/performance.md)
 - Go-to-Rust migration: [docs/migration.md](docs/migration.md)
 
@@ -164,8 +166,11 @@ The running process writes a privacy-safe `runtime-status.json` in the data
 directory. `twitch-miner --health` checks process and task freshness; Docker
 uses that command as its health check. `tm-app --support-bundle ./support.json`
 writes version/status and file-count metadata without cookies, config values, or log contents.
-EventSub raid notifications are recorded as observations; Twitch does not expose
-the legacy raid identifier needed for a safe automatic join mutation.
+EventSub is the preferred presence source. The isolated PubSub compatibility
+adapter supplies viewer prediction events, immediate points/bonus events,
+moment IDs, raid IDs, and community-goal events that do not have an equivalent
+viewer-authorized EventSub source. Both transports are supervised and reported
+independently; bounded GQL polling covers EventSub presence overflow/outage.
 
 ## Safety notes
 

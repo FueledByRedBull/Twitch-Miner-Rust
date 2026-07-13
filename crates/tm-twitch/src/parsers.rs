@@ -1,4 +1,5 @@
-use tm_domain::{ActiveMultiplier, CommunityGoal, Stream};
+use time::format_description::well_known::Rfc3339;
+use tm_domain::{ActiveMultiplier, CommunityGoal, OffsetDateTime, Stream};
 
 use crate::types::{
     ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage, InventoryDrop,
@@ -135,6 +136,11 @@ pub fn parse_stream_info(payload: &serde_json::Value) -> Result<StreamInfo, Twit
         )
         .unwrap_or(u32::MAX),
         tags,
+        created_at: stream
+            .get("createdAt")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok()),
     })
 }
 

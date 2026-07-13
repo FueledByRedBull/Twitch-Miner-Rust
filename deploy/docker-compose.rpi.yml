@@ -17,4 +17,4 @@ services:
       TCPM_CONFIG: /data/config.json
       TCPM_DATA_DIR: /data
     volumes:
-      - ./data:/data
+      - "${TWITCH_MINER_DATA_DIR:-./data}:/data"

@@ -11,6 +11,8 @@ pub(crate) async fn shutdown_background_tasks(
     let mut waits = tokio::task::JoinSet::new();
     for (name, task) in [
         ("eventsub", tasks.eventsub),
+        ("pubsub", tasks.pubsub),
+        ("presence-poll", tasks.presence_poll),
         ("context", tasks.context),
         ("pending-claims", tasks.pending_claims),
         ("minute", tasks.minute),
@@ -71,7 +73,7 @@ pub(crate) async fn wait_for_shutdown_or_task_failure(
                 if !finished.is_empty() {
                     return Err(anyhow!("background task exited unexpectedly: {}", finished.join(", ")));
                 }
-                status.heartbeat()?;
+                status.supervision_heartbeat()?;
             }
         }
     }

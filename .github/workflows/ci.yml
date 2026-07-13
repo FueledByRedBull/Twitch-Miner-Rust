@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: 0x8fv/Twitch-Channel-Points-Miner
-          ref: 940c98409e5821900752815cd9550ae5b750b597
+          ref: 91f00698314dbbdd6c757d7b525458c82173e622
           path: Twitch-Channel-Points-Miner
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5

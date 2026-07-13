@@ -14,8 +14,8 @@ pub use effect::RuntimeEffect;
 pub use error::{Result, RuntimeError};
 pub use summary::{apply_pubsub_gain, build_session_summary, update_history};
 pub use types::{
-    ContextUpdate, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
-    StreamerSummary,
+    ContextUpdate, EventApplication, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary,
+    StreamUpdate, StreamerSummary,
 };
 
 #[allow(clippy::unused_async)]
@@ -148,25 +148,65 @@ mod tests {
             )]),
             ..Streamer::default()
         };
+        let completed = std::collections::VecDeque::from([PredictionEvent {
+            streamer: streamer.clone(),
+            event_id: String::from("private-event-id"),
+            title: String::from("Private prediction title"),
+            status: String::from("RESOLVED"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: vec![PredictionOutcome {
+                id: String::from("private-outcome-id"),
+                title: String::from("Private outcome"),
+                color: String::from("blue"),
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision {
+                choice: Some(0),
+                outcome_id: String::from("private-outcome-id"),
+                amount: 100,
+            },
+            bet_placed: true,
+            bet_confirmed: true,
+            result_type: String::from("WIN"),
+            result_string: String::from("WIN, Gained: +100"),
+        }]);
 
         let summary = build_session_summary(
             &[streamer],
             &[("tester", 1_500)],
+            &completed,
             true,
             std::time::Duration::from_secs(45),
         );
 
-        assert_eq!(summary.duration, "45s");
+        assert_eq!(summary.duration, "00:00:45.000000");
         assert_eq!(summary.total_points_line, "Total Points gained: [hidden]");
         assert_eq!(summary.streamers[0].current_points, "[hidden]");
+        assert_eq!(summary.streamers[0].username, "streamer-1");
+        assert_eq!(summary.streamers[0].channel_id, "[hidden]");
         assert_eq!(
             summary.streamers[0].total_points_line,
-            "Total Points [hidden]"
+            "Total points gained (after farming - before farming): [hidden]"
         );
         assert_eq!(
             summary.streamers[0].history_lines[0],
             "WATCH (2 times, [hidden])"
         );
+        let prediction = &summary.predictions[0];
+        let rendered = format!("{prediction:?}");
+        for private in [
+            "private-event-id",
+            "Private prediction title",
+            "private-outcome-id",
+            "Private outcome",
+            "tester",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        assert!(prediction.bet_line.contains("TotalUsers=[hidden]"));
+        assert!(prediction.bet_line.contains("'choice': '[hidden]'"));
+        assert_eq!(prediction.outcome_lines, vec!["Outcome0([hidden])"]);
     }
 
     #[test]
@@ -239,6 +279,8 @@ mod tests {
             }],
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         };
 
         state.apply_pubsub_event(
@@ -288,6 +330,8 @@ mod tests {
             }],
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         };
 
         state.apply_pubsub_event(
@@ -328,6 +372,8 @@ mod tests {
             }],
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         };
 
         state.apply_stream_update(
@@ -370,6 +416,8 @@ mod tests {
             }],
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         };
 
         let effects = state.apply_context_update(&ContextUpdate {
@@ -420,6 +468,8 @@ mod tests {
             }],
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         };
 
         let raid_effects = state.apply_pubsub_event(
@@ -463,6 +513,28 @@ mod tests {
                 moment_id: "moment-1".into(),
             }]
         );
+        assert!(state
+            .apply_pubsub_event(
+                &PubSubEvent::Moment {
+                    channel_id: "123".into(),
+                    moment_id: "moment-1".into(),
+                },
+                ts(102),
+            )
+            .is_empty());
+
+        let claim = PubSubEvent::ClaimAvailable {
+            channel_id: "123".into(),
+            claim_id: "claim-1".into(),
+        };
+        assert_eq!(
+            state.apply_pubsub_event(&claim, ts(102)),
+            vec![RuntimeEffect::ClaimBonus {
+                channel_id: "123".into(),
+                claim_id: "claim-1".into(),
+            }]
+        );
+        assert!(state.apply_pubsub_event(&claim, ts(102)).is_empty());
 
         let goal_effects = state.apply_pubsub_event(
             &PubSubEvent::CommunityGoal {
@@ -488,6 +560,18 @@ mod tests {
             }]
         );
         assert!(state.streamers[0].community_goals.contains_key("goal-1"));
+        let unchanged_goal = state.streamers[0].community_goals["goal-1"].clone();
+        let unchanged_application = state.apply_event_with_outcome(
+            &PubSubEvent::CommunityGoal {
+                channel_id: "123".into(),
+                kind: CommunityGoalKind::Updated,
+                goal: Some(unchanged_goal),
+                goal_id: Some("goal-1".into()),
+            },
+            ts(103),
+        );
+        assert!(!unchanged_application.changed);
+        assert!(unchanged_application.effects.is_empty());
 
         let prediction_effects = state.apply_pubsub_event(
             &PubSubEvent::PredictionChannel {
@@ -540,9 +624,18 @@ mod tests {
             }]
         );
         assert!(state.predictions.contains_key("event-1"));
+        let duplicate_prediction_effects = state.apply_pubsub_event(
+            &PubSubEvent::PredictionChannel {
+                kind: PredictionChannelKind::EventCreated,
+                event: Box::new(state.predictions["event-1"].clone()),
+                winning_outcome_id: None,
+            },
+            ts(104),
+        );
+        assert!(duplicate_prediction_effects.is_empty());
 
         let prediction_result = tm_pubsub::parse_message(
-            r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\"}}}}"}}"#,
+            r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
             &[],
         )
         .unwrap()
@@ -556,10 +649,38 @@ mod tests {
                 title: "Prediction".into(),
                 decision_label: String::new(),
                 result_type: "WIN".into(),
-                result_string: "WIN, Gained: +0".into(),
+                result_string: "WIN, Gained: +250".into(),
             }]
         );
         assert!(!state.predictions.contains_key("event-1"));
+        assert_eq!(state.completed_predictions.len(), 1);
+        let summary = state.session_summary(false, ts(106));
+        assert_eq!(summary.predictions.len(), 1);
+        assert_eq!(
+            summary.predictions[0].event_line,
+            "EventPrediction(event_id=event-1, title=\"Prediction\")"
+        );
+        assert!(summary.predictions[0]
+            .outcome_lines
+            .iter()
+            .any(|line| line.contains("Alpha (BLUE)")));
+        assert!(summary.predictions[0]
+            .result_line
+            .contains("WIN, Gained: +250"));
+        let mut replay = state.completed_predictions[0].clone();
+        replay.status = String::from("ACTIVE");
+        replay.result_type.clear();
+        replay.result_string.clear();
+        assert!(state
+            .apply_pubsub_event(
+                &PubSubEvent::PredictionChannel {
+                    kind: PredictionChannelKind::EventCreated,
+                    event: Box::new(replay),
+                    winning_outcome_id: None,
+                },
+                ts(107),
+            )
+            .is_empty());
     }
 
     #[test]
@@ -577,6 +698,8 @@ mod tests {
             }],
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         };
 
         state.capture_initial_points();
@@ -584,7 +707,7 @@ mod tests {
         update_history(&mut state.streamers[0], "WATCH", 250);
 
         let summary = state.session_summary(false, ts(70));
-        assert_eq!(summary.duration, "01m 00s");
+        assert_eq!(summary.duration, "00:01:00.000000");
         assert_eq!(summary.total_points_line, "Total Points gained: +250");
         assert_eq!(summary.streamers[0].current_points, "1.25k");
     }
@@ -612,7 +735,7 @@ mod tests {
             .await
             .unwrap();
         let summary = runtime.shutdown(false, ts(70)).await.unwrap();
-        assert_eq!(summary.duration, "01m 00s");
+        assert_eq!(summary.duration, "00:01:00.000000");
     }
 
     #[tokio::test]
@@ -628,6 +751,202 @@ mod tests {
 
         changes.changed().await.unwrap();
         assert_eq!(*changes.borrow(), 1);
+    }
+
+    #[test]
+    fn duplicate_points_event_does_not_double_balance_or_history() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points = 1_000;
+        let event = PubSubEvent::PointsEarned {
+            channel_id: String::from("100"),
+            earned: 50,
+            reason: String::from("WATCH"),
+            balance: 1_050,
+        };
+
+        let first = state.apply_event_with_outcome(&event, ts(1));
+        let replay = state.apply_event_with_outcome(&event, ts(2));
+
+        assert!(first.changed);
+        assert!(!replay.changed);
+        assert_eq!(state.streamers[0].channel_points, 1_050);
+        assert_eq!(state.streamers[0].history["WATCH"].count, 1);
+        assert_eq!(state.streamers[0].history["WATCH"].amount, 50);
+
+        crate::summary::apply_pubsub_gain(&mut state.streamers[0], -50, "PREDICTION", 0);
+        state.streamers[0].apply_channel_points_context(1_050, &[], &[]);
+        let after_balance_change = state.apply_event_with_outcome(&event, ts(3));
+        assert!(after_balance_change.changed);
+        assert_eq!(state.streamers[0].channel_points, 1_100);
+        assert_eq!(state.streamers[0].history["WATCH"].count, 2);
+        assert_eq!(state.streamers[0].history["WATCH"].amount, 100);
+    }
+
+    #[test]
+    fn unknown_channel_winner_does_not_fabricate_a_loss() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].settings.make_predictions = true;
+        let mut active = PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: String::from("prediction-unknown-winner"),
+            title: String::from("Fixture prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: vec![
+                PredictionOutcome {
+                    id: String::from("a"),
+                    title: String::from("Yes"),
+                    total_points: 100,
+                    ..PredictionOutcome::default()
+                },
+                PredictionOutcome {
+                    id: String::from("b"),
+                    title: String::from("No"),
+                    total_points: 100,
+                    ..PredictionOutcome::default()
+                },
+            ],
+            decision: PredictionDecision {
+                choice: Some(0),
+                outcome_id: String::from("a"),
+                amount: 100,
+            },
+            bet_placed: true,
+            bet_confirmed: true,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        state
+            .predictions
+            .insert(active.event_id.clone(), active.clone());
+        active.status = String::from("RESOLVED");
+
+        let application = state.apply_event_with_outcome(
+            &PubSubEvent::PredictionChannel {
+                kind: PredictionChannelKind::EventUpdated,
+                event: Box::new(active),
+                winning_outcome_id: Some(String::from("unknown")),
+            },
+            ts(2),
+        );
+
+        assert!(application.effects.is_empty());
+        assert!(application.changed);
+        assert!(state.predictions.contains_key("prediction-unknown-winner"));
+        assert!(state.completed_predictions.is_empty());
+        assert!(state.predictions["prediction-unknown-winner"]
+            .result_type
+            .is_empty());
+    }
+
+    #[test]
+    fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].settings.make_predictions = true;
+        let active = PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: String::from("prediction-1"),
+            title: String::from("Fixture prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: vec![
+                PredictionOutcome {
+                    id: String::from("a"),
+                    title: String::from("Yes"),
+                    total_points: 100,
+                    ..PredictionOutcome::default()
+                },
+                PredictionOutcome {
+                    id: String::from("b"),
+                    title: String::from("No"),
+                    total_points: 100,
+                    ..PredictionOutcome::default()
+                },
+            ],
+            decision: PredictionDecision {
+                choice: Some(0),
+                outcome_id: String::from("a"),
+                amount: 100,
+            },
+            bet_placed: true,
+            bet_confirmed: true,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        state
+            .predictions
+            .insert(active.event_id.clone(), active.clone());
+        let mut resolved = active;
+        resolved.status = String::from("RESOLVED");
+        resolved.outcomes.clear();
+
+        let channel_effects = state.apply_pubsub_event(
+            &PubSubEvent::PredictionChannel {
+                kind: PredictionChannelKind::EventUpdated,
+                event: Box::new(resolved),
+                winning_outcome_id: Some(String::from("a")),
+            },
+            ts(2),
+        );
+        assert_eq!(channel_effects.len(), 1);
+        assert_eq!(state.completed_predictions.len(), 1);
+        assert_eq!(state.completed_predictions[0].outcomes.len(), 2);
+
+        let viewer_result = tm_pubsub::parse_message(
+            r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"prediction-1\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        let viewer_effects = state.apply_pubsub_event(&viewer_result, ts(3));
+
+        assert!(viewer_effects.is_empty());
+        assert_eq!(state.completed_predictions.len(), 1);
+        assert_eq!(
+            state.completed_predictions[0].result_string,
+            "WIN, Gained: +150"
+        );
+    }
+
+    #[tokio::test]
+    async fn checked_presence_update_reports_only_real_transitions() {
+        let config = ConfigFile {
+            streamers: vec!["tester".into()],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(10));
+        state.streamers[0].channel_id = String::from("100");
+        let runtime = spawn_runtime_state(state);
+
+        assert!(runtime
+            .set_presence_if_changed("100", true, ts(20))
+            .await
+            .unwrap());
+        assert!(!runtime
+            .set_presence_if_changed("100", true, ts(21))
+            .await
+            .unwrap());
+        assert!(runtime
+            .set_presence_if_changed("100", false, ts(22))
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

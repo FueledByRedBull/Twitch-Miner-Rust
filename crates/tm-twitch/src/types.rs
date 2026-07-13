@@ -151,6 +151,7 @@ pub struct StreamInfo {
     pub game_id: Option<String>,
     pub viewers_count: u32,
     pub tags: Vec<String>,
+    pub created_at: Option<tm_domain::OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -282,10 +283,41 @@ pub(crate) struct ProtocolGame {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ProtocolStream {
     pub(crate) id: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub(crate) created_at: Option<String>,
     #[serde(rename = "viewersCount")]
     pub(crate) viewers_count: Option<u64>,
     #[serde(default)]
     pub(crate) tags: Vec<ProtocolTag>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RewardListData {
+    pub(crate) channel: Option<RewardListChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RewardListChannel {
+    #[serde(rename = "self")]
+    pub(crate) self_data: Option<RewardListSelf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RewardListSelf {
+    #[serde(rename = "watchStreakMilestone")]
+    pub(crate) watch_streak_milestone: Option<WatchStreakMilestoneEnvelope>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WatchStreakMilestoneEnvelope {
+    #[serde(rename = "watchStreakMilestone")]
+    pub(crate) milestone: Option<WatchStreakMilestone>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WatchStreakMilestone {
+    #[serde(rename = "achievementTimestamp")]
+    pub(crate) achievement_timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

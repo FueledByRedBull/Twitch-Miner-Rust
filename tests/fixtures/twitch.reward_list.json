@@ -1,0 +1,15 @@
+{
+  "data": {
+    "channel": {
+      "self": {
+        "watchStreakMilestone": {
+          "watchStreakMilestone": {
+            "value": "5",
+            "achievementTimestamp": "2026-07-13T10:30:00Z"
+          },
+          "expiresAt": "2026-07-14T10:30:00Z"
+        }
+      }
+    }
+  }
+}

@@ -41,6 +41,31 @@ if ($dockerfile -notmatch 'cargo install cargo-chef --version \d+\.\d+\.\d+ --lo
     throw 'Dockerfile cargo-chef install must use an explicit locked version.'
 }
 
+$releaseProcess = Get-Content -Raw docs/release-process.md
+if ($releaseProcess -match '(?m)^docker exec twitch-miner\b') {
+    throw 'Release commands must resolve the Compose service instead of assuming a container name.'
+}
+if ($releaseProcess -notmatch '(?s)-v "\$DATA_DIR:/data:ro".*--data-dir /data --canary') {
+    throw 'Release process must run the digest-pinned canary with a read-only data mount.'
+}
+
+$deploymentHelper = Get-Content -Raw "$PSScriptRoot/deploy-with-rollback.ps1"
+if ($deploymentHelper -match '& docker exec\b') {
+    throw 'Guarded deployment helper must use Compose service execution.'
+}
+
+$candidateDigest = 'a' * 64
+$rollbackDigest = 'b' * 64
+& "$PSScriptRoot/deploy-with-rollback.ps1" `
+    -CandidateImage "ghcr.io/example/twitch-miner@sha256:$candidateDigest" `
+    -RollbackImage "ghcr.io/example/twitch-miner@sha256:$rollbackDigest" `
+    -CandidateRevision ('c' * 40) `
+    -RollbackRevision ('d' * 40) `
+    -ValidateOnly
+if (-not $?) {
+    throw 'Guarded deployment helper validation failed.'
+}
+
 git check-ignore -q FINISHING_TOUCHES.md
 if ($LASTEXITCODE -ne 0) {
     throw 'FINISHING_TOUCHES.md must remain ignored.'

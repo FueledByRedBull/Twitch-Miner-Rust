@@ -49,6 +49,7 @@ fn full_config_fixture_deserializes_parity_fields() {
     assert_eq!(config.game_priority, vec!["valorant"]);
     assert_eq!(config.discord.webhook_api, "");
     assert!(!config.privacy.anonymize_logs);
+    assert!(config.claim_moments);
     assert!(config.streamer_overrides.contains_key("alice"));
 }
 

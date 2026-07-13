@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use tm_domain::{
     ActiveMultiplier, CommunityGoal, OffsetDateTime, PredictionEvent, Streamer, WatchPriority,
 };
+
+use crate::RuntimeEffect;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSummary {
@@ -27,6 +29,8 @@ pub struct RuntimeState {
     pub streamers: Vec<Streamer>,
     pub initial_points: HashMap<String, i64>,
     pub predictions: HashMap<String, PredictionEvent>,
+    pub processed_prediction_ids: VecDeque<String>,
+    pub completed_predictions: VecDeque<PredictionEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,12 +57,48 @@ pub struct SessionSummary {
     pub duration: String,
     pub total_points_line: String,
     pub streamers: Vec<StreamerSummary>,
+    pub predictions: Vec<PredictionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventApplication {
+    pub effects: Vec<RuntimeEffect>,
+    pub changed: bool,
+}
+
+impl EventApplication {
+    #[must_use]
+    pub const fn unchanged() -> Self {
+        Self {
+            effects: Vec::new(),
+            changed: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn changed(effects: Vec<RuntimeEffect>) -> Self {
+        Self {
+            effects,
+            changed: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamerSummary {
+    pub channel_id: String,
     pub username: String,
     pub current_points: String,
     pub total_points_line: String,
     pub history_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredictionSummary {
+    pub event_line: String,
+    pub streamer_line: String,
+    pub bet_settings_line: String,
+    pub bet_line: String,
+    pub outcome_lines: Vec<String>,
+    pub result_line: String,
 }

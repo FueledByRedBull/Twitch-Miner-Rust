@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tm_domain::{PredictionDecision, Streamer};
 use tm_observability::{event_from_bet_result, Event as DiscordEvent};
-use tm_twitch::TwitchClient;
+use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
 use crate::context::{
     apply_runtime_context, contribute_streamer_community_goals, fetch_streamer_context,
@@ -147,7 +147,7 @@ pub(crate) async fn handle_claim_bonus_effect(
     };
     if observability.show_claimed_bonus {
         let message = observability.bonus_claim_message(&streamer, false);
-        tracing::info!("{message}");
+        tracing::info!(operation = "claim_bonus", "{message}");
         observability.spawn_event(DiscordEvent::BonusClaim, message);
     }
     let context = fetch_streamer_context(twitch, &streamer).await?;
@@ -172,7 +172,7 @@ pub(crate) async fn handle_claim_moment_effect(
         "Claimed moment for {}",
         observability.streamer_label(&streamer)
     );
-    tracing::info!("{message}");
+    tracing::info!(operation = "claim_moment", "{message}");
     observability.spawn_event(DiscordEvent::MomentClaim, message);
     Ok(())
 }
@@ -190,8 +190,8 @@ pub(crate) async fn handle_join_raid_effect(
         return Ok(());
     };
     let message =
-        observability.join_raid_message(&observability.streamer_name(&streamer), target_login);
-    tracing::info!("{message}");
+        observability.join_raid_message(&observability.streamer_label(&streamer), target_login);
+    tracing::info!(operation = "update_raid", "{message}");
     observability.spawn_event(DiscordEvent::JoinRaid, message);
     Ok(())
 }
@@ -250,15 +250,16 @@ pub(crate) fn spawn_prediction_evaluation(
 
 pub(crate) fn handle_prediction_settled_effect(
     event_id: &str,
-    streamer_username: &str,
+    _streamer_username: &str,
     title: &str,
     decision_label: &str,
     result_type: &str,
     result_string: &str,
     observability: &AppObservability,
 ) {
-    let message = format!("Prediction settled for {streamer_username}: {title} - {result_string}");
+    let message = observability.prediction_result_message(event_id, title, result_string);
     tracing::info!(
+        operation = "on_message",
         decision = %decision_label,
         event_id = %event_id,
         result_type = %result_type,
@@ -276,9 +277,14 @@ pub(crate) async fn evaluate_prediction_after_delay(
     observability: &AppObservability,
     health: &HealthTracker,
 ) -> Result<()> {
-    let Some(wait) = prediction_wait_for_event(runtime, event_id).await? else {
+    let Some((wait, event)) = prediction_wait_for_event(runtime, event_id).await? else {
         return Ok(());
     };
+    tracing::info!(
+        operation = "on_message",
+        "{}",
+        observability.prediction_wait_message(&event, wait)
+    );
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
@@ -288,13 +294,13 @@ pub(crate) async fn evaluate_prediction_after_delay(
 pub(crate) async fn prediction_wait_for_event(
     runtime: &tm_runtime::RuntimeHandle,
     event_id: &str,
-) -> Result<Option<Duration>> {
+) -> Result<Option<(Duration, tm_domain::PredictionEvent)>> {
     let snapshot = runtime.state_snapshot().await?;
     Ok(snapshot
         .predictions
         .get(event_id)
         .cloned()
-        .map(|event| prediction_wait_duration(&event, time_now())))
+        .map(|event| (prediction_wait_duration(&event, time_now()), event)))
 }
 
 pub(crate) async fn evaluate_prediction(
@@ -331,6 +337,11 @@ pub(crate) async fn evaluate_prediction(
     }
 
     event.streamer = streamer.clone();
+    tracing::info!(
+        operation = "make_predictions",
+        "{}",
+        observability.prediction_start_message(&event)
+    );
     let decision = event.decide(streamer.channel_points);
     if decision.outcome_id.is_empty() {
         skip_prediction(
@@ -471,26 +482,33 @@ pub(crate) async fn place_prediction(
             runtime
                 .record_prediction_placed(&event.event_id, decision.clone(), deduct_stake)
                 .await?;
-            let message = format!(
-                "Placed prediction for {}: {} on {}",
-                observability.streamer_name(streamer),
-                decision.amount,
-                event.decision_label()
-            );
-            tracing::info!(event_id = %event.event_id, "{message}");
+            let message = observability.prediction_placed_message(event, decision);
+            tracing::info!(operation = "make_predictions", event_id = %event.event_id, "{message}");
             observability.spawn_event(DiscordEvent::BetGeneral, message);
             Ok(())
         }
         Err(error) => {
             runtime.stop_tracking_prediction(event_id, "ERROR").await?;
+            let failure_class = twitch_error_class(&error);
             observability.spawn_event(
                 DiscordEvent::BetFailed,
                 format!(
-                    "Prediction failed for {}: {error}",
-                    observability.streamer_name(streamer)
+                    "Prediction failed for {} ({failure_class})",
+                    observability.streamer_name(streamer),
                 ),
             );
             Err(error.into())
         }
+    }
+}
+
+fn twitch_error_class(error: &TwitchClientError) -> &'static str {
+    match error.failure_class() {
+        TwitchFailureClass::Unauthorized => "unauthorized",
+        TwitchFailureClass::RateLimited => "rate-limited",
+        TwitchFailureClass::ServerError => "server-error",
+        TwitchFailureClass::Timeout => "timeout",
+        TwitchFailureClass::ConnectionReset => "connection-reset",
+        TwitchFailureClass::Other => "mutation-rejected",
     }
 }

@@ -10,6 +10,13 @@ pub(crate) fn build_prediction_settlement_effect(
         "CANCELED" | "CANCELLED" => event.parse_result("REFUND", 0),
         "RESOLVED" => {
             let winning_outcome_id = winning_outcome_id?;
+            if !event
+                .outcomes
+                .iter()
+                .any(|outcome| outcome.id == winning_outcome_id)
+            {
+                return None;
+            }
             if event.decision.outcome_id == winning_outcome_id {
                 event.parse_result(
                     "WIN",

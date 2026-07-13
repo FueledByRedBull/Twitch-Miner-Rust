@@ -21,6 +21,12 @@ pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
     }
 }
 
+pub(crate) fn build_canary_logger_settings(config: &ConfigFile) -> LoggerSettings {
+    let mut settings = build_logger_settings(config);
+    settings.save = false;
+    settings
+}
+
 pub(crate) async fn bootstrap_runtime_state(
     config: &ConfigFile,
     twitch: &TwitchClient,
@@ -31,6 +37,7 @@ pub(crate) async fn bootstrap_runtime_state(
     let targets = load_targets(config, twitch).await?;
     let mut state = tm_runtime::RuntimeState::from_targets(config, &targets, started_at);
     tracing::info!(
+        operation = "run",
         "{}",
         observability.loading_streamers_message(state.streamers.len())
     );
@@ -80,7 +87,7 @@ pub(crate) async fn bootstrap_streamer(
             .with_context(|| format!("claim startup bonus for {}", streamer.username))?;
         if observability.show_claimed_bonus {
             let message = observability.bonus_claim_message(streamer, true);
-            tracing::info!("{message}");
+            tracing::info!(operation = "claim_bonus", "{message}");
             observability.spawn_event(DiscordEvent::BonusClaim, message);
         }
         context = twitch
@@ -124,11 +131,38 @@ pub(crate) async fn bootstrap_streamer(
             tm_twitch::DROP_ID,
             started_at,
         );
-        tracing::info!("{}", observability.online_message(streamer));
+        if streamer.settings.watch_streak {
+            match twitch
+                .fetch_watch_streak_achievement(&streamer.channel_id)
+                .await
+            {
+                Ok(Some(achievement))
+                    if info
+                        .created_at
+                        .is_some_and(|created_at| achievement >= created_at) =>
+                {
+                    stream.watch_streak_missing = false;
+                }
+                Ok(_) => {}
+                Err(error) => tracing::debug!(
+                    failure_class = ?error.failure_class(),
+                    "watch streak startup reconciliation unavailable"
+                ),
+            }
+        }
+        tracing::info!(
+            operation = "set_online",
+            "{}",
+            observability.online_message(streamer)
+        );
     } else {
         streamer.online_at = None;
         streamer.offline_at = Some(started_at);
-        tracing::info!("{}", observability.offline_message(streamer));
+        tracing::info!(
+            operation = "set_offline",
+            "{}",
+            observability.offline_message(streamer)
+        );
     }
 
     Ok(())

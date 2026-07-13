@@ -2,6 +2,6 @@
   "type": "MESSAGE",
   "data": {
     "topic": "predictions-user-v1.user",
-    "message": "{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\"}}}}"
+    "message": "{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\",\"points_won\":150}}}}"
   }
 }

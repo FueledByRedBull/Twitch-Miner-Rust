@@ -1,7 +1,7 @@
 # Behavior Parity And Release Limits
 
 This is a behavior-level comparison against the adjacent Go implementation at
-`940c98409e58`, not a claim that Twitch's undocumented contracts never change.
+`91f00698314d`, not a claim that Twitch's undocumented contracts never change.
 Rust fixture, integration, and deterministic parser-regression tests run in
 CI. The dedicated-account `--canary` closes the remaining live read-contract
 gap before each release.
@@ -10,11 +10,11 @@ gap before each release.
 | --- | --- | --- |
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
-| Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed GQL fixtures, five-minute private polling, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
+| Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed context and `RewardList` fixtures, startup streak reconciliation, five-minute private polling, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
 | Drops and moments | Parity | Inventory, campaign, claim-status, and PubSub fixtures. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
-| EventSub stream presence/predictions, legacy PubSub fixtures, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/deduplication tests, transport-neutral runtime events, legacy parser fixtures, and IRC transport tests. Unsupported private events remain GQL/polling-backed; EventSub raid notifications are observed but cannot safely invoke the legacy join mutation because Twitch does not provide its required raid ID. |
+| EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and IRC tests. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
 | Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
 | Runtime supervision and health | Improved | Task-exit/panic supervision plus task-specific freshness/failure thresholds. |
@@ -31,8 +31,8 @@ working Rust implementation:
 | --- | --- |
 | Username, streamers, follower/game/watch selection | Preserved. |
 | Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
-| Drops, community goals, chat presence, `disable_at_in_nickname` | Preserved. |
-| Raid observation and auto-join | Partial | EventSub can report source/target raids, but its payload has no legacy raid ID; Rust deliberately skips the unsafe `JoinRaid` mutation until a supported identifier-bearing path exists. |
+| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Preserved. |
+| Raid observation and auto-join | Preserved with compatibility risk | EventSub observes the raid lifecycle; PubSub compatibility supplies the legacy raid ID required by the typed single-attempt `JoinRaid` mutation. Repeated raid IDs are ignored. Live acceptance is still required before release. |
 | Prediction and per-streamer override settings | Preserved. |
 | `password` | Rejected when non-empty; device login does not need it. |
 | `disable_ssl_cert_verification` | Rejected when true; TLS verification is mandatory. |
@@ -57,3 +57,7 @@ Before publication, run all fixture tests and the read-only canary. A successful
 canary proves only the listed read operations for that account at that time;
 mutations remain fixture-verified to avoid claiming rewards or placing bets
 during release validation.
+
+The read-only canary also requires EventSub setup/list verification and a
+PubSub LISTEN acknowledgement for every configured compatibility topic. It
+never applies received transport events to runtime state.

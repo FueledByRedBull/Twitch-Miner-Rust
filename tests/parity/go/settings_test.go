@@ -45,6 +45,7 @@ func TestParitySettings(t *testing.T) {
 		BettingMakePredictions: value["betting_make_predictions"].(bool),
 		FollowRaid:             value["follow_raid"].(bool),
 		ClaimDrops:             value["claim_drops"].(bool),
+		ClaimMoments:           value["claim_moments"].(bool),
 		CommunityGoals:         value["community_goals"].(bool),
 		IRCMode:                value["chat_presence"].(string),
 		Bet: betConfig{

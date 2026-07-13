@@ -137,8 +137,8 @@ pub(crate) async fn load_and_validate_existing_session(
         .ok_or_else(|| anyhow!("existing canary session has no auth token"))?
         .to_string();
     let auth_client = TwitchAuthClient::with_client(client);
-    let user_id = auth_client
-        .validate_login(
+    let validation = auth_client
+        .validate_login_details(
             &auth_token,
             &generate_device_id(),
             &username,
@@ -146,7 +146,8 @@ pub(crate) async fn load_and_validate_existing_session(
         )
         .await
         .context("validate existing canary session")?;
-    session.set_user_id(user_id);
+    session.set_user_id(validation.user_id);
+    session.set_scopes(validation.scopes);
     Ok(session)
 }
 
@@ -162,11 +163,12 @@ pub(crate) async fn load_or_login_session_with_auth_client(
         Ok(mut session) => {
             if let Some(auth_token) = session.auth_token().map(str::to_string) {
                 match auth_client
-                    .validate_login(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
+                    .validate_login_details(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
                     .await
                 {
-                    Ok(user_id) => {
-                        session.set_user_id(user_id);
+                    Ok(validation) => {
+                        session.set_user_id(validation.user_id);
+                        session.set_scopes(validation.scopes);
                         session.save_to_dir(base_dir)?;
                         tracing::debug!(username = %username, "loaded cookies from disk");
                         return Ok(session);
@@ -220,12 +222,13 @@ pub(crate) async fn load_or_login_session_with_auth_client(
         }
     };
 
-    let user_id = auth_client
-        .validate_login(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
+    let validation = auth_client
+        .validate_login_details(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
         .await?;
     let mut session = AuthSession::new(&username, tm_auth::CookieStore::new());
     session.set_auth_token(auth_token);
-    session.set_user_id(user_id);
+    session.set_user_id(validation.user_id);
+    session.set_scopes(validation.scopes);
     session.save_to_dir(base_dir)?;
     tracing::info!(username = %username, "device login completed");
     Ok(session)

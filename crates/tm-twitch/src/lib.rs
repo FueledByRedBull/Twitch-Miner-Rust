@@ -217,6 +217,7 @@ mod tests {
             operations::stream_info_overlay("abc").operation_name,
             "VideoPlayerStreamInfoOverlayChannel"
         );
+        assert_eq!(operations::reward_list("abc").operation_name, "RewardList");
         assert_eq!(
             operations::claim_drop_rewards("drop").operation_name,
             "DropsPage_ClaimDropRewards"
@@ -240,6 +241,7 @@ mod tests {
             operations::channel_points_context("abc"),
             operations::is_stream_live("1"),
             operations::stream_info_overlay("abc"),
+            operations::reward_list("abc"),
             operations::claim_community_points("1", "2"),
             operations::community_moment_claim("moment"),
             operations::join_raid("raid"),
@@ -730,7 +732,7 @@ mod tests {
 
     #[test]
     fn parses_stream_info_shape() {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "data": {
                 "user": {
                     "broadcastSettings": {
@@ -755,6 +757,8 @@ mod tests {
         assert_eq!(info.game_id.as_deref(), Some("game-1"));
         assert_eq!(info.viewers_count, 42);
         assert_eq!(info.tags, vec!["tag-1", "tag-2"]);
+        payload["data"]["user"]["stream"]["createdAt"] = serde_json::json!("invalid");
+        assert!(parse_stream_info(&payload).unwrap().created_at.is_none());
     }
 
     #[test]
@@ -831,6 +835,14 @@ mod tests {
         let stream = stream.data.unwrap().user.unwrap().stream.unwrap();
         assert_eq!(stream.id.as_deref(), Some("stream-1"));
         assert_eq!(stream.tags.len(), 2);
+        assert_eq!(stream.created_at.as_deref(), Some("2026-07-13T10:00:00Z"));
+
+        let reward: types::GqlResponse<types::RewardListData> =
+            serde_json::from_value(protocol_fixture("twitch.reward_list.json")).unwrap();
+        let achievement = client::watch_streak_achievement_from_typed(reward.data.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(achievement.unix_timestamp(), 1_783_938_600);
 
         let followers: types::GqlResponse<types::FollowersData> =
             serde_json::from_value(protocol_fixture("twitch.followers.json")).unwrap();
@@ -1056,6 +1068,21 @@ mod tests {
             available_drop_campaign_ids_from_typed(campaigns.data.unwrap()).unwrap(),
             vec![String::from("campaign-1"), String::from("campaign-2")]
         );
+
+        for no_campaigns in [
+            serde_json::json!({ "data": { "channel": null } }),
+            serde_json::json!({
+                "data": { "channel": { "viewerDropCampaigns": null } }
+            }),
+        ] {
+            let response: types::GqlResponse<types::AvailableDropsData> =
+                serde_json::from_value(no_campaigns).unwrap();
+            assert!(
+                available_drop_campaign_ids_from_typed(response.data.unwrap())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
 
         let missing_campaign_id: types::GqlResponse<types::AvailableDropsData> =
             serde_json::from_value(serde_json::json!({

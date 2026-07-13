@@ -89,7 +89,7 @@ fn runtime_applies_root_fixture_sequence_end_to_end() {
             title: String::from("Will it happen?"),
             decision_label: String::new(),
             result_type: String::from("WIN"),
-            result_string: String::from("WIN, Gained: +0"),
+            result_string: String::from("WIN, Gained: +150"),
         }]
     );
 

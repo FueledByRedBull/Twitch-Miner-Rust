@@ -1,6 +1,6 @@
 #![allow(clippy::cast_precision_loss, clippy::struct_excessive_bools)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use base64::Engine;
@@ -349,6 +349,12 @@ pub struct Streamer {
     pub points_init: bool,
     pub active_multipliers: Vec<ActiveMultiplier>,
     pub last_raid_id: String,
+    #[serde(skip)]
+    pub processed_claim_ids: VecDeque<String>,
+    #[serde(skip)]
+    pub processed_moment_ids: VecDeque<String>,
+    #[serde(skip)]
+    pub processed_point_event_keys: VecDeque<String>,
     pub history: HashMap<String, HistoryEntry>,
     pub community_goals: HashMap<String, CommunityGoal>,
 }
@@ -380,7 +386,11 @@ impl Streamer {
         active_multipliers: &[ActiveMultiplier],
         community_goals: &[CommunityGoal],
     ) {
-        self.channel_points = balance.max(0);
+        let balance = balance.max(0);
+        if self.channel_points != balance {
+            self.processed_point_event_keys.clear();
+        }
+        self.channel_points = balance;
         self.active_multipliers.clear();
         self.active_multipliers
             .extend_from_slice(active_multipliers);

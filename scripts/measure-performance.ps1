@@ -74,9 +74,36 @@ if ($ProcessId -ne 0) {
 }
 
 $revision = (git rev-parse --short=12 HEAD).Trim()
+$worktreeDirty = -not [string]::IsNullOrWhiteSpace((git status --porcelain --untracked-files=normal) -join "`n")
+$binaryItem = Get-Item -LiteralPath $Binary -ErrorAction Stop
+$binaryVersion = (& $Binary --version 2>&1) -join "`n"
+if ($LASTEXITCODE -ne 0) {
+    throw "Version command failed with exit code $LASTEXITCODE."
+}
+$rustcVersion = (& rustc --version 2>&1) -join "`n"
+if ($LASTEXITCODE -ne 0) {
+    throw "Rust compiler version check failed with exit code $LASTEXITCODE."
+}
+$metadata = cargo metadata --locked --format-version 1 | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) {
+    throw "Cargo metadata check failed with exit code $LASTEXITCODE."
+}
 $result = [ordered]@{
     measured_at_utc = [DateTime]::UtcNow.ToString('o')
     revision = $revision
+    worktree_dirty = $worktreeDirty
+    binary_version = $binaryVersion.Trim()
+    binary_size_bytes = $binaryItem.Length
+    host = [ordered]@{
+        os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+        logical_processors = [Environment]::ProcessorCount
+        rustc = $rustcVersion.Trim()
+    }
+    workspace = [ordered]@{
+        package_count = $metadata.workspace_members.Count
+        resolved_package_count = $metadata.packages.Count
+    }
     command = "$Binary --help"
     iterations = $Iterations
     startup_ms = [ordered]@{

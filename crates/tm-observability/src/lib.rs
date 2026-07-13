@@ -455,24 +455,44 @@ where
     ) -> fmt::Result {
         let mut visitor = MessageOnlyVisitor::new(self.include_fields);
         event.record(&mut visitor);
+        let report_line = visitor.report_line();
+        let operation = visitor.operation().map_or_else(
+            || {
+                event
+                    .metadata()
+                    .target()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or("run")
+                    .to_string()
+            },
+            str::to_string,
+        );
         let body = visitor.render();
         let username_prefix = self
             .console_username
             .as_deref()
             .map_or(String::new(), |username| format!(" [{username}]"));
-        writeln!(
-            writer,
-            "[{}] {}{}: {}",
-            format_level(*event.metadata().level()),
-            current_log_timestamp(self.show_seconds, self.timezone),
-            username_prefix,
-            body
-        )
+        let timestamp = current_log_timestamp(self.show_seconds, self.timezone);
+        let line = if report_line {
+            format_report_line(&timestamp, &body)
+        } else {
+            format_log_line(
+                &timestamp,
+                format_level(*event.metadata().level()),
+                &operation,
+                &username_prefix,
+                &body,
+            )
+        };
+        writeln!(writer, "{line}")
     }
 }
 
 struct MessageOnlyVisitor {
     message: Option<String>,
+    operation: Option<String>,
+    report_line: bool,
     fields: Vec<String>,
     include_fields: bool,
 }
@@ -481,6 +501,8 @@ impl MessageOnlyVisitor {
     fn new(include_fields: bool) -> Self {
         Self {
             message: None,
+            operation: None,
+            report_line: false,
             fields: Vec::new(),
             include_fields,
         }
@@ -491,9 +513,23 @@ impl MessageOnlyVisitor {
             self.message = Some(trim_matching_quotes(value));
             return;
         }
+        if field.name() == "operation" {
+            self.operation = Some(trim_matching_quotes(value));
+            return;
+        }
         if self.include_fields {
             self.fields.push(format!("{}={}", field.name(), value));
         }
+    }
+
+    fn operation(&self) -> Option<&str> {
+        self.operation
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    const fn report_line(&self) -> bool {
+        self.report_line
     }
 
     fn render(self) -> String {
@@ -506,6 +542,14 @@ impl MessageOnlyVisitor {
 }
 
 impl Visit for MessageOnlyVisitor {
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        if field.name() == "report_line" {
+            self.report_line = value;
+        } else {
+            self.record_value(field, &value.to_string());
+        }
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         self.record_value(field, &format!("{value:?}"));
     }
@@ -531,6 +575,20 @@ fn format_level(level: Level) -> &'static str {
         Level::DEBUG => "DEBUG",
         Level::TRACE => "TRACE",
     }
+}
+
+fn format_log_line(
+    timestamp: &str,
+    level: &str,
+    operation: &str,
+    username_prefix: &str,
+    body: &str,
+) -> String {
+    format!("{timestamp} - {level} - [{operation}]{username_prefix}: {body}")
+}
+
+fn format_report_line(timestamp: &str, body: &str) -> String {
+    format!("{timestamp} - {body}")
 }
 
 #[derive(Clone)]
@@ -1006,6 +1064,28 @@ mod tests {
         assert_eq!(
             format_log_timestamp("2026-03-27T08:09:10.123456Z", true),
             Some(String::from("08:09:10 27/03/26"))
+        );
+    }
+
+    #[test]
+    fn log_line_matches_python_style_operation_shape() {
+        assert_eq!(
+            format_log_line(
+                "08:09:10 27/03/26",
+                "INFO",
+                "run",
+                "",
+                "💣 Start session: 'session-123'",
+            ),
+            "08:09:10 27/03/26 - INFO - [run]: 💣 Start session: 'session-123'"
+        );
+    }
+
+    #[test]
+    fn report_line_omits_level_and_operation_envelope() {
+        assert_eq!(
+            format_report_line("08:09:10 27/03/26", "🛑 End session 'session-123'"),
+            "08:09:10 27/03/26 - 🛑 End session 'session-123'"
         );
     }
 

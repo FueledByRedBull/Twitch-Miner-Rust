@@ -249,7 +249,20 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     };
     assert_eq!(kind, PredictionChannelKind::EventUpdated);
     assert_eq!(event.status, "RESOLVED");
+    assert_eq!(event.outcomes[0].total_users, 10);
+    assert_eq!(event.outcomes[0].total_points, 100);
+    assert_eq!(event.outcomes[0].top_points, 20);
     assert_eq!(winning_outcome_id.as_deref(), Some("a"));
+
+    let partial_update = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"RESOLVED\",\"winning_outcome_id\":\"a\"}}}"}}"#;
+    let PubSubEvent::PredictionChannel { event, .. } =
+        tm_pubsub::parse_message(partial_update, &[streamer("123")])
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected partial prediction update");
+    };
+    assert!(event.outcomes.is_empty());
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.prediction_made.json"), &[]).unwrap(),
@@ -265,7 +278,15 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
         Some(PubSubEvent::PredictionUser {
             event_id: String::from("event-1"),
             kind: PredictionUserKind::PredictionResult,
-            result: Some(serde_json::json!({ "type": "WIN" })),
+            result: Some(serde_json::json!({ "type": "WIN", "points_won": 150 })),
         })
     );
+
+    let malformed_result = r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"MYSTERY\"}}}}"}}"#;
+    assert!(matches!(
+        tm_pubsub::parse_message(malformed_result, &[]),
+        Err(tm_pubsub::PubSubError::Protocol(
+            "viewer prediction result type is unsupported"
+        ))
+    ));
 }

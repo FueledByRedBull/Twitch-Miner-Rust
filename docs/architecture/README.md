@@ -6,9 +6,10 @@ The project runs as a Cargo workspace with crate boundaries split by responsibil
 - `tm-config` owns config/path resolution and write-back.
 - `tm-auth` owns cookie persistence and device auth helpers.
 - `tm-domain` owns pure logic and shared types.
-- `tm-events` owns transport-neutral runtime events shared by EventSub and legacy fixtures.
+- `tm-events` owns transport-neutral runtime events shared by EventSub and PubSub compatibility.
 - `tm-twitch` owns Twitch HTTP, GQL, and scraping contracts.
-- `tm-pubsub` owns legacy PubSub compatibility parsing and EventSub WebSocket transport.
+- `tm-pubsub` owns the isolated PubSub `/v1` compatibility client, EventSub
+  WebSocket transport, and the explicit source-selection policy.
 - `tm-irc` owns IRC protocol handling.
 - `tm-runtime` owns the single-writer runtime state model.
 - `tm-observability` owns logging, privacy helpers, and Discord webhook payloads.
@@ -19,7 +20,7 @@ The project runs as a Cargo workspace with crate boundaries split by responsibil
 
 The largest crates are decomposed behind stable crate facades:
 
-- `tm-app` keeps `main.rs` as the executable entrypoint and splits orchestration into startup, shutdown, drops, EventSub, runtime effects, context refresh, minute watching, chat, and shared utilities.
+- `tm-app` keeps `main.rs` as the executable entrypoint and splits orchestration into startup, shutdown, drops, independently supervised EventSub/PubSub tasks, presence fallback polling, runtime effects, context refresh, minute watching, chat, and shared utilities.
 - `tm-twitch` exposes the same public API from `lib.rs` while separating HTTP client code, GQL operation construction, Twitch contract extraction, parsers, cookie helpers, ID generation, and public types.
 - `tm-pubsub` exposes the same public API from `lib.rs` while separating EventSub/legacy WebSocket clients, topic/payload construction, parser code, prediction parsing, error types, and compatibility aliases.
 - `tm-runtime` exposes the same public API from `lib.rs` while separating the actor handle, runtime state/types, effects, prediction settlement helpers, and summary/history formatting.

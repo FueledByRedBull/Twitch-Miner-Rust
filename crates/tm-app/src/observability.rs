@@ -48,16 +48,21 @@ impl AppObservability {
         anonymizer.streamer_name(streamer)
     }
 
-    pub(crate) fn channel_points(&self, streamer: &Streamer) -> String {
-        let mut anonymizer = self.lock_anonymizer();
-        format_channel_points(anonymizer.pseudo_channel_points(streamer))
+    fn anonymized(&self) -> bool {
+        self.lock_anonymizer().enabled()
     }
 
     pub(crate) fn streamer_label(&self, streamer: &Streamer) -> String {
+        let mut anonymizer = self.lock_anonymizer();
+        let username = anonymizer.streamer_name(streamer);
+        let channel_id = if anonymizer.enabled() {
+            "[hidden]"
+        } else {
+            streamer.channel_id.as_str()
+        };
+        let channel_points = anonymizer.pseudo_channel_points(streamer);
         format!(
-            "{} ({} points)",
-            self.streamer_name(streamer),
-            self.channel_points(streamer)
+            "Streamer(username={username}, channel_id={channel_id}, channel_points={channel_points})"
         )
     }
 
@@ -140,7 +145,107 @@ impl AppObservability {
     }
 
     pub(crate) fn join_raid_message(&self, from: &str, target_login: &str) -> String {
+        let from = one_line(from);
+        let target_login = {
+            let mut anonymizer = self.lock_anonymizer();
+            anonymizer.name(&one_line(target_login))
+        };
         self.decorate("🎭", format!("Joining raid from {from} to {target_login}"))
+    }
+
+    pub(crate) fn prediction_label(&self, event: &tm_domain::PredictionEvent) -> String {
+        let anonymize = self.lock_anonymizer().enabled();
+        let event_id = if anonymize {
+            "[hidden]"
+        } else {
+            event.event_id.as_str()
+        };
+        let title = if anonymize {
+            "[hidden]".to_string()
+        } else {
+            one_line(&event.title)
+        };
+        format!("EventPrediction(event_id={event_id}, title=\"{title}\")")
+    }
+
+    pub(crate) fn prediction_wait_message(
+        &self,
+        event: &tm_domain::PredictionEvent,
+        wait: Duration,
+    ) -> String {
+        self.decorate(
+            "⏰",
+            format!(
+                "Place the bet after: {:.2}s for: {}",
+                wait.as_secs_f64(),
+                self.prediction_label(event)
+            ),
+        )
+    }
+
+    pub(crate) fn prediction_start_message(&self, event: &tm_domain::PredictionEvent) -> String {
+        self.decorate(
+            "🍀",
+            format!(
+                "Going to complete bet for {} owned by {}",
+                self.prediction_label(event),
+                self.streamer_label(&event.streamer)
+            ),
+        )
+    }
+
+    pub(crate) fn prediction_placed_message(
+        &self,
+        event: &tm_domain::PredictionEvent,
+        decision: &tm_domain::PredictionDecision,
+    ) -> String {
+        let outcome = event.decision_outcome();
+        let outcome_label = outcome.map_or_else(
+            || event.decision_label(),
+            |outcome| {
+                format!(
+                    "{} ({}), Points: {}, Users: {} ({:.2}%), Odds: {:.2} ({:.2}%)",
+                    one_line(&outcome.title),
+                    outcome.color.to_uppercase(),
+                    format_channel_points(outcome.total_points),
+                    format_channel_points(outcome.total_users),
+                    outcome.percentage_users,
+                    outcome.odds,
+                    outcome.odds_percentage
+                )
+            },
+        );
+        self.decorate(
+            "🍀",
+            format!(
+                "Place {} channel points on: {outcome_label}",
+                format_channel_points(decision.amount)
+            ),
+        )
+    }
+
+    pub(crate) fn prediction_result_message(
+        &self,
+        event_id: &str,
+        title: &str,
+        result: &str,
+    ) -> String {
+        let anonymize = self.lock_anonymizer().enabled();
+        let event_id = if anonymize { "[hidden]" } else { event_id };
+        let title = if anonymize {
+            "[hidden]".to_string()
+        } else {
+            one_line(title)
+        };
+        let result = if anonymize {
+            "[hidden]".to_string()
+        } else {
+            one_line(result)
+        };
+        self.decorate(
+            "📊",
+            format!("EventPrediction(event_id={event_id}, title=\"{title}\") - Result: {result}"),
+        )
     }
 
     pub(crate) fn chat_presence_message(&self, join: bool, streamer_name: &str) -> String {
@@ -190,13 +295,13 @@ impl AppObservability {
     }
 
     pub(crate) fn start_session_message(&self, session_id: &str) -> String {
-        self.decorate("🟢", format!("Start session: '{session_id}'"))
+        self.decorate("💣", format!("Start session: '{session_id}'"))
     }
 
     pub(crate) fn loading_streamers_message(&self, count: usize) -> String {
         self.decorate(
-            "⏳",
-            format!("Loading data for {count} streamer(s). Please wait..."),
+            "🤓",
+            format!("Loading data for {count} streamers. Please wait ..."),
         )
     }
 
@@ -313,20 +418,82 @@ pub(crate) async fn log_startup(
     }
 }
 
-pub(crate) fn log_session_summary(summary: &tm_runtime::SessionSummary) {
-    tracing::info!("{}", summary.duration);
-    tracing::info!("{}", summary.total_points_line);
-    for streamer in &summary.streamers {
+pub(crate) fn log_session_summary(
+    summary: &tm_runtime::SessionSummary,
+    session_id: &str,
+    log_path: Option<&std::path::Path>,
+    observability: &AppObservability,
+) {
+    tracing::info!(
+        operation = "run",
+        report_line = true,
+        "{}",
+        observability.decorate("🛑", format!("End session '{session_id}'"))
+    );
+    if let Some(log_path) = log_path {
+        let log_path = privacy_safe_log_path(observability.anonymized(), log_path);
         tracing::info!(
-            "{:<width$} {}",
-            streamer.username,
-            streamer.current_points,
-            width = crate::SESSION_SUMMARY_INDENT
+            operation = "run",
+            report_line = true,
+            "{}",
+            observability.decorate("📄", format!("Logs file: {log_path}"))
         );
-        tracing::info!("{}", streamer.total_points_line);
-        for line in &streamer.history_lines {
-            tracing::info!("{line}");
-        }
+    }
+    tracing::info!(
+        operation = "run",
+        report_line = true,
+        "{}",
+        observability.decorate("⌛", format!("Duration {}", summary.duration))
+    );
+
+    for prediction in &summary.predictions {
+        let mut lines = vec![
+            observability.decorate("📊", prediction.bet_settings_line.clone()),
+            observability.decorate("📊", prediction.event_line.clone()),
+            format!("\t\t{}", prediction.streamer_line),
+            format!("\t\t{}", prediction.bet_line),
+        ];
+        lines.extend(
+            prediction
+                .outcome_lines
+                .iter()
+                .map(|line| format!("\t\t{line}")),
+        );
+        lines.push(format!("\t\t{}", prediction.result_line));
+        tracing::info!(
+            operation = "prediction_report",
+            report_line = true,
+            "{}",
+            lines.join("\n")
+        );
+    }
+
+    tracing::info!(
+        operation = "run",
+        report_line = true,
+        "{}",
+        observability.decorate("📊", summary.total_points_line.clone())
+    );
+    for streamer in &summary.streamers {
+        let streamer_line = format!(
+            "Streamer(username={}, channel_id={}, channel_points={}), {}",
+            streamer.username,
+            streamer.channel_id,
+            streamer.current_points,
+            streamer.total_points_line
+        );
+        let history = if streamer.history_lines.is_empty() {
+            String::from("No point history")
+        } else {
+            streamer.history_lines.join(", ")
+        };
+        tracing::info!(
+            operation = "session_report",
+            report_line = true,
+            "{}\n{}",
+            observability.decorate("🤖", streamer_line),
+            observability.decorate("💰", history)
+        );
     }
 }
 
@@ -342,8 +509,11 @@ pub(crate) async fn send_discord_event(
     let Some(request) = build_discord_request(discord, message, Some(event)) else {
         return;
     };
-    if let Err(error) = client.send(&request).await {
-        tracing::warn!(%error, "failed to send discord event");
+    if client.send(&request).await.is_err() {
+        tracing::warn!(
+            error_class = "delivery-failed",
+            "failed to send discord event"
+        );
     }
 }
 
@@ -360,6 +530,10 @@ pub(crate) fn streamer_game_name(streamer: &Streamer) -> Option<String> {
         })
         .filter(|name| !name.is_empty())
         .map(str::to_string)
+}
+
+fn one_line(value: &str) -> String {
+    value.replace(['\r', '\n', '\"'], " ").trim().to_string()
 }
 
 pub(crate) fn signed_points(amount: i64) -> String {
@@ -392,29 +566,110 @@ impl ChatLogger for TracingChatLogger {
     }
 
     fn printf(&mut self, message: &str) {
+        let message = privacy_safe_chat_message(
+            self.observability.anonymized(),
+            "chat message [hidden]",
+            message,
+        );
         tracing::info!("{message}");
     }
 
     fn errorf(&mut self, message: &str) {
+        let message = privacy_safe_chat_message(
+            self.observability.anonymized(),
+            "chat error [details hidden]",
+            message,
+        );
         tracing::error!("{message}");
     }
 
     fn emoji_eventf(&mut self, _emoji: &str, event: ChatEventKind, message: &str) {
+        let message = privacy_safe_chat_message(
+            self.observability.anonymized(),
+            "chat mention [hidden]",
+            message,
+        );
         tracing::info!("{message}");
         if matches!(event, ChatEventKind::Mention) {
             self.observability
-                .spawn_event(DiscordEvent::ChatMention, message.to_string());
+                .spawn_event(DiscordEvent::ChatMention, message);
         }
+    }
+}
+
+fn privacy_safe_chat_message(anonymized: bool, redacted: &str, raw: &str) -> String {
+    if anonymized {
+        redacted.to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn privacy_safe_log_path(anonymized: bool, path: &std::path::Path) -> String {
+    if anonymized {
+        String::from("[hidden]")
+    } else {
+        path.display().to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::await_observability_task;
+    use std::time::Duration;
+
+    use super::{
+        await_observability_task, privacy_safe_chat_message, privacy_safe_log_path,
+        AppObservability, TracingChatLogger,
+    };
+    use tm_irc::{ChatEventKind, ChatLogger};
+    use tm_observability::DiscordClient;
+
+    fn test_observability(anonymized: bool) -> anyhow::Result<AppObservability> {
+        Ok(AppObservability::new(
+            None,
+            DiscordClient::new(Duration::from_secs(1))?,
+            anonymized,
+            false,
+            false,
+            false,
+        ))
+    }
 
     #[tokio::test]
     async fn timed_out_observability_tasks_are_aborted() {
         let task = tokio::spawn(async { std::future::pending::<()>().await });
         await_observability_task(task, std::time::Duration::ZERO).await;
+    }
+
+    #[tokio::test]
+    async fn anonymized_chat_logger_does_not_retain_raw_callback_text() -> anyhow::Result<()> {
+        let observability = test_observability(true)?;
+        let mut logger = TracingChatLogger {
+            observability: observability.clone(),
+            health: crate::status::HealthTracker::default(),
+        };
+
+        assert!(observability.anonymized());
+        logger.printf("secret-user at #secret-channel wrote: secret-message");
+        logger.errorf("chat #secret-channel authentication failed");
+        logger.emoji_eventf(
+            "",
+            ChatEventKind::Mention,
+            "secret-user at #secret-channel wrote: secret-message",
+        );
+        assert_eq!(
+            privacy_safe_chat_message(true, "chat message [hidden]", "secret-message"),
+            "chat message [hidden]"
+        );
+        assert_eq!(
+            privacy_safe_chat_message(false, "chat message [hidden]", "public-message"),
+            "public-message"
+        );
+        assert_eq!(
+            privacy_safe_log_path(true, std::path::Path::new("C:/Users/secret/miner.log")),
+            "[hidden]"
+        );
+        observability.shutdown_pending_tasks().await;
+        Ok(())
     }
 }

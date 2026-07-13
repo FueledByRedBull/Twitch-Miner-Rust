@@ -3,6 +3,7 @@
     "betting_make_predictions": true,
     "follow_raid": false,
     "claim_drops": true,
+    "claim_moments": false,
     "community_goals": true,
     "chat_presence": "OFFLINE",
     "bet": {
@@ -20,7 +21,7 @@
       "make_predictions": true,
       "follow_raid": false,
       "claim_drops": true,
-      "claim_moments": true,
+      "claim_moments": false,
       "watch_streak": true,
       "community_goals": true,
       "chat_presence": "OFFLINE",
@@ -115,6 +116,37 @@
       "earned": 50,
       "reason": "WATCH",
       "balance": 1050
+    }
+  },
+  "transport_policy": {
+    "expected": {
+      "presence_source": "eventsub+gql-polling",
+      "prediction_source": "pubsub-compatibility",
+      "pubsub_presence": false,
+      "pubsub_prediction_channel": true,
+      "eventsub_prediction_subscriptions": 0
+    }
+  },
+  "pubsub_batching": {
+    "streamer_count": 30,
+    "expected": {
+      "topic_count": 122,
+      "batch_sizes": [50, 50, 22]
+    }
+  },
+  "eventsub_capacity": {
+    "streamer_count": 6,
+    "expected": {
+      "planned_subscriptions": 10,
+      "overflow_streamers": 1,
+      "polling_streamers": 1,
+      "max_total_cost": 10
+    }
+  },
+  "cross_transport_dedupe": {
+    "expected": {
+      "online_at_unix": 100,
+      "offline_at_unix": 102
     }
   }
 }

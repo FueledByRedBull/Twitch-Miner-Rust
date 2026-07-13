@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use tm_config::{build_base_streamer_settings, build_override_settings, ConfigFile};
 use tm_domain::{
     normalize_game_list, normalize_streamer_list, parse_watch_priorities, pick_streamers_to_watch,
-    should_join_chat, CommunityGoal, Game, OffsetDateTime, PredictionDecision, Stream, Streamer,
+    should_join_chat, CommunityGoal, Game, OffsetDateTime, PredictionDecision, PredictionEvent,
+    Stream, Streamer,
 };
 use tm_events::{
     CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
@@ -13,8 +14,13 @@ use crate::effect::RuntimeEffect;
 use crate::prediction::{build_prediction_settlement_effect, prediction_status_is_resolved};
 use crate::summary::{apply_pubsub_gain, build_session_summary};
 use crate::types::{
-    ContextUpdate, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
+    ContextUpdate, EventApplication, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary,
+    StreamUpdate,
 };
+
+const MAX_COMPLETED_PREDICTIONS: usize = 256;
+
+const MAX_PROCESSED_MUTATION_IDS: usize = 128;
 
 impl RuntimeSession {
     #[must_use]
@@ -76,6 +82,8 @@ impl RuntimeState {
             streamers,
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
         }
     }
 
@@ -119,10 +127,8 @@ impl RuntimeState {
 
     #[must_use]
     pub fn session_summary(&self, anonymize: bool, now: OffsetDateTime) -> SessionSummary {
-        let duration = (now - self.started_at)
-            .whole_seconds()
-            .max(0)
-            .cast_unsigned();
+        let duration_micros = (now - self.started_at).whole_microseconds().max(0);
+        let duration_micros = u64::try_from(duration_micros).unwrap_or(u64::MAX);
         let initial_points = self
             .initial_points
             .iter()
@@ -131,48 +137,71 @@ impl RuntimeState {
         build_session_summary(
             &self.streamers,
             &initial_points,
+            &self.completed_predictions,
             anonymize,
-            std::time::Duration::from_secs(duration),
+            std::time::Duration::from_micros(duration_micros),
         )
     }
 
     #[allow(clippy::too_many_lines, clippy::redundant_closure_for_method_calls)]
     pub fn apply_event(&mut self, event: &MinerEvent, now: OffsetDateTime) -> Vec<RuntimeEffect> {
+        self.apply_event_with_outcome(event, now).effects
+    }
+
+    #[allow(clippy::too_many_lines, clippy::redundant_closure_for_method_calls)]
+    pub fn apply_event_with_outcome(
+        &mut self,
+        event: &MinerEvent,
+        now: OffsetDateTime,
+    ) -> EventApplication {
         match event {
             MinerEvent::PointsEarned {
                 channel_id,
                 earned,
                 reason,
                 balance,
-            } => self
-                .streamer_mut_by_channel_id(channel_id)
-                .map(|streamer| {
-                    apply_pubsub_gain(streamer, *earned, reason, *balance);
-                    Vec::new()
-                })
-                .unwrap_or_default(),
+            } => {
+                let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+                    return EventApplication::unchanged();
+                };
+                let event_key = format!("{earned}:{balance}:{}:{reason}", reason.len());
+                let current_state_key = format!("{event_key}:{}", streamer.channel_points);
+                if streamer
+                    .processed_point_event_keys
+                    .contains(&current_state_key)
+                {
+                    return EventApplication::unchanged();
+                }
+                apply_pubsub_gain(streamer, *earned, reason, *balance);
+                let applied_state_key = format!("{event_key}:{}", streamer.channel_points);
+                remember_mutation_id(&mut streamer.processed_point_event_keys, &applied_state_key);
+                EventApplication::changed(Vec::new())
+            }
             MinerEvent::ClaimAvailable {
                 channel_id,
                 claim_id,
-            } => self
-                .streamer_by_channel_id(channel_id)
-                .map(|_| {
-                    vec![RuntimeEffect::ClaimBonus {
-                        channel_id: channel_id.clone(),
-                        claim_id: claim_id.clone(),
-                    }]
-                })
-                .unwrap_or_default(),
+            } => {
+                let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+                    return EventApplication::unchanged();
+                };
+                if !remember_mutation_id(&mut streamer.processed_claim_ids, claim_id) {
+                    return EventApplication::unchanged();
+                }
+                EventApplication::changed(vec![RuntimeEffect::ClaimBonus {
+                    channel_id: channel_id.clone(),
+                    claim_id: claim_id.clone(),
+                }])
+            }
             MinerEvent::Playback { channel_id, kind } => match kind {
-                PlaybackType::StreamUp => {
-                    self.apply_presence(channel_id, true, now);
-                    Vec::new()
-                }
-                PlaybackType::StreamDown => {
-                    self.apply_presence(channel_id, false, now);
-                    Vec::new()
-                }
-                PlaybackType::Viewcount => Vec::new(),
+                PlaybackType::StreamUp => EventApplication {
+                    effects: Vec::new(),
+                    changed: self.apply_presence(channel_id, true, now),
+                },
+                PlaybackType::StreamDown => EventApplication {
+                    effects: Vec::new(),
+                    changed: self.apply_presence(channel_id, false, now),
+                },
+                PlaybackType::Viewcount => EventApplication::unchanged(),
             },
             MinerEvent::Raid {
                 channel_id,
@@ -180,35 +209,37 @@ impl RuntimeState {
                 target_login,
             } => {
                 let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
-                    return Vec::new();
+                    return EventApplication::unchanged();
                 };
                 if !streamer.settings.follow_raid
                     || raid_id.is_empty()
                     || streamer.last_raid_id == *raid_id
                 {
-                    return Vec::new();
+                    return EventApplication::unchanged();
                 }
                 streamer.last_raid_id.clone_from(raid_id);
-                vec![RuntimeEffect::JoinRaid {
+                EventApplication::changed(vec![RuntimeEffect::JoinRaid {
                     channel_id: channel_id.clone(),
                     raid_id: raid_id.clone(),
                     target_login: target_login.clone(),
-                }]
+                }])
             }
             MinerEvent::Moment {
                 channel_id,
                 moment_id,
             } => {
-                let Some(streamer) = self.streamer_by_channel_id(channel_id) else {
-                    return Vec::new();
+                let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+                    return EventApplication::unchanged();
                 };
-                if !streamer.settings.claim_moments || moment_id.is_empty() {
-                    return Vec::new();
+                if !streamer.settings.claim_moments
+                    || !remember_mutation_id(&mut streamer.processed_moment_ids, moment_id)
+                {
+                    return EventApplication::unchanged();
                 }
-                vec![RuntimeEffect::ClaimMoment {
+                EventApplication::changed(vec![RuntimeEffect::ClaimMoment {
                     channel_id: channel_id.clone(),
                     moment_id: moment_id.clone(),
-                }]
+                }])
             }
             MinerEvent::PredictionChannel {
                 kind,
@@ -219,43 +250,57 @@ impl RuntimeState {
                     if event.event_id.is_empty()
                         || event.status != "ACTIVE"
                         || !event.streamer.settings.make_predictions
+                        || !remember_mutation_id(
+                            &mut self.processed_prediction_ids,
+                            &event.event_id,
+                        )
                     {
-                        return Vec::new();
+                        return EventApplication::unchanged();
                     }
                     self.predictions
                         .insert(event.event_id.clone(), event.as_ref().clone());
-                    vec![RuntimeEffect::EvaluatePrediction {
+                    EventApplication::changed(vec![RuntimeEffect::EvaluatePrediction {
                         event_id: event.event_id.clone(),
-                    }]
+                    }])
                 }
                 PredictionChannelKind::EventUpdated => {
                     let event_id = event.event_id.clone();
-                    let effect = {
+                    let (effect, state_changed) = {
                         let Some(existing) = self.predictions.get_mut(&event_id) else {
-                            return Vec::new();
+                            return EventApplication::unchanged();
                         };
+                        let mut state_changed = existing.status != event.status;
                         existing.status.clone_from(&event.status);
-                        existing.title.clone_from(&event.title);
-                        existing.created_at = event.created_at;
-                        existing.outcomes.clone_from(&event.outcomes);
+                        if !event.outcomes.is_empty() {
+                            state_changed |= existing.outcomes != event.outcomes;
+                            existing.outcomes.clone_from(&event.outcomes);
+                        }
                         if !existing.bet_placed
                             || existing.decision.amount <= 0
                             || !existing.result_type.is_empty()
                             || !prediction_status_is_resolved(&existing.status)
                         {
-                            None
+                            (None, state_changed)
                         } else {
-                            build_prediction_settlement_effect(
-                                existing,
-                                winning_outcome_id.as_deref(),
+                            (
+                                build_prediction_settlement_effect(
+                                    existing,
+                                    winning_outcome_id.as_deref(),
+                                ),
+                                state_changed,
                             )
                         }
                     };
                     let Some(effect) = effect else {
-                        return Vec::new();
+                        return EventApplication {
+                            effects: Vec::new(),
+                            changed: state_changed,
+                        };
                     };
-                    self.predictions.remove(&event_id);
-                    vec![effect]
+                    if let Some(event) = self.predictions.remove(&event_id) {
+                        self.remember_completed_prediction(event);
+                    }
+                    EventApplication::changed(vec![effect])
                 }
             },
             MinerEvent::PredictionUser {
@@ -265,38 +310,52 @@ impl RuntimeState {
             } => match kind {
                 PredictionUserKind::PredictionMade => {
                     let Some(event) = self.predictions.get_mut(event_id) else {
-                        return Vec::new();
+                        return EventApplication::unchanged();
                     };
+                    if event.bet_confirmed {
+                        return EventApplication::unchanged();
+                    }
                     event.bet_confirmed = true;
-                    Vec::new()
+                    EventApplication::changed(Vec::new())
                 }
                 PredictionUserKind::PredictionResult => {
+                    let result_type = result
+                        .as_ref()
+                        .and_then(|value| value.get("type"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if !matches!(result_type, "WIN" | "LOSE" | "REFUND") {
+                        return EventApplication::unchanged();
+                    }
+                    let points_won = result
+                        .as_ref()
+                        .and_then(|value| value.get("points_won"))
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or_default();
                     let Some(mut event) = self.predictions.remove(event_id) else {
-                        return Vec::new();
+                        return EventApplication {
+                            effects: Vec::new(),
+                            changed: self.refine_completed_prediction(
+                                event_id,
+                                result_type,
+                                points_won,
+                            ),
+                        };
                     };
                     if !event.bet_confirmed {
                         event.bet_confirmed = true;
                     }
-                    let settlement = event.parse_result(
-                        result
-                            .as_ref()
-                            .and_then(|value| value.get("type"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default(),
-                        result
-                            .as_ref()
-                            .and_then(|value| value.get("points_won"))
-                            .and_then(|value| value.as_i64())
-                            .unwrap_or_default(),
-                    );
-                    vec![RuntimeEffect::PredictionSettled {
+                    let settlement = event.parse_result(result_type, points_won);
+                    let effect = RuntimeEffect::PredictionSettled {
                         event_id: event_id.clone(),
                         streamer_username: event.streamer.username.clone(),
                         title: event.title.clone(),
-                        decision_label: settlement.decision_label,
-                        result_type: settlement.result_type,
-                        result_string: settlement.result_string,
-                    }]
+                        decision_label: settlement.decision_label.clone(),
+                        result_type: settlement.result_type.clone(),
+                        result_string: settlement.result_string.clone(),
+                    };
+                    self.remember_completed_prediction(event);
+                    EventApplication::changed(vec![effect])
                 }
             },
             MinerEvent::CommunityGoal {
@@ -306,28 +365,34 @@ impl RuntimeState {
                 goal_id,
             } => {
                 let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
-                    return Vec::new();
+                    return EventApplication::unchanged();
                 };
                 if !streamer.settings.community_goals {
-                    return Vec::new();
+                    return EventApplication::unchanged();
                 }
                 match kind {
                     CommunityGoalKind::Created | CommunityGoalKind::Updated => {
                         let Some(goal) = goal.as_ref() else {
-                            return Vec::new();
+                            return EventApplication::unchanged();
                         };
+                        if streamer.community_goals.get(&goal.id) == Some(goal) {
+                            return EventApplication::unchanged();
+                        }
                         streamer
                             .community_goals
                             .insert(goal.id.clone(), goal.clone());
-                        vec![RuntimeEffect::ContributeCommunityGoals {
+                        EventApplication::changed(vec![RuntimeEffect::ContributeCommunityGoals {
                             channel_id: channel_id.clone(),
-                        }]
+                        }])
                     }
                     CommunityGoalKind::Deleted => {
-                        if let Some(goal_id) = goal_id {
-                            streamer.community_goals.remove(goal_id);
+                        let changed = goal_id.as_ref().is_some_and(|goal_id| {
+                            streamer.community_goals.remove(goal_id).is_some()
+                        });
+                        EventApplication {
+                            effects: Vec::new(),
+                            changed,
                         }
-                        Vec::new()
                     }
                 }
             }
@@ -343,21 +408,20 @@ impl RuntimeState {
         self.apply_event(event, now)
     }
 
-    fn streamer_by_channel_id(&self, channel_id: &str) -> Option<&Streamer> {
-        self.streamers
-            .iter()
-            .find(|streamer| streamer.channel_id == channel_id)
-    }
-
     fn streamer_mut_by_channel_id(&mut self, channel_id: &str) -> Option<&mut Streamer> {
         self.streamers
             .iter_mut()
             .find(|streamer| streamer.channel_id == channel_id)
     }
 
-    pub(crate) fn apply_presence(&mut self, channel_id: &str, online: bool, now: OffsetDateTime) {
+    pub(crate) fn apply_presence(
+        &mut self,
+        channel_id: &str,
+        online: bool,
+        now: OffsetDateTime,
+    ) -> bool {
         let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
-            return;
+            return false;
         };
         let prev_online = streamer.is_online;
         if !streamer.presence_known || prev_online != online {
@@ -377,6 +441,9 @@ impl RuntimeState {
                     stream.reset_watch_progress();
                 }
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -465,8 +532,63 @@ impl RuntimeState {
     pub fn stop_tracking_prediction(&mut self, event_id: &str, result_type: &str) {
         if let Some(mut event) = self.predictions.remove(event_id) {
             event.result_type = result_type.to_string();
+            if event.bet_placed {
+                self.remember_completed_prediction(event);
+            }
         }
     }
+
+    fn remember_completed_prediction(&mut self, mut event: PredictionEvent) {
+        if let Some(streamer) = self
+            .streamers
+            .iter()
+            .find(|streamer| streamer.channel_id == event.streamer.channel_id)
+        {
+            event.streamer = streamer.clone();
+        }
+        if self.completed_predictions.len() == MAX_COMPLETED_PREDICTIONS {
+            self.completed_predictions.pop_front();
+        }
+        self.completed_predictions.push_back(event);
+    }
+
+    fn refine_completed_prediction(
+        &mut self,
+        event_id: &str,
+        result_type: &str,
+        points_won: i64,
+    ) -> bool {
+        let Some(event) = self
+            .completed_predictions
+            .iter_mut()
+            .rev()
+            .find(|event| event.event_id == event_id)
+        else {
+            return false;
+        };
+        let changed = !event.bet_confirmed
+            || event.result_type != result_type
+            || event.result_string != prediction_result_string(event, result_type, points_won);
+        event.bet_confirmed = true;
+        event.parse_result(result_type, points_won);
+        changed
+    }
+}
+
+fn prediction_result_string(event: &PredictionEvent, result_type: &str, points_won: i64) -> String {
+    let mut event = event.clone();
+    event.parse_result(result_type, points_won).result_string
+}
+
+fn remember_mutation_id(values: &mut std::collections::VecDeque<String>, value: &str) -> bool {
+    if value.trim().is_empty() || values.iter().any(|existing| existing == value) {
+        return false;
+    }
+    if values.len() == MAX_PROCESSED_MUTATION_IDS {
+        values.pop_front();
+    }
+    values.push_back(value.to_string());
+    true
 }
 
 fn tm_twitch_drop_id() -> &'static str {

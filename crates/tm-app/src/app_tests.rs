@@ -27,7 +27,7 @@ mod tests {
     use crate::observability::{format_resume_gap, streamer_game_name, AppObservability};
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
-    use crate::startup::{bootstrap_runtime_state, load_targets};
+    use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
     use crate::status::HealthTracker;
     use crate::utilities::new_session_id;
     use crate::watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry};
@@ -78,6 +78,16 @@ mod tests {
 
         assert!(Cli::try_parse_from(["tm-app", "--json"]).is_err());
         assert!(Cli::try_parse_from(["tm-app", "--status", "--check-config"]).is_err());
+    }
+
+    #[test]
+    fn canary_logger_never_opens_a_log_file() {
+        let config = ConfigFile {
+            save_logs: true,
+            ..ConfigFile::default()
+        };
+
+        assert!(!build_canary_logger_settings(&config).save);
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -164,7 +174,10 @@ mod tests {
                         r#"{"status":400,"message":"authorization_pending"}"#,
                     ),
                     2 => http_response("200 OK", r#"{"access_token":"token-123"}"#),
-                    3 => http_response("200 OK", r#"{"login":"tester","user_id":"user-123"}"#),
+                    3 => http_response(
+                        "200 OK",
+                        r#"{"login":"tester","user_id":"user-123","scopes":["channel:read:predictions"]}"#,
+                    ),
                     _ => unreachable!(),
                 };
                 stream.write_all(&response).unwrap();
@@ -229,6 +242,8 @@ mod tests {
                     .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)
                 {
                     http_response("200 OK", &fixture_json("twitch.stream_info.json"))
+                } else if request.contains(r#""operationName":"RewardList""#) {
+                    http_response("200 OK", &fixture_json("twitch.reward_list.json"))
                 } else {
                     panic!("unexpected request: {request}");
                 };
@@ -529,6 +544,7 @@ mod tests {
         );
         let streamer = Streamer {
             username: String::from("alice"),
+            channel_id: String::from("100"),
             channel_points: 1_250,
             stream: Some(tm_domain::Stream {
                 game: Some(Game {
@@ -542,7 +558,7 @@ mod tests {
 
         assert_eq!(
             observability.online_message(&streamer),
-            "🥳 alice (1.25k points) is Online! | Playing: VALORANT"
+            "🥳 Streamer(username=alice, channel_id=100, channel_points=1250) is Online! | Playing: VALORANT"
         );
     }
 
@@ -583,6 +599,7 @@ mod tests {
         );
         let streamer = Streamer {
             username: String::from("alice"),
+            channel_id: String::from("100"),
             channel_points: 1_250,
             stream: Some(tm_domain::Stream {
                 game: Some(Game {
@@ -596,7 +613,7 @@ mod tests {
 
         assert_eq!(
             observability.points_earned_message(&streamer, 10, "watch"),
-            "🚀 +10 → alice (1.25k points) - Reason: WATCH | Game: VALORANT"
+            "🚀 +10 → Streamer(username=alice, channel_id=100, channel_points=1250) - Reason: WATCH | Game: VALORANT"
         );
     }
 
@@ -612,17 +629,18 @@ mod tests {
         );
         let streamer = Streamer {
             username: String::from("alice"),
+            channel_id: String::from("100"),
             channel_points: 1_250,
             ..Streamer::default()
         };
 
         assert_eq!(
             observability.bonus_claim_message(&streamer, false),
-            "🎁 Claimed bonus → alice (1.25k points)"
+            "🎁 Claimed bonus → Streamer(username=alice, channel_id=100, channel_points=1250)"
         );
         assert_eq!(
             observability.bonus_claim_message(&streamer, true),
-            "🎁 Claimed startup bonus → alice (1.25k points)"
+            "🎁 Claimed startup bonus → Streamer(username=alice, channel_id=100, channel_points=1250)"
         );
     }
 
@@ -639,16 +657,75 @@ mod tests {
 
         assert_eq!(
             observability.start_session_message("session-123"),
-            "🟢 Start session: 'session-123'"
+            "💣 Start session: 'session-123'"
         );
         assert_eq!(
             observability.loading_streamers_message(16),
-            "⏳ Loading data for 16 streamer(s). Please wait..."
+            "🤓 Loading data for 16 streamers. Please wait ..."
         );
         assert_eq!(
             observability.loaded_streamers_message(16, Duration::from_millis(20_500)),
             "✅ 16 Streamer loaded! (20.5 seconds)"
         );
+    }
+
+    #[test]
+    fn python_style_messages_remain_redacted_in_privacy_mode() {
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            true,
+            true,
+            true,
+            true,
+        );
+        let streamer = Streamer {
+            username: String::from("private-user"),
+            channel_id: String::from("private-channel-id"),
+            channel_points: 42_424,
+            ..Streamer::default()
+        };
+        let event = PredictionEvent {
+            streamer: streamer.clone(),
+            event_id: String::from("private-event-id"),
+            title: String::from("private title"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: Vec::new(),
+            decision: tm_domain::PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+
+        let rendered = format!(
+            "{} {} {} {}",
+            observability.streamer_label(&streamer),
+            observability.prediction_label(&event),
+            observability.prediction_result_message(
+                &event.event_id,
+                &event.title,
+                "WIN, Gained: +100"
+            ),
+            observability.join_raid_message("Streamer1", "private-raid-target\nforged")
+        );
+        for private in [
+            "private-user",
+            "private-channel-id",
+            "private-event-id",
+            "private title",
+            "42_424",
+            "42424",
+            "Gained: +100",
+            "private-raid-target",
+            "forged",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        assert!(rendered.contains("Streamer(username=Streamer1, channel_id=[hidden]"));
+        assert!(rendered.contains("event_id=[hidden]"));
     }
 
     #[test]
@@ -867,8 +944,9 @@ mod tests {
             .unwrap();
         assert_eq!(session.auth_token(), Some("token-123"));
         assert_eq!(session.user_id(), Some("user-123"));
+        assert!(session.has_scope("channel:read:predictions"));
 
-        let (twitch_endpoints, requests, twitch_server) = spawn_twitch_server(7);
+        let (twitch_endpoints, requests, twitch_server) = spawn_twitch_server(8);
         let twitch = TwitchClient::with_client_and_cookie_header_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -893,6 +971,13 @@ mod tests {
         auth_server.join().unwrap();
         twitch_server.join().unwrap();
         assert_eq!(state.streamers[0].username, "alice");
+        assert!(
+            !state.streamers[0]
+                .stream
+                .as_ref()
+                .unwrap()
+                .watch_streak_missing
+        );
         assert_eq!(
             session.cookie_header_for_host("gql.twitch.tv").as_deref(),
             Some("auth-token=token-123; persistent=user-123")

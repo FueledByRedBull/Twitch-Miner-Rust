@@ -3,7 +3,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use time::format_description::well_known::Rfc2822;
+use time::format_description::well_known::{Rfc2822, Rfc3339};
 use time::OffsetDateTime;
 use tm_domain::Stream;
 
@@ -14,9 +14,9 @@ use crate::parsers::minute_watched_request;
 use crate::types::{
     AvailableDropsData, ChannelPointsContext, ClaimBonusData, ClaimBonusOutcome, ClaimDropData,
     ClaimDropOutcome, CommunityGoalContributionData, EmptyMutationData, FollowersData,
-    GqlPersistedOperation, GqlResponse, InventoryData, InventoryDrop, LiveStatusData, StreamInfo,
-    StreamInfoData, TwitchClientError, TwitchEndpoints, UserContributionData, UserIdData,
-    ViewerDropsDashboard,
+    GqlPersistedOperation, GqlResponse, InventoryData, InventoryDrop, LiveStatusData,
+    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
+    UserContributionData, UserIdData, ViewerDropsDashboard,
 };
 use crate::{operations, CLIENT_ID, DEFAULT_CLIENT_VERSION};
 
@@ -316,6 +316,16 @@ impl TwitchClient {
             .post_gql_typed(&operations::stream_info_overlay(channel_login))
             .await?;
         stream_info_from_typed(response)
+    }
+
+    pub async fn fetch_watch_streak_achievement(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<OffsetDateTime>, TwitchClientError> {
+        let response: RewardListData = self
+            .post_gql_typed(&operations::reward_list(channel_id))
+            .await?;
+        watch_streak_achievement_from_typed(response)
     }
 
     pub async fn fetch_followers(
@@ -919,6 +929,11 @@ fn stream_info_from_typed(data: StreamInfoData) -> Result<StreamInfo, TwitchClie
         .unwrap_or_default();
     let game_id = game.and_then(|game| game.id);
     let tags = stream.tags.into_iter().filter_map(|tag| tag.id).collect();
+    let created_at = stream
+        .created_at
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok());
 
     Ok(StreamInfo {
         id,
@@ -927,18 +942,44 @@ fn stream_info_from_typed(data: StreamInfoData) -> Result<StreamInfo, TwitchClie
         game_id,
         viewers_count: u32::try_from(stream.viewers_count.unwrap_or_default()).unwrap_or(u32::MAX),
         tags,
+        created_at,
     })
+}
+
+pub(crate) fn watch_streak_achievement_from_typed(
+    data: RewardListData,
+) -> Result<Option<OffsetDateTime>, TwitchClientError> {
+    let timestamp = data
+        .channel
+        .and_then(|channel| channel.self_data)
+        .and_then(|self_data| self_data.watch_streak_milestone)
+        .and_then(|envelope| envelope.milestone)
+        .and_then(|milestone| milestone.achievement_timestamp);
+    timestamp
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
+                TwitchClientError::InvalidField(
+                    "data.channel.self.watchStreakMilestone.watchStreakMilestone.achievementTimestamp",
+                )
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn available_drop_campaign_ids_from_typed(
     data: AvailableDropsData,
 ) -> Result<Vec<String>, TwitchClientError> {
-    let channel = data
-        .channel
-        .ok_or(TwitchClientError::MissingField("data.channel"))?;
-    let campaigns = channel.campaigns.ok_or(TwitchClientError::MissingField(
-        "data.channel.viewerDropCampaigns",
-    ))?;
+    // Twitch returns a null channel/campaign list when the channel has no
+    // currently available drops. The Go reference treats that shape as an
+    // empty result, while entries in a present list still require valid IDs.
+    let Some(channel) = data.channel else {
+        return Ok(Vec::new());
+    };
+    let Some(campaigns) = channel.campaigns else {
+        return Ok(Vec::new());
+    };
     campaigns
         .into_iter()
         .map(|campaign| {

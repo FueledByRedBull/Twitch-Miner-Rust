@@ -4,8 +4,10 @@ use tm_events::MinerEvent;
 pub enum IncomingTransportMessage {
     Pong,
     Reconnect,
+    ResponseOk {
+        nonce: Option<String>,
+    },
     ResponseError {
-        error: String,
         nonce: Option<String>,
         is_bad_auth: bool,
     },

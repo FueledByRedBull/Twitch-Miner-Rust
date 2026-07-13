@@ -10,7 +10,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::effect::RuntimeEffect;
 use crate::error::{Result, RuntimeError};
 use crate::types::{
-    ContextUpdate, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
+    ContextUpdate, EventApplication, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary,
+    StreamUpdate,
 };
 
 #[derive(Debug, Clone)]
@@ -83,7 +84,7 @@ enum RuntimeCommand {
         event: MinerEvent,
         now: OffsetDateTime,
         enqueued_at: Instant,
-        respond_to: oneshot::Sender<Vec<RuntimeEffect>>,
+        respond_to: oneshot::Sender<EventApplication>,
     },
     SessionSummary {
         anonymize: bool,
@@ -108,6 +109,12 @@ enum RuntimeCommand {
         channel_id: String,
         online: bool,
         now: OffsetDateTime,
+    },
+    SetPresenceChecked {
+        channel_id: String,
+        online: bool,
+        now: OffsetDateTime,
+        respond_to: oneshot::Sender<bool>,
     },
     MarkMinuteWatched {
         channel_id: String,
@@ -147,12 +154,15 @@ pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                     respond_to,
                 } => {
                     actor_metrics.record_processed(enqueued_at.elapsed());
+                    let application = state.apply_event_with_outcome(&event, now);
+                    if application.changed {
+                        notify_state_change(&state_revision_tx, &mut state_revision);
+                    }
                     log_dropped_runtime_reply(&send_runtime_reply(
                         "ApplyEvent",
                         respond_to,
-                        state.apply_event(&event, now),
+                        application,
                     ));
-                    notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::SessionSummary {
                     anonymize,
@@ -198,6 +208,22 @@ pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                 } => {
                     state.apply_presence(&channel_id, online, now);
                     notify_state_change(&state_revision_tx, &mut state_revision);
+                }
+                RuntimeCommand::SetPresenceChecked {
+                    channel_id,
+                    online,
+                    now,
+                    respond_to,
+                } => {
+                    let changed = state.apply_presence(&channel_id, online, now);
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "SetPresenceChecked",
+                        respond_to,
+                        changed,
+                    ));
+                    if changed {
+                        notify_state_change(&state_revision_tx, &mut state_revision);
+                    }
                 }
                 RuntimeCommand::MarkMinuteWatched { channel_id, now } => {
                     state.mark_minute_watched(&channel_id, now);
@@ -272,6 +298,14 @@ impl RuntimeHandle {
         event: MinerEvent,
         now: OffsetDateTime,
     ) -> Result<Vec<RuntimeEffect>> {
+        Ok(self.apply_event_with_outcome(event, now).await?.effects)
+    }
+
+    pub async fn apply_event_with_outcome(
+        &self,
+        event: MinerEvent,
+        now: OffsetDateTime,
+    ) -> Result<EventApplication> {
         let (send, recv) = oneshot::channel();
         let enqueued_at = Instant::now();
         self.metrics.record_enqueued(self.sender.capacity());
@@ -419,6 +453,29 @@ impl RuntimeHandle {
             .map_err(|_| RuntimeError::SendFailed {
                 command: "SetPresence",
             })
+    }
+
+    pub async fn set_presence_if_changed(
+        &self,
+        channel_id: impl Into<String>,
+        online: bool,
+        now: OffsetDateTime,
+    ) -> Result<bool> {
+        let (send, recv) = oneshot::channel();
+        self.sender
+            .send(RuntimeCommand::SetPresenceChecked {
+                channel_id: channel_id.into(),
+                online,
+                now,
+                respond_to: send,
+            })
+            .await
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "SetPresenceChecked",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "SetPresenceChecked",
+        })
     }
 
     pub async fn mark_minute_watched(

@@ -36,7 +36,7 @@ use bootstrap::{
 use drops::claim_startup_drops_if_enabled;
 use observability::{build_observability, log_session_summary, log_startup};
 use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
-use startup::{bootstrap_runtime_state, build_logger_settings};
+use startup::{bootstrap_runtime_state, build_canary_logger_settings, build_logger_settings};
 use tasks::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
 use utilities::{clear_console, new_session_id, set_console_title, time_now};
 
@@ -50,7 +50,6 @@ const PENDING_CLAIMS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
 const SPADE_URL_TTL: Duration = Duration::from_secs(15 * 60);
 const MINUTE_WATCHER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
-const SESSION_SUMMARY_INDENT: usize = 25;
 
 #[derive(Debug, Parser)]
 #[allow(clippy::struct_excessive_bools)]
@@ -136,11 +135,19 @@ async fn main() -> Result<()> {
         config,
         active_paths,
     } = loaded_config;
-    prepare_work_dir(&active_paths)?;
+    if cli.canary {
+        std::env::set_current_dir(&active_paths.work_dir)?;
+    } else {
+        prepare_work_dir(&active_paths)?;
+    }
     let timezone_validation = validate_timezone_override(config.timezone.as_deref());
 
     init_tracing(&TracingInitOptions {
-        settings: build_logger_settings(&config),
+        settings: if cli.canary {
+            build_canary_logger_settings(&config)
+        } else {
+            build_logger_settings(&config)
+        },
         base_dir: active_paths.work_dir.clone(),
         username: config.username.clone(),
         timezone: config.timezone.clone(),
@@ -154,14 +161,19 @@ async fn main() -> Result<()> {
 
     let observability = build_observability(&config)?;
     tracing::info!(
+        operation = "run",
         "{} | {}",
         build_info::DISPLAY_NAME,
         build_info::VERSION_BANNER
     );
-    tracing::info!("{}", build_info::REPOSITORY_URL);
+    tracing::info!(operation = "run", "{}", build_info::REPOSITORY_URL);
 
     let session_id = new_session_id();
-    tracing::info!("{}", observability.start_session_message(&session_id));
+    tracing::info!(
+        operation = "run",
+        "{}",
+        observability.start_session_message(&session_id)
+    );
     let started_at = time_now();
     let http_client = build_http_client(config.disable_ssl_cert_verification)?;
     let session =
@@ -171,6 +183,8 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow!("missing auth token after login"))?
         .to_string();
     let user_id = session.user_id().map(str::to_string);
+    let prediction_eventsub_authorized =
+        session.has_any_scope(&["channel:read:predictions", "channel:manage:predictions"]);
     let twitch_cookie_header = session.cookie_header_for_host("twitch.tv");
     let twitch = Arc::new(TwitchClient::with_client_and_cookie_header(
         http_client,
@@ -189,6 +203,7 @@ async fn main() -> Result<()> {
     .await?;
     claim_startup_drops_if_enabled(&config, &state.streamers, &twitch, &observability).await?;
     tracing::info!(
+        operation = "run",
         "{}",
         observability.loaded_streamers_message(state.streamers.len(), bootstrap_started.elapsed())
     );
@@ -203,6 +218,7 @@ async fn main() -> Result<()> {
         twitch: &twitch,
         auth_token: &auth_token,
         user_id: user_id.as_ref(),
+        prediction_eventsub_authorized,
         initial_streamers: &initial_streamers,
         observability: &observability,
         health: &health,
@@ -224,12 +240,12 @@ async fn main() -> Result<()> {
         .await
         .err();
     if let Some(error) = runtime_failure.as_ref() {
-        tracing::error!(%error, session_id = %session_id, "runtime supervision requested shutdown");
+        tracing::error!(operation = "run", %error, session_id = %session_id, "runtime supervision requested shutdown");
     } else {
-        tracing::info!(session_id = %session_id, "shutdown requested");
+        tracing::info!(operation = "run", session_id = %session_id, "shutdown requested");
     }
     shutdown_background_tasks(stop_tx, tasks).await;
-    tracing::info!(session_id = %session_id, "background tasks stopped");
+    tracing::info!(operation = "run", session_id = %session_id, "background tasks stopped");
     observability.shutdown_pending_tasks().await;
     let summary = runtime
         .shutdown(config.privacy.anonymize_logs, time_now())
@@ -239,7 +255,14 @@ async fn main() -> Result<()> {
         format!("Ending session: '{session_id}'"),
     );
     observability.shutdown_pending_tasks().await;
-    log_session_summary(&summary);
+    let log_path = config.save_logs.then(|| {
+        tm_observability::log_file_path(
+            &active_paths.work_dir,
+            &config.username,
+            config.privacy.anonymize_logs,
+        )
+    });
+    log_session_summary(&summary, &session_id, log_path.as_deref(), &observability);
     if let Some(error) = runtime_failure {
         return Err(error);
     }

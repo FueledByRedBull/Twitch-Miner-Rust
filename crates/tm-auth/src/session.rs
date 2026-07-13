@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -27,6 +28,7 @@ pub enum AuthSessionError {
 pub struct AuthSession {
     username: String,
     store: CookieStore,
+    scopes: BTreeSet<String>,
 }
 
 impl AuthSession {
@@ -35,6 +37,7 @@ impl AuthSession {
         Self {
             username: username.into().trim().to_lowercase(),
             store,
+            scopes: BTreeSet::new(),
         }
     }
 
@@ -112,6 +115,28 @@ impl AuthSession {
         if let Some(cookie) = self.store.get_mut("persistent") {
             cookie.value = user_id;
         }
+    }
+
+    pub fn set_scopes<I, S>(&mut self, scopes: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.scopes = scopes
+            .into_iter()
+            .map(|scope| scope.as_ref().trim().to_lowercase())
+            .filter(|scope| !scope.is_empty())
+            .collect();
+    }
+
+    #[must_use]
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.contains(&scope.trim().to_lowercase())
+    }
+
+    #[must_use]
+    pub fn has_any_scope(&self, scopes: &[&str]) -> bool {
+        scopes.iter().any(|scope| self.has_scope(scope))
     }
 
     pub fn ensure_tokens(&mut self, auth_token: Option<&str>, user_id: Option<&str>) {
@@ -312,6 +337,20 @@ mod tests {
         assert_eq!(loaded.auth_token(), Some("token"));
         assert_eq!(loaded.user_id(), Some("user-1"));
         assert_eq!(loaded.store()["session"].value, "abc");
+    }
+
+    #[test]
+    fn validated_scopes_are_normalized_and_remain_ephemeral() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = sample_session();
+        session.set_scopes([" CHAT:READ ", "channel:read:predictions"]);
+
+        assert!(session.has_scope("chat:read"));
+        assert!(session.has_any_scope(&["channel:manage:predictions", "channel:read:predictions",]));
+        session.save_to_dir(dir.path()).unwrap();
+
+        let loaded = AuthSession::load_from_dir(dir.path(), "alice").unwrap();
+        assert!(!loaded.has_scope("channel:read:predictions"));
     }
 
     #[test]

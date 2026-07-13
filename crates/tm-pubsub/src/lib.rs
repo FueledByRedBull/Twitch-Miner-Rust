@@ -1,9 +1,10 @@
-pub const WEBSOCKET_URL: &str = "wss://pubsub-edge.twitch.tv";
+pub const WEBSOCKET_URL: &str = "wss://pubsub-edge.twitch.tv/v1";
 
 mod client;
 mod errors;
 mod eventsub;
 mod parse;
+mod policy;
 mod prediction;
 mod topics;
 mod types;
@@ -11,18 +12,22 @@ mod types;
 pub use client::{PubSubClient, PubSubClientSettings, PubSubConnectionEvent};
 pub use errors::PubSubError;
 pub use eventsub::{
-    parse_eventsub_message, EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
-    EventSubError, EventSubMessage, EVENTSUB_SUBSCRIPTIONS_URL, EVENTSUB_WEBSOCKET_URL,
+    parse_eventsub_message, plan_eventsub_capacity, EventSubClient, EventSubClientSettings,
+    EventSubConnectionEvent, EventSubError, EventSubMessage, EventSubSetupReport,
+    EventSubStreamerCapability, EVENTSUB_SUBSCRIPTIONS_URL, EVENTSUB_WEBSOCKET_URL,
 };
 pub use parse::{
     bad_auth_cookie_file, channel_id_from_payload, parse_message, parse_transport_message,
 };
+pub use policy::{PredictionSource, TransportSourcePolicy};
 pub use tm_events::{
     CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
 };
 pub use topics::{
-    build_topic_batches, build_topics, chunk_topics, listen_payload, listen_payload_with_nonce,
-    listen_payloads, ping_payload, topic_requires_auth,
+    build_topic_batches, build_topic_batches_with_policy, build_topics, build_topics_with_policy,
+    chunk_topics, listen_payload, listen_payload_with_nonce, listen_payloads, ping_payload,
+    pubsub_setup_report, pubsub_topic_class, topic_requires_auth, PubSubCapabilityStatus,
+    PubSubSetupReport, PUBSUB_MAX_CONNECTIONS, PUBSUB_MAX_TOPICS, PUBSUB_MAX_TOPICS_PER_CONNECTION,
 };
 pub use types::{IncomingTransportMessage, PubSubEvent};
 
@@ -64,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_bonus_claim_topic_even_without_community_goals() {
+    fn omits_community_goal_topic_when_feature_is_disabled() {
         let topics = build_topics(
             "user-1",
             &[Streamer {
@@ -78,7 +83,22 @@ mod tests {
         )
         .unwrap();
 
-        assert!(topics.contains(&"community-points-channel-v1.100".to_string()));
+        assert!(!topics.contains(&"community-points-channel-v1.100".to_string()));
+        assert!(topics.contains(&"community-points-user-v1.user-1".to_string()));
+    }
+
+    #[test]
+    fn viewer_policy_assigns_presence_to_eventsub_and_predictions_to_pubsub() {
+        let topics = build_topics_with_policy(
+            "user-1",
+            &[streamer("100")],
+            TransportSourcePolicy::viewer_compatibility(),
+        )
+        .unwrap();
+
+        assert!(!topics.contains(&"video-playback-by-id.100".to_string()));
+        assert!(topics.contains(&"predictions-user-v1.user-1".to_string()));
+        assert!(topics.contains(&"predictions-channel-v1.100".to_string()));
     }
 
     #[test]
@@ -91,14 +111,36 @@ mod tests {
             .collect::<Vec<_>>();
 
         let batches = build_topic_batches("user-1", &streamers).unwrap();
-        assert_eq!(batches.len(), 3);
+        assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 50);
-        assert_eq!(batches[1].len(), 50);
-        assert_eq!(batches[2].len(), 3);
+        assert_eq!(batches[1].len(), 2);
         assert_eq!(batches[0][0], "community-points-user-v1.user-1");
-        assert!(!batches[2]
+        assert!(!batches[1]
             .iter()
             .any(|topic| topic == "community-points-user-v1.user-1"));
+    }
+
+    #[test]
+    fn topic_batches_fail_closed_above_ten_connections() {
+        let within_budget = (0..99)
+            .map(|index| streamer(&format!("channel-{index}")))
+            .collect::<Vec<_>>();
+        let batches = build_topic_batches("user-1", &within_budget).unwrap();
+        assert!(batches.len() <= PUBSUB_MAX_CONNECTIONS);
+        assert!(batches
+            .iter()
+            .all(|batch| { batch.len() <= PUBSUB_MAX_TOPICS_PER_CONNECTION }));
+
+        let over_budget = (0..100)
+            .map(|index| streamer(&format!("channel-{index}")))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            build_topic_batches("user-1", &over_budget),
+            Err(PubSubError::CapacityExceeded {
+                configured: 502,
+                maximum: PUBSUB_MAX_TOPICS
+            })
+        ));
     }
 
     #[test]
@@ -178,7 +220,7 @@ mod tests {
         let raw = json!({
             "type": "MESSAGE",
             "data": {
-                "topic": "",
+                "topic": "community-points-user-v1.viewer",
                 "message": "{\"type\":\"claim-available\",\"data\":{\"claim\":{\"id\":\"claim-1\"}}}"
             }
         })
@@ -199,7 +241,7 @@ mod tests {
             "type": "MESSAGE",
             "data": {
                 "topic": "predictions-user-v1.user",
-                "message": "{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\"}}}}"
+                "message": "{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"
             }
         })
         .to_string();
@@ -209,9 +251,33 @@ mod tests {
             Some(PubSubEvent::PredictionUser {
                 event_id: String::from("event-1"),
                 kind: PredictionUserKind::PredictionResult,
-                result: Some(json!({ "type": "WIN" })),
+                result: Some(json!({ "type": "WIN", "points_won": 250 })),
             })
         );
+    }
+
+    #[test]
+    fn required_pubsub_envelope_and_financial_fields_fail_closed() {
+        let missing_topic = r#"{"type":"MESSAGE","data":{"message":"{}"}}"#;
+        assert!(matches!(
+            parse_message(missing_topic, &[]),
+            Err(PubSubError::Protocol("PubSub message topic is missing"))
+        ));
+
+        let missing_win_points = json!({
+            "type": "MESSAGE",
+            "data": {
+                "topic": "predictions-user-v1.user",
+                "message": "{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\"}}}}"
+            }
+        })
+        .to_string();
+        assert!(matches!(
+            parse_message(&missing_win_points, &[]),
+            Err(PubSubError::Protocol(
+                "viewer prediction win points are missing or invalid"
+            ))
+        ));
     }
 
     #[test]
@@ -283,17 +349,43 @@ mod tests {
             IncomingTransportMessage::Reconnect
         );
         assert_eq!(
+            parse_transport_message(r#"{"type":"RESPONSE","error":"","nonce":"ok-1"}"#, &[])
+                .unwrap(),
+            IncomingTransportMessage::ResponseOk {
+                nonce: Some("ok-1".into()),
+            }
+        );
+        assert_eq!(
             parse_transport_message(
                 r#"{"type":"RESPONSE","error":"ERR_BADAUTH bad token","nonce":"abc"}"#,
                 &[]
             )
             .unwrap(),
             IncomingTransportMessage::ResponseError {
-                error: "ERR_BADAUTH bad token".into(),
                 nonce: Some("abc".into()),
                 is_bad_auth: true,
             }
         );
+    }
+
+    #[test]
+    fn pubsub_setup_report_uses_redacted_topic_classes() {
+        let report = pubsub_setup_report(&[
+            vec![
+                String::from("community-points-user-v1.viewer-123"),
+                String::from("predictions-channel-v1.channel-456"),
+            ],
+            vec![String::from("community-moments-channel-v1.channel-456")],
+        ]);
+
+        assert_eq!(report.connection_count, 2);
+        assert_eq!(report.total_topics, 3);
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(encoded.contains("points-user"));
+        assert!(encoded.contains("prediction-channel"));
+        assert!(encoded.contains("moments"));
+        assert!(!encoded.contains("viewer-123"));
+        assert!(!encoded.contains("channel-456"));
     }
 
     #[test]
