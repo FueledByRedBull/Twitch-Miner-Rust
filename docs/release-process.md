@@ -108,7 +108,9 @@ roll back by reusing `:latest`.
 
 For a guarded candidate update, use the helper below with full immutable image
 references and both 40-character revisions. It preflights candidate and
-rollback config compatibility and revision identity, verifies that the supplied
+rollback config compatibility and revision identity, requiring structured
+`--json` validation from the candidate while using the plain check supported by
+older rollback images. It verifies that the supplied
 rollback reference is the image used by the running service, runs the candidate
 read-only canary, and backs up Compose. After replacement it waits through the
 bounded startup window for the expected revision and healthy state; any failed

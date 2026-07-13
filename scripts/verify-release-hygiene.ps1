@@ -53,6 +53,10 @@ $deploymentHelper = Get-Content -Raw "$PSScriptRoot/deploy-with-rollback.ps1"
 if ($deploymentHelper -match '& docker exec\b') {
     throw 'Guarded deployment helper must use Compose service execution.'
 }
+if ($deploymentHelper -notmatch 'Test-ImageConfig \$CandidateImage \$true' -or
+    $deploymentHelper -notmatch 'Test-ImageConfig \$RollbackImage \$false') {
+    throw 'Guarded deployment helper must preserve candidate JSON and rollback-compatible config checks.'
+}
 
 $candidateDigest = 'a' * 64
 $rollbackDigest = 'b' * 64

@@ -83,12 +83,16 @@ function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
     }
 }
 
-function Test-ImageConfig([string]$Image) {
-    Invoke-Docker @(
+function Test-ImageConfig([string]$Image, [bool]$RequireJson) {
+    $arguments = @(
         'run', '--rm', '--platform', 'linux/arm64', '--user', $runtimeUser,
         '--volume', "${resolvedData}:/data:ro", $Image,
-        '--data-dir', '/data', '--check-config', '--json'
-    ) "Config preflight failed for immutable image"
+        '--data-dir', '/data', '--check-config'
+    )
+    if ($RequireJson) {
+        $arguments += '--json'
+    }
+    Invoke-Docker $arguments "Config preflight failed for immutable image"
 }
 
 function Test-ImageCanary([string]$Image) {
@@ -158,8 +162,8 @@ function Assert-RunningRollbackImage {
 }
 
 try {
-    Test-ImageConfig $CandidateImage
-    Test-ImageConfig $RollbackImage
+    Test-ImageConfig $CandidateImage $true
+    Test-ImageConfig $RollbackImage $false
     Test-ImageRevision $CandidateImage $CandidateRevision
     Test-ImageRevision $RollbackImage $RollbackRevision
     Assert-RunningRollbackImage
