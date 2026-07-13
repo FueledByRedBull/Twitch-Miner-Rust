@@ -51,7 +51,10 @@ copied into Rust.
 The normalized cross-process vectors in `tests/parity/vectors.json` are run by
 the Rust contract tests and by the pinned Go baseline through
 `scripts/verify-go-baseline.ps1`. The Go harness is copied only for the duration
-of that command and is removed afterward.
+of that command and is removed afterward. The pinned Go baseline's
+`TestStreamWatchProgress` uses an unstable exact two-minute boundary, so the
+gate skips only that assertion and injects a deterministic equivalent covering
+continuous progress at 90 seconds and reset behavior after 121 seconds.
 
 Before publication, run all fixture tests and the read-only canary. A successful
 canary proves only the listed read operations for that account at that time;
