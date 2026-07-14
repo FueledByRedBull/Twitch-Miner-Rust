@@ -851,6 +851,132 @@ mod tests {
     }
 
     #[test]
+    fn partial_settlement_update_keeps_connection_flow_for_viewer_result() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].settings.make_predictions = true;
+        let active = PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: String::from("prediction-partial-settlement"),
+            title: String::from("Fixture prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: vec![
+                PredictionOutcome {
+                    id: String::from("a"),
+                    title: String::from("Yes"),
+                    total_points: 100,
+                    ..PredictionOutcome::default()
+                },
+                PredictionOutcome {
+                    id: String::from("b"),
+                    title: String::from("No"),
+                    total_points: 100,
+                    ..PredictionOutcome::default()
+                },
+            ],
+            decision: PredictionDecision {
+                choice: Some(0),
+                outcome_id: String::from("a"),
+                amount: 100,
+            },
+            bet_placed: true,
+            bet_confirmed: true,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        state.predictions.insert(active.event_id.clone(), active);
+
+        let channel_update = tm_pubsub::parse_message(
+            r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-partial-settlement\",\"status\":\"RESOLVED\"}}}"}}"#,
+            &state.streamers,
+        )
+        .unwrap()
+        .unwrap();
+        let channel_application = state.apply_event_with_outcome(&channel_update, ts(2));
+        assert!(channel_application.changed);
+        assert!(channel_application.effects.is_empty());
+        assert!(state
+            .predictions
+            .contains_key("prediction-partial-settlement"));
+
+        let viewer_result = tm_pubsub::parse_message(
+            r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"prediction-partial-settlement\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        let viewer_effects = state.apply_pubsub_event(&viewer_result, ts(3));
+
+        assert_eq!(viewer_effects.len(), 1);
+        assert!(!state
+            .predictions
+            .contains_key("prediction-partial-settlement"));
+        assert_eq!(state.completed_predictions.len(), 1);
+        assert_eq!(state.completed_predictions[0].result_type, "WIN");
+        assert_eq!(
+            state.completed_predictions[0].result_string,
+            "WIN, Gained: +150"
+        );
+    }
+
+    #[test]
+    fn partial_cancellation_update_refunds_placed_bet() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].settings.make_predictions = true;
+        let active = PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: String::from("prediction-canceled"),
+            title: String::from("Fixture prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: vec![PredictionOutcome {
+                id: String::from("a"),
+                title: String::from("Yes"),
+                total_points: 100,
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision {
+                choice: Some(0),
+                outcome_id: String::from("a"),
+                amount: 100,
+            },
+            bet_placed: true,
+            bet_confirmed: true,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        state.predictions.insert(active.event_id.clone(), active);
+
+        let cancellation = tm_pubsub::parse_message(
+            r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-canceled\",\"status\":\"CANCELED\",\"outcomes\":[{\"id\":\"a\",\"state\":\"CANCELED\"}]}}}"}}"#,
+            &state.streamers,
+        )
+        .unwrap()
+        .unwrap();
+        let effects = state.apply_pubsub_event(&cancellation, ts(2));
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(state.completed_predictions.len(), 1);
+        assert_eq!(state.completed_predictions[0].result_type, "REFUND");
+        assert_eq!(
+            state.completed_predictions[0].result_string,
+            "REFUND, Refunded: +0"
+        );
+    }
+
+    #[test]
     fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
         let config = ConfigFile {
             streamers: vec![String::from("tester")],

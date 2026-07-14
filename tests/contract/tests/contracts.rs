@@ -255,14 +255,52 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     assert_eq!(winning_outcome_id.as_deref(), Some("a"));
 
     let partial_update = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"RESOLVED\",\"winning_outcome_id\":\"a\"}}}"}}"#;
-    let PubSubEvent::PredictionChannel { event, .. } =
-        tm_pubsub::parse_message(partial_update, &[streamer("123")])
-            .unwrap()
-            .unwrap()
+    let PubSubEvent::PredictionChannel {
+        event,
+        winning_outcome_id,
+        ..
+    } = tm_pubsub::parse_message(partial_update, &[streamer("123")])
+        .unwrap()
+        .unwrap()
     else {
         panic!("expected partial prediction update");
     };
     assert!(event.outcomes.is_empty());
+    assert_eq!(winning_outcome_id.as_deref(), Some("a"));
+
+    let resolved_without_winner = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"RESOLVED\"}}}"}}"#;
+    let PubSubEvent::PredictionChannel {
+        event,
+        winning_outcome_id,
+        ..
+    } = tm_pubsub::parse_message(resolved_without_winner, &[streamer("123")])
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected winner-less prediction update");
+    };
+    assert_eq!(event.status, "RESOLVED");
+    assert!(event.outcomes.is_empty());
+    assert_eq!(winning_outcome_id, None);
+
+    let canceled_partial_update = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"CANCELED\",\"created_at\":17,\"prediction_window_seconds\":-1,\"outcomes\":[{\"id\":\"a\",\"state\":\"CANCELED\"}]}}}"}}"#;
+    let PubSubEvent::PredictionChannel { event, .. } =
+        tm_pubsub::parse_message(canceled_partial_update, &[streamer("123")])
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected partial cancellation update");
+    };
+    assert_eq!(event.status, "CANCELED");
+    assert!(event.outcomes.is_empty());
+
+    let incomplete_created = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-created\",\"data\":{\"event\":{\"id\":\"event-2\",\"title\":\"Fixture\",\"status\":\"ACTIVE\",\"created_at\":\"2026-01-01T00:00:00Z\",\"prediction_window_seconds\":30,\"outcomes\":[{\"id\":\"a\",\"title\":\"Yes\",\"color\":\"blue\"},{\"id\":\"b\",\"title\":\"No\",\"color\":\"pink\"}]}}}"}}"#;
+    assert!(matches!(
+        tm_pubsub::parse_message(incomplete_created, &[streamer("123")]),
+        Err(tm_pubsub::PubSubError::Protocol(
+            "prediction outcome users are missing or invalid"
+        ))
+    ));
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.prediction_made.json"), &[]).unwrap(),

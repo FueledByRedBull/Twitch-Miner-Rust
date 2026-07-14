@@ -7,23 +7,25 @@ pub(crate) fn parse_prediction_event(
     raw_event: &Value,
     is_created: bool,
 ) -> Result<PredictionEvent, &'static str> {
-    let created_at = optional_timestamp(raw_event, "created_at")?
-        .or_else(|| is_created.then(OffsetDateTime::now_utc))
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    let raw_window =
-        optional_nonnegative_float(raw_event, "prediction_window_seconds")?.unwrap_or_default();
-    let outcomes = raw_event
-        .get("outcomes")
-        .map(|value| {
-            value
-                .as_array()
-                .ok_or("prediction event outcomes are invalid")?
-                .iter()
-                .map(parse_prediction_outcome)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let created_at = if is_created {
+        optional_timestamp(raw_event, "created_at")?
+            .ok_or("prediction event created_at is missing")?
+    } else {
+        optional_timestamp(raw_event, "created_at")
+            .ok()
+            .flatten()
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+    };
+    let raw_window = if is_created {
+        optional_nonnegative_float(raw_event, "prediction_window_seconds")?
+            .ok_or("prediction event window is missing")?
+    } else {
+        optional_nonnegative_float(raw_event, "prediction_window_seconds")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+    let outcomes = parse_prediction_outcomes(raw_event, is_created)?;
     if is_created && outcomes.len() < 2 {
         return Err("prediction event has fewer than two outcomes");
     }
@@ -37,12 +39,6 @@ pub(crate) fn parse_prediction_event(
             .map(str::trim)
             .unwrap_or_default()
     };
-    if is_created && raw_event.get("created_at").is_none() {
-        return Err("prediction event created_at is missing");
-    }
-    if is_created && raw_event.get("prediction_window_seconds").is_none() {
-        return Err("prediction event window is missing");
-    }
     let status =
         required_text(raw_event, "status", "prediction event status is missing")?.to_uppercase();
     if !matches!(
@@ -67,6 +63,33 @@ pub(crate) fn parse_prediction_event(
     };
     event.update_outcomes();
     Ok(event)
+}
+
+fn parse_prediction_outcomes(
+    raw_event: &Value,
+    is_created: bool,
+) -> Result<Vec<PredictionOutcome>, &'static str> {
+    let Some(raw_outcomes) = raw_event.get("outcomes") else {
+        return Ok(Vec::new());
+    };
+    let Some(raw_outcomes) = raw_outcomes.as_array() else {
+        return if is_created {
+            Err("prediction event outcomes are invalid")
+        } else {
+            Ok(Vec::new())
+        };
+    };
+    let parsed = raw_outcomes
+        .iter()
+        .map(parse_prediction_outcome)
+        .collect::<Result<Vec<_>, _>>();
+    if is_created {
+        parsed
+    } else {
+        // PubSub event-updated payloads are incremental. If Twitch omits any
+        // display or counter field, retain the runtime's last complete snapshot.
+        Ok(parsed.unwrap_or_default())
+    }
 }
 
 fn optional_timestamp(value: &Value, field: &str) -> Result<Option<OffsetDateTime>, &'static str> {

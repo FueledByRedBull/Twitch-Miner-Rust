@@ -254,11 +254,6 @@ fn parse_prediction_channel_event(
     )
     .map_err(PubSubError::Protocol)?;
     let winning_outcome_id = winning_outcome_id(raw_event);
-    if event.status == "RESOLVED" && winning_outcome_id.is_none() {
-        return Err(PubSubError::Protocol(
-            "resolved prediction has no winning outcome",
-        ));
-    }
     Ok(Some(PubSubEvent::PredictionChannel {
         kind: kind.clone(),
         event: Box::new(event),
