@@ -41,10 +41,15 @@ pub(crate) fn parse_prediction_event(
     };
     let status =
         required_text(raw_event, "status", "prediction event status is missing")?.to_uppercase();
-    if !matches!(
-        status.as_str(),
-        "ACTIVE" | "LOCKED" | "RESOLVED" | "CANCELED" | "CANCELLED"
-    ) {
+    // Creation remains strict. Updates are incremental and may introduce
+    // non-terminal states such as RESOLVE_PENDING; runtime settlement still
+    // accepts only the explicit terminal states.
+    if is_created
+        && !matches!(
+            status.as_str(),
+            "ACTIVE" | "LOCKED" | "RESOLVED" | "CANCELED" | "CANCELLED"
+        )
+    {
         return Err("prediction event status is unsupported");
     }
     let mut event = PredictionEvent {

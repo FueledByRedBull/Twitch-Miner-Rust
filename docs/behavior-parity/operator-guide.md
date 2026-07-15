@@ -21,6 +21,9 @@ If you want to watch logs in the foreground, run the command directly in the ter
   override can enable or disable it for one channel.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
+- A saved session starts reauthorization only after a definitive authentication
+  rejection. Transient network or Twitch server failures leave the saved
+  session untouched and fail startup for the service supervisor to retry.
 
 ## Docker Run
 
@@ -106,6 +109,9 @@ EventSub and PubSub are separate health entries. EventSub `unauthorized`,
 authorization or contract attention; `rate-limited`, `server-error`,
 `connection-reset`, and `timeout` are bounded recovery states. Presence entries
 whose source is `gql-polling` are intentionally covered by the fallback poller.
+One fallback cycle may query many streamers, but health counts that batch as a
+single success or failure so a brief shared network outage cannot exhaust the
+consecutive-failure threshold in one minute.
 
 PubSub `bad-auth` requires a fresh session. `listen-rejected` means one topic
 class was not accepted. `pong-timeout`, `connection-error`, `connection-closed`,

@@ -249,6 +249,13 @@ impl HealthTracker {
         self.lock_tasks().values().cloned().collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn task_consecutive_failures(&self, name: &str) -> Option<u32> {
+        self.lock_tasks()
+            .get(name)
+            .map(|task| task.consecutive_failures)
+    }
+
     fn counters_snapshot(&self) -> StatusCounters {
         self.counters
             .lock()

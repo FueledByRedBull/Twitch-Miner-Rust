@@ -283,6 +283,21 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     assert!(event.outcomes.is_empty());
     assert_eq!(winning_outcome_id, None);
 
+    for pending_status in ["RESOLVE_PENDING", "CANCEL_PENDING"] {
+        let pending_update = format!(
+            r#"{{"type":"MESSAGE","data":{{"topic":"predictions-channel-v1.123","message":"{{\"type\":\"event-updated\",\"data\":{{\"event\":{{\"id\":\"event-1\",\"status\":\"{pending_status}\"}}}}}}"}}}}"#
+        );
+        let PubSubEvent::PredictionChannel { event, .. } =
+            tm_pubsub::parse_message(&pending_update, &[streamer("123")])
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected pending prediction update");
+        };
+        assert_eq!(event.status, pending_status);
+        assert!(event.outcomes.is_empty());
+    }
+
     let canceled_partial_update = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"CANCELED\",\"created_at\":17,\"prediction_window_seconds\":-1,\"outcomes\":[{\"id\":\"a\",\"state\":\"CANCELED\"}]}}}"}}"#;
     let PubSubEvent::PredictionChannel { event, .. } =
         tm_pubsub::parse_message(canceled_partial_update, &[streamer("123")])

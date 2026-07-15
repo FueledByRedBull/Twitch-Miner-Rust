@@ -24,11 +24,17 @@
 - Validates viewer prediction IDs and result types, supports both observed
   prediction outcome counter shapes, and lets a late viewer result refine the
   final report without emitting a duplicate settlement notification.
+- Keeps PubSub prediction updates connected through Twitch's intermediate
+  `RESOLVE_PENDING` and `CANCEL_PENDING` states while restricting financial
+  settlement to explicit terminal states.
 - Restores Python-style timestamp/level/operation log lines and adds a bounded,
   privacy-aware shutdown report with session metadata, completed prediction
   details, outcomes/results, and per-streamer point history.
 - Adds task-aware runtime health checks, supervised task exit/panic handling,
   bounded reconnect backoff, and a privacy-safe support bundle.
+- Counts fallback-presence health once per polling cycle rather than once per
+  streamer, and starts device reauthorization only after a definitive saved-
+  session rejection instead of after transient network/server failures.
 - Keeps read-only canary mode free of directory/log writes and redacts IRC
   callback text plus local log paths when anonymized logging is enabled.
 - Treats Twitch's null available-drops channel/list as an empty result, matching

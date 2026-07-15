@@ -88,8 +88,11 @@ channel-point context, inventory, drop campaigns, contributions, and mutation
 status responses. Required identifiers, claim-safety fields, community-goal
 financial fields, list containers, and contribution items fail closed when
 missing or incompatible; optional per-edge Twitch data remains intentionally
-skippable. PubSub prediction events require IDs, recognized statuses, valid
-timestamps/windows, and at least two valid outcomes. Both observed
+skippable. PubSub prediction creation requires an ID, a recognized status,
+valid timestamps/windows, and at least two valid outcomes. Incremental updates
+require an ID and non-empty status but retain non-terminal states such as
+`RESOLVE_PENDING` and `CANCEL_PENDING`; only explicit terminal states can
+settle a bet. Both observed
 `total_users`/`total_points` and `users`/`channel_points` counter names are
 normalized; viewer results retain only a recognized result type and optional
 nonnegative `points_won`. Parsing errors retain only a fixed protocol class and

@@ -12,12 +12,12 @@ gap before each release.
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
 | Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed context and `RewardList` fixtures, startup streak reconciliation, five-minute private polling, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
 | Drops and moments | Parity | Inventory, campaign, claim-status, and PubSub fixtures. |
-| Predictions and betting strategies | Parity | Domain decision and runtime-effect tests. |
+| Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
 | EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and IRC tests. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
 | Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
-| Runtime supervision and health | Improved | Task-exit/panic supervision plus task-specific freshness/failure thresholds. |
+| Runtime supervision and health | Improved | Task-exit/panic supervision plus task-specific freshness/failure thresholds; batched presence polling records at most one task failure per cycle. |
 | Docker amd64, arm64, arm/v7 | Supported | Per-platform digest and post-manifest smoke tests in release CI. |
 | Automatic updater | Deliberately removed | Legacy `auto_update=true` is rejected; no dormant binary replacement code remains. |
 | Config mutation | Improved | Versioned preview, atomic write, and rollback backup. |

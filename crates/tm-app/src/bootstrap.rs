@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use tm_auth::{AuthSession, AuthSessionError, TwitchAuthClient};
+use tm_auth::{AuthClientError, AuthSession, AuthSessionError, TwitchAuthClient};
 use tm_config::{
     default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
     ConfigError, ConfigFile,
@@ -173,12 +173,15 @@ pub(crate) async fn load_or_login_session_with_auth_client(
                         tracing::debug!(username = %username, "loaded cookies from disk");
                         return Ok(session);
                     }
-                    Err(error) => {
+                    Err(error) if saved_session_requires_reauthorization(&error) => {
                         tracing::warn!(
                             username = %username,
                             %error,
                             "saved cookies are invalid; starting device login"
                         );
+                    }
+                    Err(error) => {
+                        return Err(error).context("validate saved Twitch session");
                     }
                 }
             } else {
@@ -234,6 +237,19 @@ pub(crate) async fn load_or_login_session_with_auth_client(
     Ok(session)
 }
 
+fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
+    matches!(
+        error,
+        AuthClientError::UnexpectedStatus { status, .. }
+            if matches!(
+                *status,
+                reqwest::StatusCode::BAD_REQUEST
+                    | reqwest::StatusCode::UNAUTHORIZED
+                    | reqwest::StatusCode::FORBIDDEN
+            )
+    ) || matches!(error, AuthClientError::LoginMismatch { .. })
+}
+
 pub(crate) fn normalized_username(username: &str) -> Result<String> {
     let username = username.trim().to_lowercase();
     if username.is_empty() || username == "your-twitch-username" {
@@ -274,7 +290,8 @@ pub(crate) fn should_fallback_to_user_config(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::build_http_client;
+    use super::{build_http_client, saved_session_requires_reauthorization};
+    use tm_auth::AuthClientError;
 
     #[test]
     fn build_http_client_rejects_insecure_tls_toggle() {
@@ -287,5 +304,30 @@ mod tests {
     #[test]
     fn build_http_client_accepts_secure_default() {
         assert!(build_http_client(false).is_ok());
+    }
+
+    #[test]
+    fn saved_session_reauthorization_requires_definitive_auth_rejection() {
+        assert!(saved_session_requires_reauthorization(
+            &AuthClientError::UnexpectedStatus {
+                status: reqwest::StatusCode::UNAUTHORIZED,
+                context: "validate login",
+            }
+        ));
+        assert!(saved_session_requires_reauthorization(
+            &AuthClientError::LoginMismatch {
+                expected_login: String::from("expected"),
+                actual_login: String::from("other"),
+            }
+        ));
+        assert!(!saved_session_requires_reauthorization(
+            &AuthClientError::UnexpectedStatus {
+                status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                context: "validate login",
+            }
+        ));
+        assert!(!saved_session_requires_reauthorization(
+            &AuthClientError::MissingUserId
+        ));
     }
 }

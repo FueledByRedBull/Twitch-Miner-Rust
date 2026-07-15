@@ -892,13 +892,27 @@ mod tests {
         };
         state.predictions.insert(active.event_id.clone(), active);
 
+        let pending_update = tm_pubsub::parse_message(
+            r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-partial-settlement\",\"status\":\"RESOLVE_PENDING\"}}}"}}"#,
+            &state.streamers,
+        )
+        .unwrap()
+        .unwrap();
+        let pending_application = state.apply_event_with_outcome(&pending_update, ts(2));
+        assert!(pending_application.changed);
+        assert!(pending_application.effects.is_empty());
+        assert_eq!(
+            state.predictions["prediction-partial-settlement"].status,
+            "RESOLVE_PENDING"
+        );
+
         let channel_update = tm_pubsub::parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-partial-settlement\",\"status\":\"RESOLVED\"}}}"}}"#,
             &state.streamers,
         )
         .unwrap()
         .unwrap();
-        let channel_application = state.apply_event_with_outcome(&channel_update, ts(2));
+        let channel_application = state.apply_event_with_outcome(&channel_update, ts(3));
         assert!(channel_application.changed);
         assert!(channel_application.effects.is_empty());
         assert!(state
@@ -911,7 +925,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let viewer_effects = state.apply_pubsub_event(&viewer_result, ts(3));
+        let viewer_effects = state.apply_pubsub_event(&viewer_result, ts(4));
 
         assert_eq!(viewer_effects.len(), 1);
         assert!(!state

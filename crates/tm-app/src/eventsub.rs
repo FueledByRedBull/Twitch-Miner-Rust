@@ -232,13 +232,13 @@ async fn poll_presence_fallback(
 ) {
     let mut queries = tokio::task::JoinSet::new();
     let mut next = 0_usize;
-    let mut failed = false;
+    let mut failure_class = None;
     while next < indices.len() || !queries.is_empty() {
         while next < indices.len() && queries.len() < PRESENCE_POLL_CONCURRENCY {
             let streamer_index = indices[next];
             next += 1;
             let Some(streamer) = tracked_streamers.get(streamer_index) else {
-                failed = true;
+                failure_class.get_or_insert("missing-streamer");
                 continue;
             };
             let channel_id = streamer.channel_id.clone();
@@ -270,7 +270,7 @@ async fn poll_presence_fallback(
                         if let Err(error) =
                             crate::pubsub::log_pubsub_event(runtime, observability, &event).await
                         {
-                            failed = true;
+                            failure_class.get_or_insert("log-handling");
                             tracing::warn!(
                                 task = "presence-poll",
                                 error_class = "log-handling",
@@ -282,7 +282,7 @@ async fn poll_presence_fallback(
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        failed = true;
+                        failure_class.get_or_insert("state-update");
                         tracing::warn!(
                             task = "presence-poll",
                             error_class = "state-update",
@@ -294,19 +294,17 @@ async fn poll_presence_fallback(
                 }
             }
             Ok((streamer_index, _, Err(error))) => {
-                failed = true;
                 let error_class = classify_presence_poll_error(error.failure_class());
+                failure_class.get_or_insert(error_class);
                 tracing::warn!(
                     task = "presence-poll",
                     error_class,
                     streamer_index,
                     "presence polling request failed"
                 );
-                health.failure("presence-poll", error_class);
             }
             Err(error) => {
-                failed = true;
-                health.failure("presence-poll", "poll-task");
+                failure_class.get_or_insert("poll-task");
                 tracing::warn!(
                     task = "presence-poll",
                     error_class = "poll-task",
@@ -316,8 +314,9 @@ async fn poll_presence_fallback(
             }
         }
     }
-    if !failed {
-        health.success("presence-poll");
+    match failure_class {
+        Some(error_class) => health.failure("presence-poll", error_class),
+        None => health.success("presence-poll"),
     }
 }
 
@@ -611,6 +610,65 @@ mod tests {
 
         assert!(runtime.state_snapshot().await?.streamers[0].is_online);
         server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn presence_fallback_counts_one_failed_cycle_not_each_streamer() -> anyhow::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let server: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(error) => return Err(error.into()),
+                };
+                read_http_request(&mut stream).await?;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await?;
+            }
+        });
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()?,
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: format!("http://{address}"),
+                gql_url: format!("http://{address}/gql"),
+            },
+        ));
+        let tracked_streamers = (0..9)
+            .map(|index| Streamer {
+                username: format!("streamer-{index}"),
+                channel_id: format!("channel-{index}"),
+                ..Streamer::default()
+            })
+            .collect::<Vec<_>>();
+        let runtime = tm_runtime::spawn_runtime_state(tm_runtime::RuntimeState::from_targets(
+            &tm_config::ConfigFile::default(),
+            &[],
+            tm_domain::OffsetDateTime::UNIX_EPOCH,
+        ));
+        let health = HealthTracker::default();
+        health.register("presence-poll", Duration::from_secs(60));
+
+        poll_presence_fallback(
+            &runtime,
+            &twitch,
+            &tracked_streamers,
+            &(0..tracked_streamers.len()).collect::<Vec<_>>(),
+            &test_observability()?,
+            &health,
+        )
+        .await;
+
+        assert_eq!(health.task_consecutive_failures("presence-poll"), Some(1));
+        server.abort();
         Ok(())
     }
 }
