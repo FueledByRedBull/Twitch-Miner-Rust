@@ -6,10 +6,7 @@ use tm_domain::{PredictionDecision, Streamer};
 use tm_observability::{event_from_bet_result, Event as DiscordEvent};
 use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
-use crate::context::{
-    apply_runtime_context, contribute_streamer_community_goals, fetch_streamer_context,
-    refresh_streamer_context_without_goal_effects,
-};
+use crate::context::{contribute_streamer_community_goals, refresh_streamer_context};
 use crate::effects::runtime_streamer_by_channel_id;
 use crate::observability::AppObservability;
 use crate::prediction::prediction_wait_duration;
@@ -150,8 +147,6 @@ pub(crate) async fn handle_claim_bonus_effect(
         tracing::info!(operation = "claim_bonus", "{message}");
         observability.spawn_event(DiscordEvent::BonusClaim, message);
     }
-    let context = fetch_streamer_context(twitch, &streamer).await?;
-    let _ = apply_runtime_context(runtime, &streamer, context).await?;
     Ok(())
 }
 
@@ -208,15 +203,25 @@ pub(crate) async fn handle_community_goal_effect(
         return Ok(());
     };
     if contribute_streamer_community_goals(twitch, &streamer).await? {
-        refresh_streamer_context_without_goal_effects(
-            runtime,
-            twitch,
-            &streamer,
-            Some(persistent_user_id),
-            observability,
-            health,
-        )
-        .await?;
+        let effects = refresh_streamer_context(runtime, twitch, &streamer).await?;
+        for effect in effects {
+            if let tm_runtime::RuntimeEffect::ClaimBonus {
+                channel_id,
+                claim_id,
+            } = effect
+            {
+                handle_claim_bonus_effect(
+                    runtime,
+                    twitch,
+                    persistent_user_id,
+                    &channel_id,
+                    &claim_id,
+                    observability,
+                    health,
+                )
+                .await?;
+            }
+        }
     }
     Ok(())
 }

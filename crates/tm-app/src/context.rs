@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tm_domain::Streamer;
-use tm_observability::Event as DiscordEvent;
 use tm_twitch::TwitchClient;
 
 use crate::observability::AppObservability;
 use crate::runtime_effects::execute_runtime_effects;
 use crate::status::HealthTracker;
+use crate::utilities::time_now;
 use crate::{CONTEXT_REFRESH_CONCURRENCY, PENDING_CLAIMS_INTERVAL};
 
 pub(crate) fn apply_context_to_streamer(
@@ -168,15 +168,7 @@ pub(crate) async fn refresh_snapshot_streamers(
         let health = health.clone();
         refreshes.spawn(async move {
             let username = streamer.username.clone();
-            let result = match refresh_streamer_context(
-                &runtime,
-                twitch.as_ref(),
-                &streamer,
-                Some(&persistent_user_id),
-                &observability,
-                &health,
-            )
-            .await
+            let result = match refresh_streamer_context(&runtime, twitch.as_ref(), &streamer).await
             {
                 Ok(effects) => {
                     execute_runtime_effects(
@@ -220,45 +212,24 @@ pub(crate) async fn refresh_streamer_context(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
     streamer: &Streamer,
-    persistent_user_id: Option<&str>,
-    observability: &AppObservability,
-    health: &HealthTracker,
 ) -> Result<Vec<tm_runtime::RuntimeEffect>> {
-    let mut context = fetch_streamer_context(twitch, streamer).await?;
-    if let Some(claim_id) = context.claim_id.as_deref() {
-        twitch
-            .claim_bonus(&streamer.channel_id, claim_id, persistent_user_id)
-            .await
-            .with_context(|| format!("claim refreshed bonus for {}", streamer.username))?;
-        health.record_claim();
-        if observability.show_claimed_bonus {
-            let message = observability.bonus_claim_message(streamer, false);
-            tracing::info!(operation = "claim_bonus", "{message}");
-            observability.spawn_event(DiscordEvent::BonusClaim, message);
-        }
-        context = fetch_streamer_context(twitch, streamer).await?;
+    let context = fetch_streamer_context(twitch, streamer).await?;
+    let claim_id = context.claim_id.clone();
+    let mut effects = apply_runtime_context(runtime, streamer, context).await?;
+    if let Some(claim_id) = claim_id {
+        effects.extend(
+            runtime
+                .apply_event(
+                    tm_runtime::MinerEvent::ClaimAvailable {
+                        channel_id: streamer.channel_id.clone(),
+                        claim_id,
+                    },
+                    time_now(),
+                )
+                .await?,
+        );
     }
-    apply_runtime_context(runtime, streamer, context).await
-}
-
-pub(crate) async fn refresh_streamer_context_without_goal_effects(
-    runtime: &tm_runtime::RuntimeHandle,
-    twitch: &TwitchClient,
-    streamer: &Streamer,
-    persistent_user_id: Option<&str>,
-    observability: &AppObservability,
-    health: &HealthTracker,
-) -> Result<()> {
-    let _ = refresh_streamer_context(
-        runtime,
-        twitch,
-        streamer,
-        persistent_user_id,
-        observability,
-        health,
-    )
-    .await?;
-    Ok(())
+    Ok(effects)
 }
 
 pub(crate) async fn fetch_streamer_context(

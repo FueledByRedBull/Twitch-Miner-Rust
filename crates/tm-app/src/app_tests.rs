@@ -993,7 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_snapshot_streamers_updates_runtime_context() {
-        let (endpoints, requests, server) = spawn_twitch_server(4);
+        let (endpoints, requests, server) = spawn_twitch_server(3);
         let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -1034,6 +1034,73 @@ mod tests {
             .unwrap()
             .iter()
             .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+    }
+
+    #[tokio::test]
+    async fn refresh_snapshot_streamers_deduplicates_pubsub_and_context_claim_ids() {
+        let (endpoints, requests, server) = spawn_twitch_server(4);
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        ));
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![String::from("alice")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            ..Streamer::default()
+        }];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let health = HealthTracker::default();
+        let observability = test_observability();
+
+        let pubsub_effects = runtime
+            .apply_event(
+                tm_runtime::MinerEvent::ClaimAvailable {
+                    channel_id: String::from("100"),
+                    claim_id: String::from("claim-1"),
+                },
+                ts(1),
+            )
+            .await
+            .unwrap();
+        crate::runtime_effects::execute_runtime_effects(
+            &runtime,
+            &twitch,
+            "user-1",
+            pubsub_effects,
+            &observability,
+            health.clone(),
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            refresh_snapshot_streamers(&runtime, &twitch, "user-1", &observability, &health)
+                .await
+                .unwrap();
+        }
+
+        server.join().unwrap();
+        let channel_points = runtime.state_snapshot().await.unwrap().streamers[0].channel_points;
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#))
+                .count(),
+            1
+        );
+        assert_eq!(channel_points, 1234);
     }
 
     #[tokio::test]

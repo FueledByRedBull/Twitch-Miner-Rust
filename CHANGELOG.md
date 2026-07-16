@@ -27,6 +27,10 @@
 - Keeps PubSub prediction updates connected through Twitch's intermediate
   `RESOLVE_PENDING` and `CANCEL_PENDING` states while restricting financial
   settlement to explicit terminal states.
+- Routes periodic bonus discovery through the runtime's bounded claim-ID
+  deduplication, preventing a context refresh and PubSub from submitting the
+  same claim twice, and avoids replacing a fresh reward balance with a stale
+  post-claim context response.
 - Restores Python-style timestamp/level/operation log lines and adds a bounded,
   privacy-aware shutdown report with session metadata, completed prediction
   details, outcomes/results, and per-streamer point history.

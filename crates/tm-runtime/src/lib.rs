@@ -13,6 +13,7 @@ pub use actor::{RuntimeHandle, RuntimeMetrics, RuntimeMetricsSnapshot};
 pub use effect::RuntimeEffect;
 pub use error::{Result, RuntimeError};
 pub use summary::{apply_pubsub_gain, build_session_summary, update_history};
+pub use tm_events::MinerEvent;
 pub use types::{
     ContextUpdate, EventApplication, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary,
     StreamUpdate, StreamerSummary,
