@@ -8,7 +8,8 @@ This project keeps the behavior that matters in day-to-day use:
 - automatic bonus chest claims
 - minute-watched farming and streak handling
 - prediction betting with configurable strategies and delays
-- drops, raid observation, chat-presence, Discord notifications, and privacy-aware logging
+- campaign-aware drop-priority watching and claims, raid observation,
+  chat-presence, Discord notifications, and privacy-aware logging
 - Docker-friendly runtime layout and multi-arch delivery paths
 
 It is not a toy rewrite. The workspace is split into focused crates, the Twitch parsers are fixture-backed, and the runtime is organized around a single-writer state model instead of a pile of ad-hoc side effects.

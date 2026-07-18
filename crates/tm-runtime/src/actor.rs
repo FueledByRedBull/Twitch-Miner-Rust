@@ -105,6 +105,10 @@ enum RuntimeCommand {
         update: StreamUpdate,
         now: OffsetDateTime,
     },
+    SetDropCampaignEligibility {
+        channel_id: String,
+        eligible: bool,
+    },
     SetPresence {
         channel_id: String,
         online: bool,
@@ -199,6 +203,13 @@ pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                 }
                 RuntimeCommand::ApplyStreamUpdate { update, now } => {
                     state.apply_stream_update(&update, now);
+                    notify_state_change(&state_revision_tx, &mut state_revision);
+                }
+                RuntimeCommand::SetDropCampaignEligibility {
+                    channel_id,
+                    eligible,
+                } => {
+                    state.set_drop_campaign_eligibility(&channel_id, eligible);
                     notify_state_change(&state_revision_tx, &mut state_revision);
                 }
                 RuntimeCommand::SetPresence {
@@ -452,6 +463,22 @@ impl RuntimeHandle {
             .await
             .map_err(|_| RuntimeError::SendFailed {
                 command: "SetPresence",
+            })
+    }
+
+    pub async fn set_drop_campaign_eligibility(
+        &self,
+        channel_id: impl Into<String>,
+        eligible: bool,
+    ) -> Result<()> {
+        self.sender
+            .send(RuntimeCommand::SetDropCampaignEligibility {
+                channel_id: channel_id.into(),
+                eligible,
+            })
+            .await
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "SetDropCampaignEligibility",
             })
     }
 

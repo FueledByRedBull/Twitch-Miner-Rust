@@ -105,7 +105,10 @@ omit `status` when Twitch returns a balance-only
 success envelope; an explicit non-empty error or an unknown status still fails
 closed. `DropsHighlightService_AvailableDrops` treats a null channel or null
 campaign list as an empty result, matching the Go reference, while every entry
-in a present list still requires a non-empty campaign ID. The older raw JSON
-methods remain compatibility facades; runtime and
+in a present list still requires a non-empty campaign ID. Its typed result also
+gates `DROPS` watch priority: unknown and empty results are not promoted, a
+broadcast/game change invalidates the previous result, and later configured
+priorities continue filling watcher capacity. The older raw JSON methods remain
+compatibility facades; runtime and
 canary code use the explicit typed variants. Neither path logs or exposes the
 retained payload.

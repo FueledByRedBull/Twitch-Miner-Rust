@@ -160,7 +160,9 @@ pub(crate) async fn refresh_watch_selection_metadata(
                 .is_none_or(|stream| stream.update_required_at(now))
     }) {
         while refreshes.len() >= WATCH_SELECTION_REFRESH_CONCURRENCY {
-            let _ = refreshes.join_next().await;
+            if let Some(result) = refreshes.join_next().await {
+                log_watch_selection_refresh_result(result);
+            }
         }
 
         let runtime = runtime.clone();
@@ -174,6 +176,7 @@ pub(crate) async fn refresh_watch_selection_metadata(
                 .await
                 .with_context(|| format!("refresh stream info for {}", streamer.username))?;
             apply_live_stream_update(&runtime, &streamer, &info, &observability, now).await?;
+            refresh_drop_campaign_eligibility(&runtime, &twitch, &streamer, &info).await?;
             log_stream_presence_changes(
                 &observability,
                 &streamer,
@@ -185,13 +188,56 @@ pub(crate) async fn refresh_watch_selection_metadata(
     }
 
     while let Some(result) = refreshes.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "watch selection refresh failed"),
-            Err(error) => tracing::warn!(%error, "watch selection refresh task failed"),
-        }
+        log_watch_selection_refresh_result(result);
     }
 
+    Ok(())
+}
+
+fn log_watch_selection_refresh_result(
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "watch selection refresh failed"),
+        Err(error) => tracing::warn!(%error, "watch selection refresh task failed"),
+    }
+}
+
+async fn refresh_drop_campaign_eligibility(
+    runtime: &tm_runtime::RuntimeHandle,
+    twitch: &TwitchClient,
+    streamer: &Streamer,
+    info: &tm_twitch::StreamInfo,
+) -> Result<()> {
+    if !streamer.settings.claim_drops {
+        return Ok(());
+    }
+
+    let has_game = !info.game_name.trim().is_empty()
+        && info
+            .game_id
+            .as_deref()
+            .is_some_and(|game_id| !game_id.trim().is_empty());
+    if !has_game {
+        runtime
+            .set_drop_campaign_eligibility(streamer.channel_id.clone(), false)
+            .await?;
+        return Ok(());
+    }
+
+    let campaign_ids = twitch
+        .fetch_available_drop_campaigns_typed(&streamer.channel_id)
+        .await
+        .with_context(|| {
+            format!(
+                "refresh drop campaign eligibility for {}",
+                streamer.username
+            )
+        })?;
+    runtime
+        .set_drop_campaign_eligibility(streamer.channel_id.clone(), !campaign_ids.is_empty())
+        .await?;
     Ok(())
 }
 

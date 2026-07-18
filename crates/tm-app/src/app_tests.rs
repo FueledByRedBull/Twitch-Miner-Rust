@@ -1236,8 +1236,10 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn refresh_watch_selection_metadata_updates_candidate_choice() {
-        let (endpoints, requests, server) =
-            spawn_json_response_server(vec![fixture_json("twitch.stream_info.json")]);
+        let (endpoints, requests, server) = spawn_json_response_server(vec![
+            fixture_json("twitch.stream_info.json"),
+            fixture_json("twitch.available_drop_campaigns.json"),
+        ]);
         let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -1267,6 +1269,10 @@ mod tests {
                 is_online: true,
                 presence_known: true,
                 online_at: Some(ts(0)),
+                settings: tm_domain::StreamerSettings {
+                    claim_drops: true,
+                    ..tm_domain::StreamerSettings::default()
+                },
                 stream: Some(tm_domain::Stream {
                     game: Some(Game::from_name("Chess")),
                     last_update: Some(ts(0)),
@@ -1324,6 +1330,16 @@ mod tests {
         .unwrap();
 
         let snapshot = runtime.state_snapshot().await.unwrap();
+        let request_count_after_refresh = requests.lock().unwrap().len();
+        refresh_watch_selection_metadata(
+            &runtime,
+            &twitch,
+            &snapshot.streamers,
+            &test_observability(),
+            now,
+        )
+        .await
+        .unwrap();
         server.join().unwrap();
         assert_eq!(
             snapshot.watch_target_logins(now),
@@ -1337,12 +1353,97 @@ mod tests {
                 .and_then(|game| game.display_name.clone()),
             Some(String::from("Game Name"))
         );
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .and_then(|stream| stream.drop_campaign_eligible),
+            Some(true)
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), request_count_after_refresh);
         assert!(requests
-            .lock()
-            .unwrap()
             .iter()
             .any(|request| request
                 .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
+        assert!(requests
+            .iter()
+            .any(|request| request
+                .contains(r#""operationName":"DropsHighlightService_AvailableDrops""#)));
+    }
+
+    #[tokio::test]
+    async fn campaign_refresh_failure_preserves_still_applicable_known_result() {
+        let (endpoints, _requests, server) = spawn_json_response_server(vec![
+            fixture_json("twitch.stream_info.json"),
+            String::from(r#"{"errors":[{"message":"temporary"}]}"#),
+        ]);
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        ));
+        let now = ts(300);
+        let state = tm_runtime::RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![tm_domain::WatchPriority::Drops],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: String::from("alice"),
+                channel_id: String::from("100"),
+                is_online: true,
+                presence_known: true,
+                online_at: Some(ts(0)),
+                settings: tm_domain::StreamerSettings {
+                    claim_drops: true,
+                    ..tm_domain::StreamerSettings::default()
+                },
+                stream: Some(tm_domain::Stream {
+                    broadcast_id: String::from("stream-1"),
+                    game: Some(Game::from_name("Game Name")),
+                    drop_campaign_eligible: Some(true),
+                    last_update: Some(ts(0)),
+                    ..tm_domain::Stream::default()
+                }),
+                ..Streamer::default()
+            }],
+            initial_points: std::collections::HashMap::new(),
+            predictions: std::collections::HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
+        };
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
+
+        refresh_watch_selection_metadata(
+            &runtime,
+            &twitch,
+            &[streamer],
+            &test_observability(),
+            now,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .and_then(|stream| stream.drop_campaign_eligible),
+            Some(true)
+        );
+        assert_eq!(
+            snapshot.watch_target_logins(now),
+            vec![String::from("alice")]
+        );
     }
 
     #[tokio::test]

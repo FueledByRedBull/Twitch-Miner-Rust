@@ -43,6 +43,10 @@
   callback text plus local log paths when anonymized logging is enabled.
 - Treats Twitch's null available-drops channel/list as an empty result, matching
   the Go miner while retaining strict campaign IDs for present entries.
+- Restores the Python parent's campaign-aware `DROPS` watch priority: only a
+  live, drop-enabled channel with a validated active campaign is promoted,
+  campaign state is invalidated on broadcast/game changes, and later configured
+  priorities safely fill unused watch slots.
 - Removes the dormant automatic updater and migrates/rejects legacy
   `auto_update` configuration safely.
 - Adds atomic, backed-up config and cookie migration with a `--check-config`

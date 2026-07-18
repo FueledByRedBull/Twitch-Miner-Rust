@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use time::OffsetDateTime;
 
-use crate::types::{IrcMode, Streamer};
+use crate::types::{IrcMode, Stream, Streamer};
 
 const STREAK_PRIORITY_MINUTES_BASE: f64 = 7.0;
 const STREAK_PRIORITY_MINUTES_EXTENDED: f64 = 20.0;
@@ -278,7 +278,14 @@ pub fn pick_streamers_to_watch(
             WatchPriority::Drops => candidates
                 .iter()
                 .copied()
-                .filter(|candidate| streamers[candidate.idx].settings.claim_drops)
+                .filter(|candidate| {
+                    let streamer = &streamers[candidate.idx];
+                    streamer.settings.claim_drops
+                        && streamer
+                            .stream
+                            .as_ref()
+                            .is_some_and(Stream::has_active_drop_campaign)
+                })
                 .collect(),
             WatchPriority::Subscribed => candidates
                 .iter()
@@ -497,6 +504,41 @@ mod tests {
         assert!(!should_join_chat(IrcMode::Online, false));
         assert!(!should_join_chat(IrcMode::Offline, true));
         assert!(should_join_chat(IrcMode::Offline, false));
+    }
+
+    #[test]
+    fn drops_priority_requires_verified_active_campaign_and_falls_through() {
+        let online_at = datetime!(2026-03-27 05:58 UTC);
+        let make_streamer = |username: &str, eligible: Option<bool>| Streamer {
+            username: username.to_string(),
+            is_online: true,
+            online_at: Some(online_at),
+            settings: StreamerSettings {
+                claim_drops: true,
+                ..StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                drop_campaign_eligible: eligible,
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        };
+        let streamers = vec![
+            make_streamer("unknown", None),
+            make_streamer("inactive", Some(false)),
+            make_streamer("eligible", Some(true)),
+        ];
+
+        let selected = pick_streamers_to_watch(
+            &streamers,
+            &[WatchPriority::Drops, WatchPriority::Order],
+            &[],
+            &[],
+            None,
+            datetime!(2026-03-27 06:00 UTC),
+        );
+
+        assert_eq!(selected, vec![2, 0]);
     }
 
     #[test]

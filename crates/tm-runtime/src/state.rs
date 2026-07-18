@@ -475,12 +475,16 @@ impl RuntimeState {
         };
         let stream = streamer.stream.get_or_insert_with(Stream::default);
         let broadcast_changed = !stream.broadcast_id.is_empty() && stream.broadcast_id != update.id;
+        let game_changed = stream.game_name() != update.game_name.trim();
         if stream.stream_up_at.is_none() || broadcast_changed {
             stream.stream_up_at = Some(now);
         }
         if broadcast_changed {
             stream.reset_watch_progress();
             stream.watch_streak_missing = true;
+        }
+        if broadcast_changed || game_changed {
+            stream.drop_campaign_eligible = None;
         }
         stream.update(
             &update.id,
@@ -495,6 +499,16 @@ impl RuntimeState {
             tm_twitch_drop_id(),
             now,
         );
+    }
+
+    pub fn set_drop_campaign_eligibility(&mut self, channel_id: &str, eligible: bool) {
+        let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+            return;
+        };
+        streamer
+            .stream
+            .get_or_insert_with(Stream::default)
+            .drop_campaign_eligible = Some(eligible);
     }
 
     pub fn mark_minute_watched(&mut self, channel_id: &str, now: OffsetDateTime) {

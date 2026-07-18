@@ -199,6 +199,8 @@ pub struct Stream {
     pub title: String,
     pub game: Option<Game>,
     pub drops_tags: bool,
+    #[serde(skip)]
+    pub drop_campaign_eligible: Option<bool>,
     pub viewers_count: u32,
     pub payload: Vec<serde_json::Value>,
     pub watch_streak_missing: bool,
@@ -215,6 +217,7 @@ impl Default for Stream {
             title: String::new(),
             game: None,
             drops_tags: false,
+            drop_campaign_eligible: None,
             viewers_count: 0,
             payload: Vec::new(),
             watch_streak_missing: true,
@@ -266,6 +269,11 @@ impl Stream {
     pub fn reset_watch_progress(&mut self) {
         self.minute_watched = 0.0;
         self.last_minute_update = None;
+    }
+
+    #[must_use]
+    pub const fn has_active_drop_campaign(&self) -> bool {
+        matches!(self.drop_campaign_eligible, Some(true))
     }
 
     #[must_use]

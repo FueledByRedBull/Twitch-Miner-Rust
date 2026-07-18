@@ -399,6 +399,73 @@ mod tests {
     }
 
     #[test]
+    fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
+        let mut state = RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![WatchPriority::Drops],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: "tester".into(),
+                channel_id: "123".into(),
+                stream: Some(Stream {
+                    broadcast_id: "broadcast".into(),
+                    game: Some(tm_domain::Game::from_name("Game")),
+                    drop_campaign_eligible: Some(true),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            }],
+            initial_points: HashMap::new(),
+            predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
+        };
+        let update = StreamUpdate {
+            channel_id: "123".into(),
+            id: "broadcast".into(),
+            title: "Title".into(),
+            game_name: "Game".into(),
+            game_id: Some("game-1".into()),
+            tags: Vec::new(),
+            viewers_count: 42,
+        };
+
+        state.apply_stream_update(&update, ts(120));
+        assert_eq!(
+            state.streamers[0]
+                .stream
+                .as_ref()
+                .unwrap()
+                .drop_campaign_eligible,
+            Some(true)
+        );
+
+        let mut changed = update;
+        changed.game_name = "Different Game".into();
+        state.apply_stream_update(&changed, ts(240));
+        assert_eq!(
+            state.streamers[0]
+                .stream
+                .as_ref()
+                .unwrap()
+                .drop_campaign_eligible,
+            None
+        );
+
+        state.set_drop_campaign_eligibility("123", false);
+        assert_eq!(
+            state.streamers[0]
+                .stream
+                .as_ref()
+                .unwrap()
+                .drop_campaign_eligible,
+            Some(false)
+        );
+    }
+
+    #[test]
     fn context_update_emits_goal_contribution_effect_for_active_goals() {
         let mut state = RuntimeState {
             started_at: ts(0),

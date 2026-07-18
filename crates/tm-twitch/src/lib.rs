@@ -1074,6 +1074,9 @@ mod tests {
             serde_json::json!({
                 "data": { "channel": { "viewerDropCampaigns": null } }
             }),
+            serde_json::json!({
+                "data": { "channel": { "viewerDropCampaigns": [] } }
+            }),
         ] {
             let response: types::GqlResponse<types::AvailableDropsData> =
                 serde_json::from_value(no_campaigns).unwrap();
