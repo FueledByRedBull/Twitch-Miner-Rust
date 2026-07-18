@@ -75,6 +75,11 @@ if ($deploymentHelper -notmatch 'Test-ImageConfig \$CandidateImage \$true' -or
     $deploymentHelper -notmatch 'Test-ImageConfig \$RollbackImage \$false') {
     throw 'Guarded deployment helper must preserve candidate JSON and rollback-compatible config checks.'
 }
+if ($deploymentHelper -notmatch 'started_at_unix -ge \$containerStarted' -or
+    $deploymentHelper -notmatch 'active_subscriptions -eq \$eventSub\.planned_subscriptions' -or
+    $deploymentHelper -notmatch '\$acknowledgedTopics -eq \$pubSub\.total_topics') {
+    throw 'Guarded deployment must reject stale status and incomplete transport recovery.'
+}
 
 $candidateDigest = 'a' * 64
 $rollbackDigest = 'b' * 64

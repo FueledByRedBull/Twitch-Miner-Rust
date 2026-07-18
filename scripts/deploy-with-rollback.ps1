@@ -52,7 +52,87 @@ if ($composeText -notmatch "(?m)^\s+$([regex]::Escape($Service)):\s*$") {
     throw "Compose service not found: $Service"
 }
 
+function Test-RuntimeStatusReady(
+    [object]$Status,
+    [string]$Revision,
+    [long]$ContainerStarted,
+    [long]$Now
+) {
+    $tasks = @($Status.tasks)
+    $eventSub = $Status.eventsub
+    $pubSub = $Status.pubsub
+    $pubSubCapabilities = @($pubSub.capabilities)
+    $acknowledgedTopics = ($pubSubCapabilities |
+            Measure-Object -Property acknowledged_topics -Sum).Sum
+    if ($null -eq $acknowledgedTopics) {
+        $acknowledgedTopics = 0
+    }
+
+    return $Status.state -eq 'ready' -and
+        $Status.revision -eq $Revision -and
+        $Status.started_at_unix -ge $ContainerStarted -and
+        $Status.heartbeat_at_unix -ge $Status.started_at_unix -and
+        $Status.heartbeat_at_unix -le ($Now + 5) -and
+        ($Now - $Status.heartbeat_at_unix) -le 120 -and
+        $tasks.Count -gt 0 -and
+        @($tasks | Where-Object {
+                $_.consecutive_failures -ne 0 -or
+                $null -ne $_.last_error_class
+            }).Count -eq 0 -and
+        $null -ne $eventSub -and
+        $eventSub.active_subscriptions -eq $eventSub.planned_subscriptions -and
+        $eventSub.failed_subscriptions -eq 0 -and
+        $null -ne $pubSub -and
+        $acknowledgedTopics -eq $pubSub.total_topics -and
+        @($pubSubCapabilities | Where-Object {
+                $null -ne $_.failure_class
+            }).Count -eq 0 -and
+        $null -eq $Status.counters.last_error_class
+}
+
 if ($ValidateOnly) {
+    $validationRevision = 'c' * 40
+    $readyStatus = [pscustomobject]@{
+        state = 'ready'
+        revision = $validationRevision
+        started_at_unix = 101
+        heartbeat_at_unix = 120
+        tasks = @([pscustomobject]@{
+                consecutive_failures = 0
+                last_error_class = $null
+            })
+        eventsub = [pscustomobject]@{
+            active_subscriptions = 1
+            planned_subscriptions = 1
+            failed_subscriptions = 0
+        }
+        pubsub = [pscustomobject]@{
+            total_topics = 1
+            capabilities = @([pscustomobject]@{
+                    acknowledged_topics = 1
+                    failure_class = $null
+                })
+        }
+        counters = [pscustomobject]@{ last_error_class = $null }
+    }
+    if (-not (Test-RuntimeStatusReady $readyStatus $validationRevision 100 120)) {
+        throw 'Fresh complete deployment status validation failed.'
+    }
+    $staleStatus = $readyStatus | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $staleStatus.started_at_unix = 99
+    if (Test-RuntimeStatusReady $staleStatus $validationRevision 100 120) {
+        throw 'Stale deployment status was accepted.'
+    }
+    $staleHeartbeat = $readyStatus | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $staleHeartbeat.heartbeat_at_unix = -1
+    if (Test-RuntimeStatusReady $staleHeartbeat $validationRevision 100 120) {
+        throw 'Stale deployment heartbeat was accepted.'
+    }
+    $incompleteStatus = $readyStatus | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $incompleteStatus.pubsub.capabilities[0].acknowledged_topics = 0
+    if (Test-RuntimeStatusReady $incompleteStatus $validationRevision 100 120) {
+        throw 'Incomplete transport status was accepted.'
+    }
     Write-Output 'deploy-with-rollback-validation-ok'
     return
 }
@@ -122,22 +202,36 @@ function Test-DeployedService([string]$Revision, [string]$Label) {
     do {
         $containerId = (& docker compose -f $resolvedCompose ps -q $Service 2>&1) -join "`n"
         if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($containerId)) {
-            $state = (& docker inspect --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.RestartCount}}' $containerId.Trim() 2>&1) -join "`n"
+            $state = (& docker inspect --format '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.RestartCount}}|{{.State.StartedAt}}' $containerId.Trim() 2>&1) -join "`n"
             if ($LASTEXITCODE -eq 0) {
                 $stateParts = $state.Trim().Split('|')
                 $restartCount = 1
-                if ($stateParts.Count -eq 3) {
+                if ($stateParts.Count -eq 4) {
                     [void][int]::TryParse($stateParts[2], [ref]$restartCount)
                 }
                 if ($restartCount -ne 0) {
                     throw "$Label restarted before becoming healthy."
                 }
-                if ($stateParts.Count -eq 3 -and $stateParts[0] -eq 'running') {
+                if ($stateParts.Count -eq 4 -and $stateParts[0] -eq 'running') {
                     $version = (& docker compose -f $resolvedCompose exec -T $Service /twitch-miner --version 2>&1) -join "`n"
                     $versionReady = $LASTEXITCODE -eq 0 -and $version -match [regex]::Escape($Revision)
                     & docker compose -f $resolvedCompose exec -T $Service /twitch-miner --health *> $null
                     $healthReady = $LASTEXITCODE -eq 0
-                    if ($versionReady -and $healthReady -and $stateParts[1] -eq 'healthy') {
+                    $statusText = (& docker compose -f $resolvedCompose exec -T $Service /twitch-miner --status --json 2>&1) -join "`n"
+                    $statusReady = $false
+                    if ($LASTEXITCODE -eq 0) {
+                        try {
+                            $status = $statusText | ConvertFrom-Json -ErrorAction Stop
+                            $containerStarted = [DateTimeOffset]::Parse($stateParts[3]).ToUnixTimeSeconds()
+                            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                            $statusReady = Test-RuntimeStatusReady `
+                                $status $Revision $containerStarted $now
+                        } catch {
+                            $statusReady = $false
+                        }
+                    }
+                    if ($versionReady -and $healthReady -and
+                        $stateParts[1] -eq 'healthy' -and $statusReady) {
                         return
                     }
                 }
@@ -146,7 +240,7 @@ function Test-DeployedService([string]$Revision, [string]$Label) {
         Start-Sleep -Seconds 5
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "$Label did not reach the expected revision and healthy state within $HealthTimeoutSeconds seconds."
+    throw "$Label did not reach the expected fresh revision, task, and transport state within $HealthTimeoutSeconds seconds."
 }
 
 function Assert-RunningRollbackImage {

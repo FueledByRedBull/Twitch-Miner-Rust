@@ -58,6 +58,9 @@
   manifest instead of rebuilding it with fresh attestations. Release promotion
   verifies all platform revisions and attestations and fails unless the release
   tag resolves to the exact tested digest.
+- Makes guarded deployment reject a healthy-looking stale status file from a
+  prior same-revision session; acceptance now requires the current container's
+  fresh session heartbeat plus complete task, EventSub, and PubSub recovery.
 - Adds the read-only Twitch canary, protocol inventory, digest-pinned
   deployment/rollback instructions, migration guide, issue template, and
   contributor review checklist.

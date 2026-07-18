@@ -35,8 +35,11 @@ digest and pins `cargo-chef` to an exact locked version;
 6. Set `TWITCH_MINER_IMAGE` to the exact `ghcr.io/...@sha256:<digest>` value
    and `TWITCH_MINER_DATA_DIR` to the existing data directory before an update.
 7. After deployment, verify `--version`, `--health`, container health, and a
-   normal `SIGTERM` restart. Keep the previous digest until the new deployment
-   has remained healthy through its monitoring window.
+   normal `SIGTERM` restart. Require the status session timestamp to belong to
+   the current container start and wait for all runtime tasks plus EventSub and
+   PubSub capabilities to recover; Docker health by itself can precede complete
+   transport setup. Keep the previous digest until the new deployment has
+   remained healthy through its monitoring window.
 
 If the previous image bytes are unavailable, rebuild the known-good source
 revision into a new, explicitly named rollback image. The helper never pushes
