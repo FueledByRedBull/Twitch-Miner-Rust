@@ -54,6 +54,10 @@
 - Adds build provenance, release-digest smoke tests, SBOM/provenance, pinned
   Actions, dependency/license/secret checks, coverage, and bounded parser
   fuzz-regression tests.
+- Makes signed `v*` tags promote the already-built and canaried commit-SHA
+  manifest instead of rebuilding it with fresh attestations. Release promotion
+  verifies all platform revisions and attestations and fails unless the release
+  tag resolves to the exact tested digest.
 - Adds the read-only Twitch canary, protocol inventory, digest-pinned
   deployment/rollback instructions, migration guide, issue template, and
   contributor review checklist.

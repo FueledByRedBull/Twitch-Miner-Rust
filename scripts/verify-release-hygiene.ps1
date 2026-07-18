@@ -14,6 +14,24 @@ foreach ($workflow in $workflowFiles) {
     }
 }
 
+$multiarchWorkflow = Get-Content -Raw .github/workflows/multiarch-build.yml
+if ($multiarchWorkflow -notmatch '(?m)^  release-manifest:\s*$' -or
+    $multiarchWorkflow -notmatch 'sha-\$\{\{ github\.sha \}\}' -or
+    $multiarchWorkflow -notmatch 'verify-published-manifest\.ps1' -or
+    $multiarchWorkflow -notmatch 'imagetools create --tag \$release') {
+    throw 'Signed releases must verify and promote the existing commit-SHA manifest.'
+}
+$releaseJob = [regex]::Match(
+    $multiarchWorkflow,
+    '(?ms)^  release-manifest:\s*$(.*)\z'
+).Groups[1].Value
+if (-not $releaseJob -or $releaseJob -match 'docker/build-push-action') {
+    throw 'Signed release promotion must not rebuild the accepted image.'
+}
+if ($releaseJob -notmatch '-ExpectedDigest \$digest') {
+    throw 'Signed release promotion must require exact digest equality.'
+}
+
 foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.rpi.yml', 'deploy/docker-compose.volume.yml')) {
     $content = Get-Content -Raw $compose
     if ($content -match ':latest') {

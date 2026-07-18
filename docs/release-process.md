@@ -15,18 +15,26 @@ digest and pins `cargo-chef` to an exact locked version;
    compatibility changes. Review and attach the candidate's differential-review
    artifact to the release evidence.
 2. Run the local QA commands in `CONTRIBUTING.md`, run
-   `scripts/verify-go-baseline.ps1` against the pinned Go baseline, then run
-   the read-only canary on a dedicated account.
-3. Create and push a signed `v*` tag. GitHub Actions runs Rust QA, docs and
-   Compose validation, dependency and secret checks, coverage, per-platform
-   image smoke tests, SBOM/provenance generation, and a second smoke test of
-   the published manifest digest.
-4. Retrieve the `published-manifest-digest` artifact. Record that digest,
-   source revision, supported platforms, canary result, and rollback digest in
-   the release record.
-5. Set `TWITCH_MINER_IMAGE` to the exact `ghcr.io/...@sha256:<digest>` value
+   `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and push the
+   candidate commit to `main`. The multiarch workflow builds the three platform
+   images, SBOM/provenance attestations, the manifest, and the immutable
+   `sha-<40-character-commit>` tag.
+3. Retrieve the `published-manifest-digest` artifact, run the read-only canary
+   against that exact digest, deploy it by digest, and complete the required
+   monitoring window.
+4. Create and push a signed `v*` tag at the accepted commit. The tag workflow
+   does not rebuild. It resolves the existing commit-SHA manifest, verifies all
+   three platform revisions and attestations, uses the documented single-index
+   carbon-copy promotion behavior of
+   [`docker buildx imagetools create`](https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/),
+   and fails unless the release tag retains the exact accepted digest.
+5. Retrieve the tag run's `published-manifest-digest` artifact and require it
+   to equal the canaried/soaked digest. Record that digest, source revision,
+   platforms, canary and soak results, and rollback digest in the release
+   record.
+6. Set `TWITCH_MINER_IMAGE` to the exact `ghcr.io/...@sha256:<digest>` value
    and `TWITCH_MINER_DATA_DIR` to the existing data directory before an update.
-6. After deployment, verify `--version`, `--health`, container health, and a
+7. After deployment, verify `--version`, `--health`, container health, and a
    normal `SIGTERM` restart. Keep the previous digest until the new deployment
    has remained healthy through its monitoring window.
 

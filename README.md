@@ -75,7 +75,12 @@ There is also a named-volume variant in [deploy/docker-compose.volume.yml](deplo
 
 For Linux bind mounts, make sure the mounted data directory and any existing cookie files stay writable by the container user. The Raspberry Pi example in [deploy/docker-compose.rpi.yml](deploy/docker-compose.rpi.yml) pins a host UID/GID override for that reason.
 
-GitHub Actions publishes the multi-arch GHCR image on pushes to `main` and `v*` tags. For local Docker validation, `scripts/build-multiarch.ps1` builds and loads a single local-platform image by default; pass `-Push` to build and publish `linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
+GitHub Actions builds and publishes the multi-arch GHCR image on pushes to
+`main`. A signed `v*` tag promotes the already-tested manifest for that exact
+commit without rebuilding it, and fails if the release tag does not retain the
+same digest. For local Docker validation, `scripts/build-multiarch.ps1` builds
+and loads a single local-platform image by default; pass `-Push` to build and
+publish `linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
 
 Deploy published images by immutable digest. See [docs/release-process.md](docs/release-process.md) for the release, Pi update, health, and rollback procedure.
 

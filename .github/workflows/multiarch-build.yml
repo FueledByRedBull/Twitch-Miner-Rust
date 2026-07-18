@@ -19,6 +19,7 @@ jobs:
     uses: ./.github/workflows/rust-qa.yml
 
   build:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     needs: rust-qa
     strategy:
       fail-fast: false
@@ -109,6 +110,7 @@ jobs:
           if-no-files-found: error
 
   manifest:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -117,6 +119,10 @@ jobs:
       attestations: write
       id-token: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -183,55 +189,84 @@ jobs:
         run: |
           $image = '${{ steps.image.outputs.name }}'
           $digest = '${{ steps.manifest.outputs.digest }}'
-          $imageRef = "$image@$digest"
-          $raw = docker buildx imagetools inspect $imageRef --raw 2>&1
-          $inspectExit = $LASTEXITCODE
-          if ($inspectExit -ne 0) {
-            throw "Unable to inspect published manifest ${imageRef}: $($raw -join ' ')"
-          }
-          try {
-            $index = ($raw -join "`n") | ConvertFrom-Json
-          } catch {
-            throw "Published manifest metadata was not valid JSON: $($raw -join ' ')"
-          }
-          foreach ($platform in @('linux/amd64', 'linux/arm64', 'linux/arm/v7')) {
-            $descriptor = switch ($platform) {
-              'linux/amd64' {
-                @($index.manifests | Where-Object {
-                  $_.platform.os -eq 'linux' -and $_.platform.architecture -eq 'amd64'
-                } | Select-Object -First 1)
-              }
-              'linux/arm64' {
-                @($index.manifests | Where-Object {
-                  $_.platform.os -eq 'linux' -and $_.platform.architecture -eq 'arm64'
-                } | Select-Object -First 1)
-              }
-              'linux/arm/v7' {
-                @($index.manifests | Where-Object {
-                  $_.platform.os -eq 'linux' -and
-                  $_.platform.architecture -eq 'arm' -and
-                  $_.platform.variant -eq 'v7'
-                } | Select-Object -First 1)
-              }
-            }
-            if (-not $descriptor -or $descriptor.digest -notmatch '^sha256:[0-9a-f]{64}$') {
-              throw "Published manifest has no child image for $platform."
-            }
-            $platformRef = "$image@$($descriptor.digest)"
-            docker run --rm --platform $platform $platformRef --help
-            if ($LASTEXITCODE -ne 0) {
-              throw "Published manifest smoke test failed for $platform."
-            }
+          $verified = ./scripts/verify-published-manifest.ps1 `
+            -ImageReference "$image@$digest" `
+            -ExpectedDigest $digest `
+            -ExpectedRevision '${{ github.sha }}'
+          if ($verified -ne $digest) {
+            throw "Published manifest verification returned unexpected digest $verified."
           }
           Set-Content -Path '${{ runner.temp }}/manifest/digest.txt' -Value $digest -NoNewline
           exit 0
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-manifest-digest
+          path: ${{ runner.temp }}/manifest/digest.txt
+          if-no-files-found: error
+
+  release-manifest:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: rust-qa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - id: image
+        run: |
+          "name=ghcr.io/$($env:GITHUB_REPOSITORY.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: promote
+        name: Promote tested commit manifest
+        shell: pwsh
+        run: |
+          $image = '${{ steps.image.outputs.name }}'
+          $source = "${image}:sha-${{ github.sha }}"
+          $digest = ./scripts/verify-published-manifest.ps1 `
+            -ImageReference $source `
+            -ExpectedRevision '${{ github.sha }}'
+
+          $release = "${image}:${{ github.ref_name }}"
+          docker buildx imagetools create --tag $release "$image@$digest"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to promote $source to $release."
+          }
+
+          $promoted = ./scripts/verify-published-manifest.ps1 `
+            -ImageReference $release `
+            -ExpectedDigest $digest `
+            -ExpectedRevision '${{ github.sha }}'
+          if ($promoted -ne $digest) {
+            throw "Release tag resolved to $promoted instead of tested digest $digest."
+          }
+
+          New-Item -ItemType Directory -Path '${{ runner.temp }}/manifest' -Force | Out-Null
+          Set-Content -Path '${{ runner.temp }}/manifest/digest.txt' -Value $digest -NoNewline
+          "digest=$digest" >> $env:GITHUB_OUTPUT
+
       - name: Attest release manifest
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ${{ steps.image.outputs.name }}
-          subject-digest: ${{ steps.manifest.outputs.digest }}
+          subject-digest: ${{ steps.promote.outputs.digest }}
           push-to-registry: true
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
