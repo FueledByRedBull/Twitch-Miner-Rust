@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-- Refreshes the pinned GitHub Actions used for Rust, Go, artifact, metadata,
-  and multi-architecture builds, and updates `regex`, `chrono`, `tokio`,
-  `clap`, and `tokio-tungstenite`. These maintenance updates do not change the
-  configuration schema.
+- Refreshes the pinned GitHub Actions used for checkout, Rust, Go, artifacts,
+  metadata, security scanning, and multi-architecture builds, and updates
+  `regex`, `chrono`, `tokio`, `clap`, and `tokio-tungstenite`. These
+  maintenance updates do not change the configuration schema.
 - Restores the independently supervised PubSub `/v1` compatibility transport
   for viewer prediction discovery/results, immediate points and bonus events,
   moments, raid IDs, and community goals while retaining EventSub as the
