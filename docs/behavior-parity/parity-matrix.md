@@ -11,7 +11,7 @@ gap before each release.
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
 | Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed context and `RewardList` fixtures, startup streak reconciliation, resolved/unresolved streak carryover across repeated short stream restarts, a fixed 15-minute streak budget, five-minute private polling, channel-rename recovery by stable ID, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
-| Drops and moments | Parity | Inventory, campaign, claim-status, and PubSub fixtures. |
+| Drops and moments | Improved | Inventory, campaign, claim-status, and PubSub fixtures. Drop progress and claim mutations have independent global/per-streamer controls; a verified campaign can limit the watch set to one deterministic streamer so Twitch progress is not split. Legacy `claim_drops` configurations migrate without changing their prior effective behavior. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
 | EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and IRC tests. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
@@ -31,7 +31,7 @@ working Rust implementation:
 | --- | --- |
 | Username, streamers, follower/game/watch selection | Preserved. |
 | Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
-| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Preserved. |
+| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Preserved. Drop farming is now independently configurable with `farm_drops`; `watch_one_stream_when_drops_active` defaults to true. Both support per-streamer overrides. |
 | Raid observation and auto-join | Preserved with compatibility risk | EventSub observes the raid lifecycle; PubSub compatibility supplies the legacy raid ID required by the typed single-attempt `JoinRaid` mutation. Repeated raid IDs are ignored. Live acceptance is still required before release. |
 | Prediction and per-streamer override settings | Preserved. |
 | `password` | Rejected when non-empty; device login does not need it. |

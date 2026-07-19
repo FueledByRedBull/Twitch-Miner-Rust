@@ -428,8 +428,7 @@ impl RuntimeState {
             return false;
         };
         if self.streamers[index].username == login {
-            self.streamers[index].watch_suspended_until = None;
-            return false;
+            return self.streamers[index].watch_suspended_until.take().is_some();
         }
         let old_login = std::mem::replace(&mut self.streamers[index].username, login.clone());
         self.streamers[index].watch_suspended_until = None;

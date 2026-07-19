@@ -21,8 +21,8 @@ mod tests {
     use crate::context::{refresh_snapshot_streamers, spawn_pending_claim_loop};
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
-        refresh_watch_selection_metadata, resolve_spade_url, send_minute_watched_for_streamer,
-        send_minute_watched_with_spade_cache,
+        build_minute_watched_event, refresh_watch_selection_metadata, resolve_spade_url,
+        send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
     };
     use crate::observability::{format_resume_gap, streamer_game_name, AppObservability};
     use crate::prediction::prediction_wait_duration;
@@ -1270,7 +1270,7 @@ mod tests {
                 presence_known: true,
                 online_at: Some(ts(0)),
                 settings: tm_domain::StreamerSettings {
-                    claim_drops: true,
+                    farm_drops: true,
                     ..tm_domain::StreamerSettings::default()
                 },
                 stream: Some(tm_domain::Stream {
@@ -1401,7 +1401,7 @@ mod tests {
                 presence_known: true,
                 online_at: Some(ts(0)),
                 settings: tm_domain::StreamerSettings {
-                    claim_drops: true,
+                    farm_drops: true,
                     ..tm_domain::StreamerSettings::default()
                 },
                 stream: Some(tm_domain::Stream {
@@ -1559,6 +1559,39 @@ mod tests {
             .as_ref()
             .and_then(|stream| stream.last_minute_update)
             .is_some());
+    }
+
+    #[test]
+    fn minute_watched_drop_metadata_depends_on_farming_not_claiming() {
+        let info = tm_twitch::StreamInfo {
+            id: String::from("broadcast-1"),
+            title: String::from("Title"),
+            game_id: Some(String::from("42")),
+            game_name: String::from("Game Name"),
+            viewers_count: 1,
+            tags: Vec::new(),
+            created_at: None,
+        };
+        let mut streamer = Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            settings: tm_domain::StreamerSettings {
+                farm_drops: true,
+                claim_drops: false,
+                ..tm_domain::StreamerSettings::default()
+            },
+            ..Streamer::default()
+        };
+
+        let farming = build_minute_watched_event(&streamer, &info, "user-1");
+        assert_eq!(farming["properties"]["game"], "Game Name");
+        assert_eq!(farming["properties"]["game_id"], "42");
+
+        streamer.settings.farm_drops = false;
+        streamer.settings.claim_drops = true;
+        let claiming_only = build_minute_watched_event(&streamer, &info, "user-1");
+        assert!(claiming_only["properties"].get("game").is_none());
+        assert!(claiming_only["properties"].get("game_id").is_none());
     }
 
     #[tokio::test]

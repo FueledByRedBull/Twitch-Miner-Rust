@@ -115,7 +115,7 @@ success envelope; an explicit non-empty error or an unknown status still fails
 closed. `DropsHighlightService_AvailableDrops` treats a null channel or null
 campaign list as an empty result, matching the Go reference, while every entry
 in a present list still requires a non-empty campaign ID. Its typed result also
-gates `DROPS` watch priority: unknown and empty results are not promoted, a
+gates `DROPS` watch priority when `farm_drops` is enabled: unknown and empty results are not promoted, a
 broadcast/game change invalidates the previous result, and later configured
 priorities continue filling watcher capacity. The older raw JSON methods remain
 compatibility facades; runtime and
