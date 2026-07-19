@@ -43,6 +43,6 @@ The Raspberry Pi compose example pins `linux/arm64` and follows the same `/data`
 
 On Linux bind mounts, the mounted directory and any existing cookie/log files must be writable by the configured container UID/GID. If you are migrating from an older root-run image, a one-time `chown` of the data directory may be required before the Rust container can reuse saved cookies.
 
-GitHub Actions publishes the GHCR image on pushes to `main` and `v*` tags after the multi-arch workflow builds and smoke-tests the platform images. Set `TWITCH_MINER_IMAGE` to the recorded manifest digest before using either published Compose example; `latest` is not a deployment input.
+On pushes to `main`, GitHub Actions builds, smoke-tests, and publishes the multi-architecture GHCR image. A signed `v*` tag promotes the already-tested manifest for that exact commit without rebuilding it. Set `TWITCH_MINER_IMAGE` to the recorded manifest digest before using either published Compose example; `latest` is not a deployment input.
 
 For a shorter operator-oriented checklist, see [operator-guide.md](operator-guide.md).

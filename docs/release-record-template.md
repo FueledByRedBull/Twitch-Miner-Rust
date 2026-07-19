@@ -13,7 +13,7 @@ place release evidence in runtime configuration or status files.
 - CI run: `<URL and successful conclusion>`
 - multiarch run: `<URL and successful conclusion>`
 - SBOM/provenance: `<attestation URLs>`
-- differential review: `docs/differential-review-2026-07-13.md` at the candidate revision
+- differential review: `<path or URL and candidate revision>`
 
 ## Read-only acceptance
 

@@ -34,4 +34,4 @@ docker run --rm twitch-miner-rust:local --help
 ./scripts/build-multiarch.ps1 -Push
 ```
 
-The helper script builds and loads one local-platform image by default. Its `-Push` mode uses the same `linux/amd64`, `linux/arm64`, and `linux/arm/v7` platform set as `.github/workflows/multiarch-build.yml`. GitHub Actions publishes GHCR images on pushes to `main` and `v*` tags after platform smoke tests pass. Use the recorded manifest digest from [release-process.md](../release-process.md) for a deployment.
+The helper script builds and loads one local-platform image by default. Its `-Push` mode uses the same `linux/amd64`, `linux/arm64`, and `linux/arm/v7` platform set as `.github/workflows/multiarch-build.yml`. On pushes to `main`, GitHub Actions builds, smoke-tests, and publishes the multi-architecture GHCR image. A signed `v*` tag promotes the already-tested manifest for that exact commit without rebuilding it. Use the recorded manifest digest from [release-process.md](../release-process.md) for a deployment.

@@ -89,8 +89,10 @@ docker run --rm twitch-miner-rust:local --help
 ./scripts/build-multiarch.ps1 -Push
 ```
 
-GitHub Actions also publishes the GHCR image on pushes to `main` and `v*` tags.
-Deploy the recorded manifest digest, not `latest`; see [release-process.md](../release-process.md).
+On pushes to `main`, GitHub Actions builds, smoke-tests, and publishes the
+multi-architecture GHCR image. A signed `v*` tag promotes the already-tested
+manifest for that exact commit without rebuilding it. Deploy the recorded
+manifest digest, not `latest`; see [release-process.md](../release-process.md).
 
 ## Go/Rust Parity Gate
 
