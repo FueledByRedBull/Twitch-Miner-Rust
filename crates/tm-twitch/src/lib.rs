@@ -899,6 +899,37 @@ mod tests {
         assert_eq!(videos[0].broadcast_id.as_deref(), Some("broadcast-1"));
         assert_eq!(videos[0].length_seconds, 1200);
 
+        let sparse_videos: types::GqlResponse<types::ArchivedVideosData> =
+            serde_json::from_value(serde_json::json!({
+                "data": { "user": { "videos": { "edges": [
+                    { "node": null },
+                    { "node": {
+                        "id": "usable",
+                        "broadcastIdentifier": null,
+                        "lengthSeconds": 600
+                    } }
+                ] } } }
+            }))
+            .unwrap();
+        let sparse_videos = archived_videos_from_typed(sparse_videos.data.unwrap()).unwrap();
+        assert_eq!(sparse_videos.len(), 1);
+        assert_eq!(sparse_videos[0].id, "usable");
+        assert_eq!(sparse_videos[0].broadcast_id, None);
+
+        let invalid_video: types::GqlResponse<types::ArchivedVideosData> =
+            serde_json::from_value(serde_json::json!({
+                "data": { "user": { "videos": { "edges": [
+                    { "node": { "id": "missing-length" } }
+                ] } } }
+            }))
+            .unwrap();
+        assert!(matches!(
+            archived_videos_from_typed(invalid_video.data.unwrap()),
+            Err(TwitchClientError::MissingField(
+                "data.user.videos.edges.node.lengthSeconds"
+            ))
+        ));
+
         let clips: types::GqlResponse<types::RecentClipsData> =
             serde_json::from_value(protocol_fixture("twitch.recent_clips.json")).unwrap();
         let clips = recent_clips_from_typed(clips.data.unwrap()).unwrap();
