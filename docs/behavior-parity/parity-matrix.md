@@ -10,7 +10,7 @@ gap before each release.
 | --- | --- | --- |
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
-| Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed context and `RewardList` fixtures, startup streak reconciliation, five-minute private polling, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
+| Channel-points context, bonus chest, streaks, and minute watching | Parity | Typed context and `RewardList` fixtures, startup streak reconciliation, resolved/unresolved streak carryover across repeated short stream restarts, a fixed 15-minute streak budget, five-minute private polling, channel-rename recovery by stable ID, mocked watch flow, and Spade watch-request recovery tests for 401/429/5xx responses. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
 | Drops and moments | Parity | Inventory, campaign, claim-status, and PubSub fixtures. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |

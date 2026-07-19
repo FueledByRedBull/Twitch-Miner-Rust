@@ -56,9 +56,9 @@ mod tests {
     use std::collections::HashMap;
     use tm_config::ConfigFile;
     use tm_domain::{
-        parse_watch_priorities, CommunityGoal, HistoryEntry, IrcMode, OffsetDateTime,
-        PredictionDecision, PredictionEvent, PredictionOutcome, Stream, Streamer, StreamerSettings,
-        WatchPriority,
+        parse_watch_priorities, should_prioritize_streak, CommunityGoal, HistoryEntry, IrcMode,
+        OffsetDateTime, PredictionDecision, PredictionEvent, PredictionOutcome, Stream, Streamer,
+        StreamerSettings, WatchPriority,
     };
     use tm_pubsub::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PubSubEvent};
 
@@ -292,8 +292,7 @@ mod tests {
             ts(100),
         );
         assert_eq!(state.desired_chat_logins(), vec!["tester"]);
-        assert!(state.watch_target_logins(ts(120)).is_empty());
-        assert_eq!(state.watch_target_logins(ts(131)), vec!["tester"]);
+        assert_eq!(state.watch_target_logins(ts(100)), vec!["tester"]);
 
         state.apply_pubsub_event(
             &PubSubEvent::Playback {
@@ -396,6 +395,110 @@ mod tests {
         assert!(stream.last_minute_update.is_none());
         assert!(stream.watch_streak_missing);
         assert_eq!(stream.stream_up_at, Some(ts(120)));
+    }
+
+    #[test]
+    fn short_restart_chains_preserve_resolved_streak_state() {
+        let mut state = RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![WatchPriority::Streak],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: "tester".into(),
+                channel_id: "123".into(),
+                is_online: true,
+                presence_known: true,
+                settings: StreamerSettings {
+                    watch_streak: true,
+                    ..StreamerSettings::default()
+                },
+                stream: Some(Stream {
+                    broadcast_id: "segment-a".into(),
+                    watch_streak_missing: false,
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            }],
+            initial_points: HashMap::from([(String::from("tester"), 10)]),
+            predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
+        };
+
+        for (offline_at, online_at, broadcast_id) in
+            [(100, 110, "segment-b"), (200, 210, "segment-c")]
+        {
+            assert!(state.apply_presence("123", false, ts(offline_at)));
+            assert!(state.apply_presence("123", true, ts(online_at)));
+            state.apply_stream_update(
+                &StreamUpdate {
+                    channel_id: "123".into(),
+                    id: broadcast_id.into(),
+                    title: String::new(),
+                    game_name: String::new(),
+                    game_id: None,
+                    viewers_count: 0,
+                    tags: Vec::new(),
+                },
+                ts(online_at + 1),
+            );
+            assert!(
+                !state.streamers[0]
+                    .stream
+                    .as_ref()
+                    .unwrap()
+                    .watch_streak_missing
+            );
+            assert!(!should_prioritize_streak(
+                &state.streamers[0],
+                Some(state.started_at),
+                ts(online_at + 1),
+            ));
+        }
+
+        assert!(state.apply_presence("123", false, ts(300)));
+        assert!(state.apply_presence("123", true, ts(2_101)));
+        assert!(
+            state.streamers[0]
+                .stream
+                .as_ref()
+                .unwrap()
+                .watch_streak_missing
+        );
+        assert!(should_prioritize_streak(
+            &state.streamers[0],
+            Some(state.started_at),
+            ts(2_101),
+        ));
+    }
+
+    #[test]
+    fn runtime_login_refresh_preserves_initial_balance_and_releases_suspension() {
+        let mut state = RuntimeState {
+            started_at: ts(0),
+            follower_mode: false,
+            watch_priorities: vec![WatchPriority::Order],
+            game_priority: Vec::new(),
+            game_exclusions: Vec::new(),
+            streamers: vec![Streamer {
+                username: "old-login".into(),
+                channel_id: "123".into(),
+                watch_suspended_until: Some(ts(500)),
+                ..Streamer::default()
+            }],
+            initial_points: HashMap::from([(String::from("old-login"), 99)]),
+            predictions: HashMap::new(),
+            processed_prediction_ids: std::collections::VecDeque::new(),
+            completed_predictions: std::collections::VecDeque::new(),
+        };
+
+        assert!(state.update_streamer_login("123", " New-Login "));
+        assert_eq!(state.streamers[0].username, "new-login");
+        assert!(state.streamers[0].watch_suspended_until.is_none());
+        assert_eq!(state.initial_points.get("new-login"), Some(&99));
+        assert!(!state.initial_points.contains_key("old-login"));
     }
 
     #[test]

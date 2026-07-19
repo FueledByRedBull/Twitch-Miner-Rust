@@ -17,6 +17,8 @@ use crate::watching::{
 };
 use crate::{MINUTE_WATCHER_REQUEST_TIMEOUT, SPADE_URL_TTL, WATCH_SELECTION_REFRESH_CONCURRENCY};
 
+const RENAME_RECOVERY_SUSPENSION_SECONDS: u64 = 5 * 60;
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_minute_watcher_loop(
     stop: tokio::sync::watch::Receiver<bool>,
@@ -251,10 +253,10 @@ pub(crate) async fn send_minute_watched_for_streamer(
 ) -> Result<()> {
     let now = time_now();
     let previous_game = streamer_game_name(streamer);
-    let info = match twitch.fetch_stream_info(&streamer.username).await {
-        Ok(info) => info,
+    let (streamer, info) = match twitch.fetch_stream_info(&streamer.username).await {
+        Ok(info) => (streamer.clone(), info),
         Err(error) => {
-            return handle_minute_watched_info_error(
+            let Some(recovered_streamer) = handle_minute_watched_info_error(
                 runtime,
                 twitch,
                 streamer,
@@ -262,14 +264,27 @@ pub(crate) async fn send_minute_watched_for_streamer(
                 now,
                 error,
             )
-            .await;
+            .await?
+            else {
+                return Ok(());
+            };
+            let info = twitch
+                .fetch_stream_info(&recovered_streamer.username)
+                .await
+                .with_context(|| {
+                    format!(
+                        "refresh stream info after channel rename for {}",
+                        recovered_streamer.username
+                    )
+                })?;
+            (recovered_streamer, info)
         }
     };
 
-    apply_live_stream_update(runtime, streamer, &info, observability, now).await?;
+    apply_live_stream_update(runtime, &streamer, &info, observability, now).await?;
     log_stream_presence_changes(
         observability,
-        streamer,
+        &streamer,
         previous_game.as_deref(),
         &info.game_name,
     );
@@ -285,7 +300,7 @@ pub(crate) async fn send_minute_watched_for_streamer(
         tm_twitch::DROP_ID,
         now,
     );
-    stream.payload = vec![build_minute_watched_event(streamer, &info, user_id)];
+    stream.payload = vec![build_minute_watched_event(&streamer, &info, user_id)];
 
     let status = send_minute_watched_with_spade_cache(
         spade_urls,
@@ -327,12 +342,48 @@ pub(crate) async fn handle_minute_watched_info_error(
     observability: &AppObservability,
     now: tm_runtime::RuntimeTime,
     error: tm_twitch::TwitchClientError,
-) -> Result<()> {
+) -> Result<Option<Streamer>> {
     if twitch
         .is_stream_live(&streamer.channel_id)
         .await
         .unwrap_or(false)
     {
+        if matches!(
+            &error,
+            tm_twitch::TwitchClientError::MissingField("data.user" | "data.user.stream")
+        ) {
+            if let Ok(login) = twitch.fetch_channel_login_by_id(&streamer.channel_id).await {
+                if login != streamer.username {
+                    runtime
+                        .update_streamer_login(streamer.channel_id.clone(), login.clone())
+                        .await?;
+                    tracing::warn!(
+                        operation = "update_streamer_login",
+                        old_login = %streamer.username,
+                        new_login = %login,
+                        channel_id = %streamer.channel_id,
+                        "streamer login changed; runtime identity refreshed, update config before restart"
+                    );
+                    let mut recovered = streamer.clone();
+                    recovered.username = login;
+                    recovered.watch_suspended_until = None;
+                    return Ok(Some(recovered));
+                }
+            }
+            runtime
+                .suspend_watching(
+                    streamer.channel_id.clone(),
+                    now + std::time::Duration::from_secs(RENAME_RECOVERY_SUSPENSION_SECONDS),
+                )
+                .await?;
+            tracing::warn!(
+                operation = "suspend_watching",
+                streamer = %streamer.username,
+                channel_id = %streamer.channel_id,
+                suspension_seconds = RENAME_RECOVERY_SUSPENSION_SECONDS,
+                "live channel identity could not be refreshed; releasing watch slot temporarily"
+            );
+        }
         return Err(error.into());
     }
     runtime
@@ -345,7 +396,7 @@ pub(crate) async fn handle_minute_watched_info_error(
             .send_event(DiscordEvent::StreamerOffline, &message)
             .await;
     }
-    Ok(())
+    Ok(None)
 }
 
 pub(crate) async fn apply_live_stream_update(

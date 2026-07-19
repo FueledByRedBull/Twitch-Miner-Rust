@@ -21,6 +21,7 @@ use crate::types::{
 const MAX_COMPLETED_PREDICTIONS: usize = 256;
 
 const MAX_PROCESSED_MUTATION_IDS: usize = 128;
+const STREAK_RESTART_CARRYOVER_SECONDS: i64 = 30 * 60;
 
 impl RuntimeSession {
     #[must_use]
@@ -414,6 +415,44 @@ impl RuntimeState {
             .find(|streamer| streamer.channel_id == channel_id)
     }
 
+    pub fn update_streamer_login(&mut self, channel_id: &str, login: &str) -> bool {
+        let login = login.trim().to_ascii_lowercase();
+        if login.is_empty() {
+            return false;
+        }
+        let Some(index) = self
+            .streamers
+            .iter()
+            .position(|streamer| streamer.channel_id == channel_id)
+        else {
+            return false;
+        };
+        if self.streamers[index].username == login {
+            self.streamers[index].watch_suspended_until = None;
+            return false;
+        }
+        let old_login = std::mem::replace(&mut self.streamers[index].username, login.clone());
+        self.streamers[index].watch_suspended_until = None;
+        if let Some(initial_points) = self.initial_points.remove(&old_login) {
+            self.initial_points.insert(login, initial_points);
+        }
+        true
+    }
+
+    pub fn suspend_watching(&mut self, channel_id: &str, until: OffsetDateTime) -> bool {
+        let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+            return false;
+        };
+        if streamer
+            .watch_suspended_until
+            .is_some_and(|current| current >= until)
+        {
+            return false;
+        }
+        streamer.watch_suspended_until = Some(until);
+        true
+    }
+
     pub(crate) fn apply_presence(
         &mut self,
         channel_id: &str,
@@ -428,9 +467,16 @@ impl RuntimeState {
             streamer.presence_known = true;
             streamer.is_online = online;
             if online {
+                let short_restart = streamer.offline_at.is_some_and(|offline_at| {
+                    (now - offline_at).whole_seconds() <= STREAK_RESTART_CARRYOVER_SECONDS
+                });
                 streamer.online_at = Some(now);
                 streamer.offline_at = None;
                 let stream = streamer.stream.get_or_insert_with(Stream::default);
+                if !short_restart {
+                    stream.watch_streak_missing = true;
+                    stream.streak_carryover_until = None;
+                }
                 if stream.stream_up_at.is_none() {
                     stream.stream_up_at = Some(now);
                 }
@@ -438,6 +484,11 @@ impl RuntimeState {
                 streamer.offline_at = Some(now);
                 if let Some(stream) = streamer.stream.as_mut() {
                     stream.stream_up_at = None;
+                    stream.streak_carryover_until = Some(
+                        now + std::time::Duration::from_secs(
+                            STREAK_RESTART_CARRYOVER_SECONDS.cast_unsigned(),
+                        ),
+                    );
                     stream.reset_watch_progress();
                 }
             }
@@ -481,7 +532,13 @@ impl RuntimeState {
         }
         if broadcast_changed {
             stream.reset_watch_progress();
-            stream.watch_streak_missing = true;
+            if stream
+                .streak_carryover_until
+                .is_none_or(|carryover_until| carryover_until < now)
+            {
+                stream.watch_streak_missing = true;
+                stream.streak_carryover_until = None;
+            }
         }
         if broadcast_changed || game_changed {
             stream.drop_campaign_eligible = None;

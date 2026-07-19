@@ -56,6 +56,15 @@ automatically replayed after an uncertain response. A release with a changed
 operation hash must add its sanitized fixture, update this inventory, and pass
 the canary before publication.
 
+The minute watcher has one bounded raw read-only GraphQL query,
+`ResolveLoginById`, used only after a selected channel is still live by stable
+numeric ID but its login-based stream-info lookup reports a missing user. The
+typed response must return the same requested ID and a non-empty normalized
+login before runtime identity is changed. A successful change is retried once;
+an unresolved mismatch releases the watch slot for five minutes instead of
+allowing it to consume half of the watch capacity indefinitely. No response
+payload, token, or cookie is logged.
+
 The preferred EventSub WebSocket path handles stream presence and observes
 raids. Broadcaster prediction subscriptions are requested only when a tracked
 channel ID exactly matches the authenticated user ID and the validated token

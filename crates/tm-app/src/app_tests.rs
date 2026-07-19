@@ -1562,6 +1562,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn minute_watcher_recovers_channel_rename_by_stable_id() {
+        let (endpoints, requests, twitch_server) = spawn_json_response_server(vec![
+            String::from(r#"{"data":{"user":null}}"#),
+            fixture_json("twitch.stream_live.online.json"),
+            String::from(r#"{"data":{"user":{"id":"100","login":"new-login"}}}"#),
+            fixture_json("twitch.stream_info.json"),
+        ]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let (spade_url, spade_requests, spade_server) = spawn_status_server(vec!["204 No Content"]);
+        let spade_urls = tokio::sync::Mutex::new(HashMap::from([(
+            String::from("new-login"),
+            SpadeCacheEntry::Ready(CachedSpadeUrl {
+                url: spade_url,
+                fetched_at: StdInstant::now(),
+            }),
+        )]));
+        let mut state = tm_runtime::RuntimeState::from_targets(
+            &ConfigFile::default(),
+            &[String::from("old-login")],
+            ts(0),
+        );
+        state.streamers = vec![Streamer {
+            username: String::from("old-login"),
+            channel_id: String::from("100"),
+            channel_points: 500,
+            is_online: true,
+            presence_known: true,
+            online_at: Some(ts(0)),
+            stream: Some(tm_domain::Stream::default()),
+            ..Streamer::default()
+        }];
+        state.initial_points = HashMap::from([(String::from("old-login"), 500)]);
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
+
+        send_minute_watched_for_streamer(
+            &runtime,
+            &twitch,
+            &spade_urls,
+            &streamer,
+            "user-1",
+            &test_observability(),
+        )
+        .await
+        .unwrap();
+
+        twitch_server.join().unwrap();
+        spade_server.join().unwrap();
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert_eq!(snapshot.streamers[0].username, "new-login");
+        assert_eq!(snapshot.initial_points.get("new-login"), Some(&500));
+        assert!(snapshot.streamers[0]
+            .stream
+            .as_ref()
+            .and_then(|stream| stream.last_minute_update)
+            .is_some());
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.contains(r#""operationName":"ResolveLoginById""#)));
+        assert_eq!(spade_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn spade_cache_retries_with_fresh_url_after_failure() {
         let spade_urls = tokio::sync::Mutex::new(HashMap::new());
         let fetches = Arc::new(AtomicUsize::new(0));

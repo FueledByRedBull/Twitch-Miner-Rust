@@ -16,7 +16,7 @@ use crate::types::{
     ClaimDropOutcome, CommunityGoalContributionData, EmptyMutationData, FollowersData,
     GqlPersistedOperation, GqlResponse, InventoryData, InventoryDrop, LiveStatusData,
     RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
-    UserContributionData, UserIdData, ViewerDropsDashboard,
+    UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
 };
 use crate::{operations, CLIENT_ID, DEFAULT_CLIENT_VERSION};
 
@@ -259,6 +259,33 @@ impl TwitchClient {
             .and_then(|user| user.id)
             .filter(|id| !id.trim().is_empty())
             .ok_or(TwitchClientError::MissingField("data.user.id"))
+    }
+
+    pub async fn fetch_channel_login_by_id(
+        &self,
+        channel_id: &str,
+    ) -> Result<String, TwitchClientError> {
+        let channel_id = channel_id.trim();
+        if channel_id.is_empty() {
+            return Err(TwitchClientError::InvalidField("channel_id"));
+        }
+        let operation = serde_json::json!({
+            "operationName": "ResolveLoginById",
+            "query": "query ResolveLoginById($id: ID!) { user(id: $id) { id login } }",
+            "variables": { "id": channel_id }
+        });
+        let payload = self.post_gql_value(operation).await?;
+        let response: UserLoginData = decode_gql_data(&payload, "ResolveLoginById")?;
+        let user = response
+            .user
+            .ok_or(TwitchClientError::MissingField("data.user"))?;
+        if user.id.as_deref() != Some(channel_id) {
+            return Err(TwitchClientError::InvalidField("data.user.id"));
+        }
+        user.login
+            .map(|login| login.trim().to_ascii_lowercase())
+            .filter(|login| !login.is_empty())
+            .ok_or(TwitchClientError::MissingField("data.user.login"))
     }
 
     /// Low-level compatibility escape hatch for protocol experiments.
