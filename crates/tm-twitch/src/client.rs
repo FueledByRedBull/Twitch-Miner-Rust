@@ -1068,10 +1068,11 @@ pub(crate) fn archived_videos_from_typed(
     videos
         .edges
         .into_iter()
-        .map(|edge| {
-            let node = edge.node.ok_or(TwitchClientError::MissingField(
-                "data.user.videos.edges.node",
-            ))?;
+        // GraphQL can retain an edge with a null node when that individual VOD
+        // is unavailable. Keep validating every present node strictly so an
+        // actual field-contract drift still fails the canary.
+        .filter_map(|edge| edge.node)
+        .map(|node| {
             let id = required_text(node.id, "data.user.videos.edges.node.id")?;
             let length_seconds = u32::try_from(node.length_seconds.ok_or(
                 TwitchClientError::MissingField("data.user.videos.edges.node.lengthSeconds"),

@@ -5,7 +5,8 @@
 - Adds a versioned, bounded private streak cache, deterministic longest/expiring
   streak priorities, and opt-in 23.5-hour offline VOD/clip streak recovery with
   exact broadcast matching, live preemption, sanitized progress, and typed
-  milestone confirmation.
+  milestone confirmation. Archived-video edges with an unavailable null node
+  are ignored individually, while every present node remains strictly typed.
 - Adds periodic typed drop-progress console lines without additional inventory
   requests or raw campaign/drop identifiers.
 
