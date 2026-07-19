@@ -103,7 +103,7 @@ jobs:
           RUNNER_TEMP: ${{ runner.temp }}
         id: digest_file
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digests-${{ matrix.platform_tag }}
           path: ${{ runner.temp }}/digests/*
@@ -199,7 +199,7 @@ jobs:
           Set-Content -Path '${{ runner.temp }}/manifest/digest.txt' -Value $digest -NoNewline
           exit 0
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: published-manifest-digest
           path: ${{ runner.temp }}/manifest/digest.txt
@@ -269,7 +269,7 @@ jobs:
           subject-digest: ${{ steps.promote.outputs.digest }}
           push-to-registry: true
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: published-manifest-digest
           path: ${{ runner.temp }}/manifest/digest.txt
