@@ -178,6 +178,17 @@ pub(crate) struct UserIdUser {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserLoginData {
+    pub(crate) user: Option<UserLoginUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct UserLoginUser {
+    pub(crate) id: Option<String>,
+    pub(crate) login: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LiveStatusData {
     pub(crate) user: Option<LiveStatusUser>,
 }

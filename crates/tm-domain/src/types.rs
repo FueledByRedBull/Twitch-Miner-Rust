@@ -204,6 +204,8 @@ pub struct Stream {
     pub viewers_count: u32,
     pub payload: Vec<serde_json::Value>,
     pub watch_streak_missing: bool,
+    #[serde(skip)]
+    pub streak_carryover_until: Option<OffsetDateTime>,
     pub minute_watched: f64,
     pub stream_up_at: Option<OffsetDateTime>,
     pub last_update: Option<OffsetDateTime>,
@@ -221,6 +223,7 @@ impl Default for Stream {
             viewers_count: 0,
             payload: Vec::new(),
             watch_streak_missing: true,
+            streak_carryover_until: None,
             minute_watched: 0.0,
             stream_up_at: None,
             last_update: None,
@@ -353,6 +356,8 @@ pub struct Streamer {
     pub presence_known: bool,
     pub online_at: Option<OffsetDateTime>,
     pub offline_at: Option<OffsetDateTime>,
+    #[serde(skip)]
+    pub watch_suspended_until: Option<OffsetDateTime>,
     pub stream: Option<Stream>,
     pub points_init: bool,
     pub active_multipliers: Vec<ActiveMultiplier>,

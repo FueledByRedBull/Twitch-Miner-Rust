@@ -109,6 +109,15 @@ enum RuntimeCommand {
         channel_id: String,
         eligible: bool,
     },
+    UpdateStreamerLogin {
+        channel_id: String,
+        login: String,
+        respond_to: oneshot::Sender<bool>,
+    },
+    SuspendWatching {
+        channel_id: String,
+        until: OffsetDateTime,
+    },
     SetPresence {
         channel_id: String,
         online: bool,
@@ -211,6 +220,26 @@ pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                 } => {
                     state.set_drop_campaign_eligibility(&channel_id, eligible);
                     notify_state_change(&state_revision_tx, &mut state_revision);
+                }
+                RuntimeCommand::UpdateStreamerLogin {
+                    channel_id,
+                    login,
+                    respond_to,
+                } => {
+                    let changed = state.update_streamer_login(&channel_id, &login);
+                    if changed {
+                        notify_state_change(&state_revision_tx, &mut state_revision);
+                    }
+                    log_dropped_runtime_reply(&send_runtime_reply(
+                        "UpdateStreamerLogin",
+                        respond_to,
+                        changed,
+                    ));
+                }
+                RuntimeCommand::SuspendWatching { channel_id, until } => {
+                    if state.suspend_watching(&channel_id, until) {
+                        notify_state_change(&state_revision_tx, &mut state_revision);
+                    }
                 }
                 RuntimeCommand::SetPresence {
                     channel_id,
@@ -479,6 +508,43 @@ impl RuntimeHandle {
             .await
             .map_err(|_| RuntimeError::SendFailed {
                 command: "SetDropCampaignEligibility",
+            })
+    }
+
+    pub async fn update_streamer_login(
+        &self,
+        channel_id: impl Into<String>,
+        login: impl Into<String>,
+    ) -> Result<bool> {
+        let (send, recv) = oneshot::channel();
+        self.sender
+            .send(RuntimeCommand::UpdateStreamerLogin {
+                channel_id: channel_id.into(),
+                login: login.into(),
+                respond_to: send,
+            })
+            .await
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "UpdateStreamerLogin",
+            })?;
+        recv.await.map_err(|_| RuntimeError::ActorClosed {
+            command: "UpdateStreamerLogin",
+        })
+    }
+
+    pub async fn suspend_watching(
+        &self,
+        channel_id: impl Into<String>,
+        until: OffsetDateTime,
+    ) -> Result<()> {
+        self.sender
+            .send(RuntimeCommand::SuspendWatching {
+                channel_id: channel_id.into(),
+                until,
+            })
+            .await
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "SuspendWatching",
             })
     }
 

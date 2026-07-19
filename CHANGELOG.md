@@ -6,6 +6,13 @@
   metadata, security scanning, and multi-architecture builds, and updates
   `regex`, `chrono`, `tokio`, `clap`, and `tokio-tungstenite`. These
   maintenance updates do not change the configuration schema.
+- Recovers a tracked channel rename during a running session by resolving the
+  current login from its stable channel ID, preserving the session's initial
+  balance, retrying the watch request with the new identity, and temporarily
+  releasing a slot when identity recovery cannot be completed safely.
+- Replaces blanket short-restart streak suppression with explicit resolved
+  state carryover across repeated sub-30-minute stream segments, uses a measured
+  15-minute streak budget, and removes the unnecessary 30-second online delay.
 - Restores the independently supervised PubSub `/v1` compatibility transport
   for viewer prediction discovery/results, immediate points and bonus events,
   moments, raid IDs, and community goals while retaining EventSub as the

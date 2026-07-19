@@ -74,7 +74,7 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
         ts(11),
     );
     assert_eq!(state.desired_chat_logins(), vec!["alpha"]);
-    assert!(state.watch_target_logins(ts(20)).is_empty());
+    assert_eq!(state.watch_target_logins(ts(20)), vec!["alpha", "beta"]);
     assert_eq!(state.watch_target_logins(ts(50)), vec!["alpha", "beta"]);
 
     let claim = state.apply_pubsub_event(

@@ -27,6 +27,6 @@ async fn paused_runtime_can_drive_time_based_integration_sequences() {
 
     let snapshot = runtime.state_snapshot().await.unwrap();
     assert_eq!(snapshot.desired_chat_logins(), vec!["alpha"]);
-    assert!(snapshot.watch_target_logins(ts(59)).is_empty());
+    assert_eq!(snapshot.watch_target_logins(ts(59)), vec!["alpha"]);
     assert_eq!(snapshot.watch_target_logins(ts(61)), vec!["alpha"]);
 }

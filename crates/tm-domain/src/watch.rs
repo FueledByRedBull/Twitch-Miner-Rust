@@ -8,8 +8,7 @@ use time::OffsetDateTime;
 
 use crate::types::{IrcMode, Stream, Streamer};
 
-const STREAK_PRIORITY_MINUTES_BASE: f64 = 7.0;
-const STREAK_PRIORITY_MINUTES_EXTENDED: f64 = 20.0;
+const STREAK_PRIORITY_MINUTES: f64 = 15.0;
 const MAX_CONCURRENT_WATCHERS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,13 +94,8 @@ pub fn should_join_chat(mode: IrcMode, online: bool) -> bool {
 }
 
 #[must_use]
-pub fn streak_priority_limit(started_at: Option<OffsetDateTime>, now: OffsetDateTime) -> f64 {
-    match started_at {
-        Some(started_at) if now - started_at > time::Duration::hours(10) => {
-            STREAK_PRIORITY_MINUTES_EXTENDED
-        }
-        _ => STREAK_PRIORITY_MINUTES_BASE,
-    }
+pub fn streak_priority_limit(_started_at: Option<OffsetDateTime>, _now: OffsetDateTime) -> f64 {
+    STREAK_PRIORITY_MINUTES
 }
 
 #[must_use]
@@ -115,11 +109,6 @@ pub fn should_prioritize_streak(
     };
     if !streamer.settings.watch_streak || !stream.watch_streak_missing {
         return false;
-    }
-    if let Some(offline_at) = streamer.offline_at {
-        if now - offline_at <= time::Duration::minutes(30) {
-            return false;
-        }
     }
     stream.minute_watched < streak_priority_limit(started_at, now)
 }
@@ -210,10 +199,11 @@ pub fn pick_streamers_to_watch(
         if !streamer.is_online {
             continue;
         }
-        if let Some(online_at) = streamer.online_at {
-            if now - online_at < time::Duration::seconds(30) {
-                continue;
-            }
+        if streamer
+            .watch_suspended_until
+            .is_some_and(|until| until > now)
+        {
+            continue;
         }
 
         let game = streamer
@@ -466,10 +456,10 @@ mod tests {
     #[test]
     fn streak_priority_limit_matches_go() {
         let now = datetime!(2026-03-27 06:00 UTC);
-        assert_f64_eq(streak_priority_limit(None, now), 7.0);
+        assert_f64_eq(streak_priority_limit(None, now), 15.0);
         assert_f64_eq(
             streak_priority_limit(Some(now - time::Duration::hours(11)), now),
-            20.0,
+            15.0,
         );
     }
 
@@ -491,7 +481,19 @@ mod tests {
         assert!(should_prioritize_streak(&streamer, None, now));
 
         streamer.offline_at = Some(now - time::Duration::minutes(10));
-        assert!(!should_prioritize_streak(&streamer, None, now));
+        assert!(should_prioritize_streak(&streamer, None, now));
+
+        streamer.watch_suspended_until = Some(now + time::Duration::minutes(5));
+        streamer.is_online = true;
+        assert!(pick_streamers_to_watch(
+            &[streamer],
+            &[WatchPriority::Streak],
+            &[],
+            &[],
+            None,
+            now,
+        )
+        .is_empty());
     }
 
     #[test]

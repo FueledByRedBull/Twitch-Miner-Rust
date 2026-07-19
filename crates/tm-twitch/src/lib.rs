@@ -537,6 +537,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_current_login_from_stable_channel_id() {
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (200, r#"{"data":{"user":{"id":"100","login":"new-login"}}}"#),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: format!("{base_url}/gql"),
+            },
+        );
+
+        assert_eq!(
+            client.fetch_channel_login_by_id("100").await.unwrap(),
+            "new-login"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn mutation_failure_is_not_replayed_after_an_uncertain_response() {
         let (base_url, requests, server) = spawn_http_server([
             (
