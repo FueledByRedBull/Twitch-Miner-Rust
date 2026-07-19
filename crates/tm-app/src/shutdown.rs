@@ -18,6 +18,8 @@ pub(crate) async fn shutdown_background_tasks(
         ("minute", tasks.minute),
         ("drop", tasks.drop),
         ("chat", tasks.chat),
+        ("streak-cache", tasks.streak_cache),
+        ("streak-recovery", tasks.streak_recovery),
     ] {
         if let Some(task) = task {
             waits.spawn(async move {

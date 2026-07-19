@@ -117,6 +117,10 @@ $allowedGoOnly = @(
     'PersonalSections',
     'PlaybackAccessToken'
 )
+$allowedRustOnly = @(
+    'FilterableVideoTower_Videos',
+    'ClipsCards__User'
+)
 
 $missing = @($goMap.Keys | Where-Object { -not $rustMap.ContainsKey($_) } | Sort-Object)
 $extra = @($rustMap.Keys | Where-Object { -not $goMap.ContainsKey($_) } | Sort-Object)
@@ -125,15 +129,18 @@ $mismatches = @($goMap.Keys | Where-Object {
 } | Sort-Object)
 $unexpectedMissing = @($missing | Where-Object { $_ -notin $allowedGoOnly })
 $unexpectedGoOnly = @($allowedGoOnly | Where-Object { $_ -notin $missing })
+$unexpectedExtra = @($extra | Where-Object { $_ -notin $allowedRustOnly })
+$missingRustOnly = @($allowedRustOnly | Where-Object { $_ -notin $extra })
 
-if ($unexpectedMissing.Count -or $unexpectedGoOnly.Count -or $extra.Count -or $mismatches.Count) {
+if ($unexpectedMissing.Count -or $unexpectedGoOnly.Count -or $unexpectedExtra.Count -or $missingRustOnly.Count -or $mismatches.Count) {
     throw @"
 Go/Rust contract comparison failed.
 Unexpected Go-only: $($unexpectedMissing -join ', ')
 Missing documented Go-only: $($unexpectedGoOnly -join ', ')
-Extra Rust operations: $($extra -join ', ')
+Unexpected Rust-only: $($unexpectedExtra -join ', ')
+Missing documented Rust-only: $($missingRustOnly -join ', ')
 Hash mismatches: $($mismatches -join ', ')
 "@
 }
 
-Write-Output "go-baseline-ok: $($goMap.Count) Go definitions, $($rustMap.Count) active Rust definitions, $($missing.Count) documented Go-only definitions"
+Write-Output "go-baseline-ok: $($goMap.Count) Go definitions, $($rustMap.Count) active Rust definitions, $($missing.Count) documented Go-only definitions, $($extra.Count) documented Rust-only definitions"

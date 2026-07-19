@@ -101,6 +101,15 @@ async fn claim_available_drops_with_health(
             );
         }
     }
+    if mode == "periodic" {
+        for drop in drops
+            .iter()
+            .filter(|drop| !drop.is_claimed && drop.required_minutes_watched > 0)
+        {
+            let message = observability.drop_progress_message(drop);
+            tracing::info!(operation = "drop_progress", "{message}");
+        }
+    }
     for drop in drops.into_iter().filter(drop_is_claimable) {
         twitch
             .claim_drop(&drop.drop_instance_id)

@@ -12,11 +12,12 @@ use crate::cookies::{claim_bonus_cookie_header, is_twitch_cookie_url, merge_cook
 use crate::ids::{generate_client_session_id, generate_device_id, generate_transaction_id};
 use crate::parsers::minute_watched_request;
 use crate::types::{
-    AvailableDropsData, ChannelPointsContext, ClaimBonusData, ClaimBonusOutcome, ClaimDropData,
-    ClaimDropOutcome, CommunityGoalContributionData, EmptyMutationData, FollowersData,
-    GqlPersistedOperation, GqlResponse, InventoryData, InventoryDrop, LiveStatusData,
-    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
-    UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
+    ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
+    ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
+    EmptyMutationData, FollowersData, GqlPersistedOperation, GqlResponse, InventoryData,
+    InventoryDrop, LiveStatusData, RecentClip, RecentClipsData, RewardListData, StreamInfo,
+    StreamInfoData, TwitchClientError, TwitchEndpoints, UserContributionData, UserIdData,
+    UserLoginData, ViewerDropsDashboard, WatchStreakMilestone,
 };
 use crate::{operations, CLIENT_ID, DEFAULT_CLIENT_VERSION};
 
@@ -349,10 +350,40 @@ impl TwitchClient {
         &self,
         channel_id: &str,
     ) -> Result<Option<OffsetDateTime>, TwitchClientError> {
+        Ok(self
+            .fetch_watch_streak_milestone(channel_id)
+            .await?
+            .map(|milestone| milestone.achievement_timestamp))
+    }
+
+    pub async fn fetch_watch_streak_milestone(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<WatchStreakMilestone>, TwitchClientError> {
         let response: RewardListData = self
             .post_gql_typed(&operations::reward_list(channel_id))
             .await?;
-        watch_streak_achievement_from_typed(response)
+        watch_streak_milestone_from_typed(response)
+    }
+
+    pub async fn fetch_recent_archived_videos(
+        &self,
+        channel_login: &str,
+    ) -> Result<Vec<ArchivedVideo>, TwitchClientError> {
+        let response: ArchivedVideosData = self
+            .post_gql_typed(&operations::recent_archived_videos(channel_login))
+            .await?;
+        archived_videos_from_typed(response)
+    }
+
+    pub async fn fetch_recent_clips(
+        &self,
+        channel_login: &str,
+    ) -> Result<Vec<RecentClip>, TwitchClientError> {
+        let response: RecentClipsData = self
+            .post_gql_typed(&operations::recent_clips(channel_login))
+            .await?;
+        recent_clips_from_typed(response)
     }
 
     pub async fn fetch_followers(
@@ -973,26 +1004,134 @@ fn stream_info_from_typed(data: StreamInfoData) -> Result<StreamInfo, TwitchClie
     })
 }
 
-pub(crate) fn watch_streak_achievement_from_typed(
+pub(crate) fn watch_streak_milestone_from_typed(
     data: RewardListData,
-) -> Result<Option<OffsetDateTime>, TwitchClientError> {
-    let timestamp = data
+) -> Result<Option<WatchStreakMilestone>, TwitchClientError> {
+    let Some(envelope) = data
         .channel
         .and_then(|channel| channel.self_data)
         .and_then(|self_data| self_data.watch_streak_milestone)
-        .and_then(|envelope| envelope.milestone)
-        .and_then(|milestone| milestone.achievement_timestamp);
-    timestamp
+    else {
+        return Ok(None);
+    };
+    let Some(milestone) = envelope.milestone else {
+        return Ok(None);
+    };
+    let Some(timestamp) = milestone
+        .achievement_timestamp
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .map(|value| {
-            OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
-                TwitchClientError::InvalidField(
-                    "data.channel.self.watchStreakMilestone.watchStreakMilestone.achievementTimestamp",
-                )
+    else {
+        return Ok(None);
+    };
+    let achievement_timestamp = OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|_| {
+        TwitchClientError::InvalidField(
+            "data.channel.self.watchStreakMilestone.watchStreakMilestone.achievementTimestamp",
+        )
+    })?;
+    let value = milestone
+        .value
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::parse::<u32>)
+        .transpose()
+        .map_err(|_| {
+            TwitchClientError::InvalidField(
+                "data.channel.self.watchStreakMilestone.watchStreakMilestone.value",
+            )
+        })?;
+    let expires_at = envelope
+        .expires_at
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| OffsetDateTime::parse(value, &Rfc3339))
+        .transpose()
+        .map_err(|_| {
+            TwitchClientError::InvalidField("data.channel.self.watchStreakMilestone.expiresAt")
+        })?;
+    Ok(Some(WatchStreakMilestone {
+        value,
+        achievement_timestamp,
+        expires_at,
+    }))
+}
+
+pub(crate) fn archived_videos_from_typed(
+    data: ArchivedVideosData,
+) -> Result<Vec<ArchivedVideo>, TwitchClientError> {
+    let Some(user) = data.user else {
+        return Ok(Vec::new());
+    };
+    let Some(videos) = user.videos else {
+        return Ok(Vec::new());
+    };
+    videos
+        .edges
+        .into_iter()
+        .map(|edge| {
+            let node = edge.node.ok_or(TwitchClientError::MissingField(
+                "data.user.videos.edges.node",
+            ))?;
+            let id = required_text(node.id, "data.user.videos.edges.node.id")?;
+            let length_seconds = u32::try_from(node.length_seconds.ok_or(
+                TwitchClientError::MissingField("data.user.videos.edges.node.lengthSeconds"),
+            )?)
+            .map_err(|_| {
+                TwitchClientError::InvalidField("data.user.videos.edges.node.lengthSeconds")
+            })?;
+            let broadcast_id = node
+                .broadcast_identifier
+                .and_then(|identifier| identifier.id)
+                .filter(|value| !value.trim().is_empty());
+            Ok(ArchivedVideo {
+                id,
+                broadcast_id,
+                length_seconds,
             })
         })
-        .transpose()
+        .collect()
+}
+
+pub(crate) fn recent_clips_from_typed(
+    data: RecentClipsData,
+) -> Result<Vec<RecentClip>, TwitchClientError> {
+    let Some(user) = data.user else {
+        return Ok(Vec::new());
+    };
+    let Some(clips) = user.clips else {
+        return Ok(Vec::new());
+    };
+    clips
+        .edges
+        .into_iter()
+        .map(|edge| {
+            let node = edge.node.ok_or(TwitchClientError::MissingField(
+                "data.user.clips.edges.node",
+            ))?;
+            let duration_seconds = node
+                .duration_seconds
+                .ok_or(TwitchClientError::MissingField(
+                    "data.user.clips.edges.node.durationSeconds",
+                ))?;
+            if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+                return Err(TwitchClientError::InvalidField(
+                    "data.user.clips.edges.node.durationSeconds",
+                ));
+            }
+            Ok(RecentClip {
+                id: required_text(node.id, "data.user.clips.edges.node.id")?,
+                slug: required_text(node.slug, "data.user.clips.edges.node.slug")?,
+                url: required_text(node.url, "data.user.clips.edges.node.url")?,
+                duration_seconds,
+            })
+        })
+        .collect()
+}
+
+fn required_text(value: Option<String>, field: &'static str) -> Result<String, TwitchClientError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(TwitchClientError::MissingField(field))
 }
 
 pub(crate) fn available_drop_campaign_ids_from_typed(

@@ -1,0 +1,5 @@
+{
+  "data": { "user": { "clips": { "edges": [
+    { "node": { "id": "clip-1", "slug": "UsefulClip", "url": "https://clips.twitch.tv/UsefulClip", "title": "Clip title", "durationSeconds": 24.5 } }
+  ] } } }
+}

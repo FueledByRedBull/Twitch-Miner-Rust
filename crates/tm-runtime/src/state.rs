@@ -174,6 +174,11 @@ impl RuntimeState {
                     return EventApplication::unchanged();
                 }
                 apply_pubsub_gain(streamer, *earned, reason, *balance);
+                if reason == "WATCH_STREAK" {
+                    if let Some(stream) = streamer.stream.as_mut() {
+                        stream.mark_watch_streak_resolved(now);
+                    }
+                }
                 let applied_state_key = format!("{event_key}:{}", streamer.channel_points);
                 remember_mutation_id(&mut streamer.processed_point_event_keys, &applied_state_key);
                 EventApplication::changed(Vec::new())
@@ -575,6 +580,21 @@ impl RuntimeState {
             return;
         };
         stream.update_minute_watched(now);
+    }
+
+    pub fn mark_watch_streak_recovered(
+        &mut self,
+        channel_id: &str,
+        streak_count: Option<u32>,
+        resolved_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    ) -> bool {
+        let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+            return false;
+        };
+        let stream = streamer.stream.get_or_insert_with(Stream::default);
+        stream.apply_watch_streak_milestone(streak_count, resolved_at, expires_at);
+        true
     }
 
     pub fn record_prediction_placed(

@@ -1,0 +1,5 @@
+{
+  "data": { "user": { "videos": { "edges": [
+    { "node": { "id": "vod-1", "broadcastIdentifier": { "id": "broadcast-1" }, "lengthSeconds": 1200 } }
+  ] } } }
+}

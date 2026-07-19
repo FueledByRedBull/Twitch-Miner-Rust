@@ -81,6 +81,7 @@ pub struct StreamerSettingsOverride {
     pub watch_one_stream_when_drops_active: Option<bool>,
     pub claim_moments: Option<bool>,
     pub watch_streak: Option<bool>,
+    pub watch_streak_vod_recovery: Option<bool>,
     pub community_goals: Option<bool>,
     pub chat_presence: Option<String>,
     pub bet: BetConfig,
@@ -116,6 +117,8 @@ pub struct ConfigFile {
     pub claim_drops: bool,
     pub watch_one_stream_when_drops_active: bool,
     pub claim_moments: bool,
+    #[serde(default)]
+    pub watch_streak_vod_recovery: bool,
     #[serde(rename = "betting(make_predictions)")]
     pub betting_make_predictions: bool,
     pub follow_raid: bool,
@@ -167,6 +170,7 @@ pub fn default_config_value() -> Value {
         "claim_drops": true,
         "watch_one_stream_when_drops_active": true,
         "claim_moments": true,
+        "watch_streak_vod_recovery": false,
         "betting(make_predictions)": true,
         "follow_raid": true,
         "community_goals": false,
@@ -642,6 +646,7 @@ pub fn build_base_streamer_settings(config: &ConfigFile) -> StreamerSettings {
         single_watcher_during_drops: config.watch_one_stream_when_drops_active,
         claim_moments: config.claim_moments,
         watch_streak: true,
+        watch_streak_vod_recovery: config.watch_streak_vod_recovery,
         community_goals: config.community_goals,
         bet: merge_bet_settings(&BetSettings::default(), &config.bet),
         irc_mode: parse_chat_presence(&config.chat_presence, IrcMode::Online),
@@ -690,6 +695,9 @@ fn merge_streamer_settings(
     }
     if let Some(value) = override_settings.watch_streak {
         settings.watch_streak = value;
+    }
+    if let Some(value) = override_settings.watch_streak_vod_recovery {
+        settings.watch_streak_vod_recovery = value;
     }
     if let Some(value) = override_settings.community_goals {
         settings.community_goals = value;
@@ -987,6 +995,7 @@ fn ensure_streamer_override_fields(value: &mut Value, bet_defaults: &Value) -> b
         "watch_one_stream_when_drops_active",
         "claim_moments",
         "watch_streak",
+        "watch_streak_vod_recovery",
         "community_goals",
         "chat_presence",
     ] {

@@ -24,6 +24,14 @@ If you want to watch logs in the foreground, run the command directly in the ter
   `watch_one_stream_when_drops_active=true` to limit watching to the
   highest-ranked eligible campaign; all three settings support per-streamer
   overrides.
+- `watch_streak_vod_recovery` is an opt-in global/per-streamer setting. It uses
+  one bounded offline worker, exact missed-broadcast VOD matching where
+  available, clip fallback, and immediate live-stream preemption. Accepted
+  playback events are progress evidence only; the miner requires a newer typed
+  streak milestone before it reports recovery. The private
+  `data/streak-cache.json` stores only bounded channel/streak metadata.
+- `LONGEST_STREAK` and `EXPIRING_STREAK` may be used in `watch_priority`; both
+  stay inside the existing 15-minute live-streak budget.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 - A saved session starts reauthorization only after a definitive authentication

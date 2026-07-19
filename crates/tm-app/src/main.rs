@@ -24,6 +24,8 @@ mod pubsub;
 mod runtime_effects;
 mod shutdown;
 mod startup;
+mod streak_cache;
+mod streak_recovery;
 mod tasks;
 mod utilities;
 mod watching;
@@ -37,6 +39,7 @@ use drops::claim_startup_drops_if_enabled;
 use observability::{build_observability, log_session_summary, log_startup};
 use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
 use startup::{bootstrap_runtime_state, build_canary_logger_settings, build_logger_settings};
+use streak_cache::StreakCache;
 use tasks::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
 use utilities::{clear_console, new_session_id, set_console_title, time_now};
 
@@ -192,6 +195,17 @@ async fn main() -> Result<()> {
         DEFAULT_USER_AGENT,
         twitch_cookie_header,
     ));
+    let mut streak_cache = if let Ok(cache) = StreakCache::load(&active_paths.work_dir, started_at)
+    {
+        cache
+    } else {
+        tracing::warn!(
+            task = "streak-cache",
+            error_class = "load",
+            "streak cache unavailable; starting with an empty cache"
+        );
+        StreakCache::default()
+    };
     let bootstrap_started = StdInstant::now();
     let state = bootstrap_runtime_state(
         &config,
@@ -199,8 +213,19 @@ async fn main() -> Result<()> {
         user_id.as_deref(),
         started_at,
         &observability,
+        &mut streak_cache,
     )
     .await?;
+    if streak_cache
+        .save(&active_paths.work_dir, time_now())
+        .is_err()
+    {
+        tracing::warn!(
+            task = "streak-cache",
+            error_class = "write",
+            "initial streak cache write failed"
+        );
+    }
     claim_startup_drops_if_enabled(&config, &state.streamers, &twitch, &observability).await?;
     tracing::info!(
         operation = "run",
@@ -211,7 +236,7 @@ async fn main() -> Result<()> {
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let health = status::HealthTracker::default();
-    let tasks = spawn_background_tasks(BackgroundTaskParams {
+    let tasks = spawn_background_tasks(&BackgroundTaskParams {
         config: &config,
         stop_rx,
         runtime: &runtime,
@@ -222,6 +247,8 @@ async fn main() -> Result<()> {
         initial_streamers: &initial_streamers,
         observability: &observability,
         health: &health,
+        streak_cache: &streak_cache,
+        work_dir: &active_paths.work_dir,
     })?;
     let status =
         status::StatusReporter::ready(&active_paths.work_dir, health, runtime.metrics_handle())?;

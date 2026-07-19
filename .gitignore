@@ -10,6 +10,7 @@
 /config.json
 /cookies/
 /log/
+/streak-cache.json
 /.env
 /.env.*
 /miner-update-*

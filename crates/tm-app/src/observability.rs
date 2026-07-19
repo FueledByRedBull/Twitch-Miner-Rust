@@ -279,6 +279,28 @@ impl AppObservability {
         )
     }
 
+    pub(crate) fn drop_progress_message(&self, drop: &InventoryDrop) -> String {
+        let hidden = self.anonymized();
+        let reward = if hidden {
+            "[hidden]"
+        } else {
+            drop.reward_name.as_str()
+        };
+        let campaign = if hidden {
+            "[hidden]"
+        } else {
+            drop.campaign_name.as_str()
+        };
+        self.decorate(
+            "📦",
+            format!(
+                "Drop progress → {reward} | Campaign: {campaign} | Progress: {} ({}%)",
+                format_drop_progress(drop.current_minutes_watched, drop.required_minutes_watched),
+                progress_percent(drop.current_minutes_watched, drop.required_minutes_watched),
+            ),
+        )
+    }
+
     pub(crate) fn minute_watcher_resume_message(
         &self,
         gap: Duration,

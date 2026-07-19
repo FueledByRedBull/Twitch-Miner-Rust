@@ -19,6 +19,8 @@ pub enum WatchPriority {
     Subscribed,
     PointsAscending,
     PointsDescending,
+    LongestStreak,
+    ExpiringStreak,
 }
 
 #[must_use]
@@ -46,6 +48,8 @@ pub fn parse_watch_priorities(priority_names: &[String]) -> Vec<WatchPriority> {
             "SUBSCRIBED" | "SUBS" | "MULTIPLIER" => Some(WatchPriority::Subscribed),
             "POINTS_ASC" | "POINTS_ASCENDING" => Some(WatchPriority::PointsAscending),
             "POINTS_DESC" | "POINTS_DESCENDING" => Some(WatchPriority::PointsDescending),
+            "LONGEST_STREAK" | "STREAK_LONGEST" => Some(WatchPriority::LongestStreak),
+            "EXPIRING_STREAK" | "STREAK_EXPIRING" => Some(WatchPriority::ExpiringStreak),
             _ => None,
         };
         if let Some(priority) = parsed_priority {
@@ -265,6 +269,9 @@ pub fn pick_streamers_to_watch(
                 .copied()
                 .filter(|candidate| streamers[candidate.idx].has_active_multipliers())
                 .collect(),
+            WatchPriority::LongestStreak | WatchPriority::ExpiringStreak => {
+                streak_candidates.clone()
+            }
             WatchPriority::Order
             | WatchPriority::PointsAscending
             | WatchPriority::PointsDescending => candidates.clone(),
@@ -288,6 +295,30 @@ pub fn pick_streamers_to_watch(
                 .cmp(&streamers[left.idx].channel_points)
                 .then_with(|| left.rank.cmp(&right.rank))
                 .then_with(|| left.position.cmp(&right.position)),
+            WatchPriority::LongestStreak => streamers[right.idx]
+                .stream
+                .as_ref()
+                .and_then(|stream| active_streak_count(stream, now))
+                .cmp(
+                    &streamers[left.idx]
+                        .stream
+                        .as_ref()
+                        .and_then(|stream| active_streak_count(stream, now)),
+                )
+                .then_with(|| left.rank.cmp(&right.rank))
+                .then_with(|| left.position.cmp(&right.position)),
+            WatchPriority::ExpiringStreak => compare_optional_deadlines(
+                streamers[left.idx]
+                    .stream
+                    .as_ref()
+                    .and_then(|stream| active_streak_deadline(stream, now)),
+                streamers[right.idx]
+                    .stream
+                    .as_ref()
+                    .and_then(|stream| active_streak_deadline(stream, now)),
+            )
+            .then_with(|| left.rank.cmp(&right.rank))
+            .then_with(|| left.position.cmp(&right.position)),
             _ => left
                 .rank
                 .cmp(&right.rank)
@@ -356,6 +387,32 @@ pub fn pick_streamers_to_watch(
     selected
 }
 
+fn compare_optional_deadlines(
+    left: Option<OffsetDateTime>,
+    right: Option<OffsetDateTime>,
+) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn active_streak_deadline(stream: &Stream, now: OffsetDateTime) -> Option<OffsetDateTime> {
+    stream
+        .watch_streak_expires_at
+        .filter(|deadline| *deadline > now)
+}
+
+fn active_streak_count(stream: &Stream, now: OffsetDateTime) -> Option<u32> {
+    stream
+        .watch_streak_expires_at
+        .is_none_or(|deadline| deadline > now)
+        .then_some(stream.watch_streak_count)
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
@@ -376,12 +433,16 @@ mod tests {
                 String::from("ORDER"),
                 String::from("drops"),
                 String::from("points_desc"),
+                String::from("longest_streak"),
+                String::from("streak_expiring"),
                 String::from("ignored"),
             ]),
             vec![
                 WatchPriority::Drops,
                 WatchPriority::Order,
-                WatchPriority::PointsDescending
+                WatchPriority::PointsDescending,
+                WatchPriority::LongestStreak,
+                WatchPriority::ExpiringStreak,
             ]
         );
         assert_eq!(
@@ -699,6 +760,58 @@ mod tests {
         );
 
         assert_eq!(selected, vec![0, 1]);
+    }
+
+    #[test]
+    fn streak_metadata_priorities_are_deterministic_and_bounded() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let make_streamer =
+            |username: &str, count: Option<u32>, expiry_hours: Option<i64>| Streamer {
+                username: username.to_string(),
+                is_online: true,
+                online_at: Some(now - time::Duration::minutes(2)),
+                settings: StreamerSettings {
+                    watch_streak: true,
+                    ..StreamerSettings::default()
+                },
+                stream: Some(Stream {
+                    watch_streak_missing: true,
+                    watch_streak_count: count,
+                    watch_streak_expires_at: expiry_hours
+                        .map(|hours| now + time::Duration::hours(hours)),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            };
+        let streamers = vec![
+            make_streamer("unknown", None, None),
+            make_streamer("longest", Some(12), Some(10)),
+            make_streamer("expiring", Some(4), Some(1)),
+            make_streamer("expired", Some(99), Some(-1)),
+        ];
+
+        assert_eq!(
+            pick_streamers_to_watch(
+                &streamers,
+                &[WatchPriority::LongestStreak],
+                &[],
+                &[],
+                None,
+                now,
+            ),
+            vec![1, 2]
+        );
+        assert_eq!(
+            pick_streamers_to_watch(
+                &streamers,
+                &[WatchPriority::ExpiringStreak],
+                &[],
+                &[],
+                None,
+                now,
+            ),
+            vec![2, 1]
+        );
     }
 
     #[test]

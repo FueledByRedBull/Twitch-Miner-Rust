@@ -12,6 +12,7 @@
   "claim_drops": true,
   "watch_one_stream_when_drops_active": true,
   "claim_moments": true,
+  "watch_streak_vod_recovery": false,
   "betting(make_predictions)": true,
   "follow_raid": true,
   "community_goals": true,
@@ -60,6 +61,7 @@
       "watch_one_stream_when_drops_active": false,
       "claim_moments": true,
       "watch_streak": true,
+      "watch_streak_vod_recovery": true,
       "community_goals": true,
       "chat_presence": "OFFLINE",
       "bet": {

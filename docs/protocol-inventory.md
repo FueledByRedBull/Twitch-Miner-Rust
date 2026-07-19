@@ -3,8 +3,8 @@
 The Rust client keeps persisted-operation names and SHA-256 hashes in
 `tm-twitch::PERSISTED_OPERATION_CONTRACTS`. A unit test verifies that every
 builder uses an inventoried, unique contract. The comparison source is the Go
-implementation at commit `91f00698314d`; the hashes below match the operations
-actually used there.
+implementation at commit `91f00698314d`; the baseline gate permits only its four
+documented unused definitions plus Rust's two typed offline-recovery reads.
 
 When both repositories are available, run the baseline tests and the explicit
 comparison gate from the Rust workspace:
@@ -25,6 +25,8 @@ exercises.
 | `WithIsStreamLiveQuery` | Read-only |
 | `VideoPlayerStreamInfoOverlayChannel` | Read-only |
 | `RewardList` | Read-only |
+| `FilterableVideoTower_Videos` | Read-only |
+| `ClipsCards__User` | Read-only |
 | `Inventory` | Read-only |
 | `ViewerDropsDashboard` | Read-only |
 | `DropsHighlightService_AvailableDrops` | Read-only |
@@ -49,6 +51,15 @@ prediction, join a raid, contribute points, mutate cookies, or send Discord
 notifications. Record the source revision, image digest, date, and success or
 failure class in the release notes; never record cookies, account IDs, raw
 payloads, or request headers.
+
+Offline streak recovery uses the two typed read-only operations above. Archived
+videos require an ID, duration, and optional broadcast identifier; the scheduler
+accepts a VOD only when its broadcast identifier exactly matches the missed live
+broadcast and it is at least five minutes long. Clip nodes require an ID, slug,
+URL, and finite positive duration. Playback submission is opt-in, single-worker,
+bounded to 23.5 hours, and preempted by live state. An HTTP 204 is recorded only
+as accepted playback progress; a newer typed `RewardList` milestone is required
+before runtime state reports recovery.
 
 Mutation contracts are verified with sanitized fixtures and response-validation
 tests. Read-only requests are bounded and header-aware; mutations are never

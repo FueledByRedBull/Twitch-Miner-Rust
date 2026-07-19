@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Adds a versioned, bounded private streak cache, deterministic longest/expiring
+  streak priorities, and opt-in 23.5-hour offline VOD/clip streak recovery with
+  exact broadcast matching, live preemption, sanitized progress, and typed
+  milestone confirmation.
+- Adds periodic typed drop-progress console lines without additional inventory
+  requests or raw campaign/drop identifiers.
+
 - Refreshes the pinned GitHub Actions used for checkout, Rust, Go, artifacts,
   metadata, security scanning, and multi-architecture builds, and updates
   `regex`, `chrono`, `tokio`, `clap`, and `tokio-tungstenite`. These
