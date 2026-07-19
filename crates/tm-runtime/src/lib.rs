@@ -239,6 +239,7 @@ mod tests {
         );
         assert_eq!(state.game_priority, vec!["valorant"]);
         assert_eq!(state.streamers[1].settings.irc_mode, IrcMode::Offline);
+        assert!(state.streamers[1].settings.farm_drops);
         assert!(!state.streamers[1].settings.claim_drops);
     }
 
@@ -499,6 +500,11 @@ mod tests {
         assert!(state.streamers[0].watch_suspended_until.is_none());
         assert_eq!(state.initial_points.get("new-login"), Some(&99));
         assert!(!state.initial_points.contains_key("old-login"));
+
+        state.streamers[0].watch_suspended_until = Some(ts(600));
+        assert!(state.update_streamer_login("123", "new-login"));
+        assert!(state.streamers[0].watch_suspended_until.is_none());
+        assert!(!state.update_streamer_login("123", "new-login"));
     }
 
     #[test]

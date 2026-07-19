@@ -76,7 +76,9 @@ pub struct BetConfig {
 pub struct StreamerSettingsOverride {
     pub make_predictions: Option<bool>,
     pub follow_raid: Option<bool>,
+    pub farm_drops: Option<bool>,
     pub claim_drops: Option<bool>,
+    pub watch_one_stream_when_drops_active: Option<bool>,
     pub claim_moments: Option<bool>,
     pub watch_streak: Option<bool>,
     pub community_goals: Option<bool>,
@@ -110,7 +112,9 @@ pub struct ConfigFile {
     pub disable_ssl_cert_verification: bool,
     pub show_seconds: bool,
     pub claim_drops_startup: bool,
+    pub farm_drops: bool,
     pub claim_drops: bool,
+    pub watch_one_stream_when_drops_active: bool,
     pub claim_moments: bool,
     #[serde(rename = "betting(make_predictions)")]
     pub betting_make_predictions: bool,
@@ -159,7 +163,9 @@ pub fn default_config_value() -> Value {
         "disable_ssl_cert_verification": false,
         "show_seconds": false,
         "claim_drops_startup": true,
+        "farm_drops": true,
         "claim_drops": true,
+        "watch_one_stream_when_drops_active": true,
         "claim_moments": true,
         "betting(make_predictions)": true,
         "follow_raid": true,
@@ -235,6 +241,7 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     }
 
     migrate_removed_options(&mut value, &mut changed)?;
+    migrate_drop_farming_options(&mut value, &mut changed);
     validate_schema_version(&value)?;
 
     changed |= fill_missing_top_level(&mut value, &default_config_value());
@@ -381,6 +388,37 @@ fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), 
         *changed = true;
     }
     Ok(())
+}
+
+fn migrate_drop_farming_options(value: &mut Value, changed: &mut bool) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    if !root.contains_key("farm_drops") {
+        let legacy_value = root
+            .get("claim_drops")
+            .and_then(Value::as_bool)
+            .map_or(Value::Bool(true), Value::Bool);
+        root.insert(String::from("farm_drops"), legacy_value);
+        *changed = true;
+    }
+    let Some(overrides) = root
+        .get_mut("streamer_overrides")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for override_value in overrides.values_mut().filter_map(Value::as_object_mut) {
+        if override_value.contains_key("farm_drops") {
+            continue;
+        }
+        let legacy_value = override_value
+            .get("claim_drops")
+            .cloned()
+            .unwrap_or(Value::Null);
+        override_value.insert(String::from("farm_drops"), legacy_value);
+        *changed = true;
+    }
 }
 
 fn validate_schema_version(value: &Value) -> Result<(), ConfigError> {
@@ -599,7 +637,9 @@ pub fn build_base_streamer_settings(config: &ConfigFile) -> StreamerSettings {
     StreamerSettings {
         make_predictions: config.betting_make_predictions,
         follow_raid: config.follow_raid,
+        farm_drops: config.farm_drops,
         claim_drops: config.claim_drops,
+        single_watcher_during_drops: config.watch_one_stream_when_drops_active,
         claim_moments: config.claim_moments,
         watch_streak: true,
         community_goals: config.community_goals,
@@ -636,8 +676,14 @@ fn merge_streamer_settings(
     if let Some(value) = override_settings.follow_raid {
         settings.follow_raid = value;
     }
+    if let Some(value) = override_settings.farm_drops {
+        settings.farm_drops = value;
+    }
     if let Some(value) = override_settings.claim_drops {
         settings.claim_drops = value;
+    }
+    if let Some(value) = override_settings.watch_one_stream_when_drops_active {
+        settings.single_watcher_during_drops = value;
     }
     if let Some(value) = override_settings.claim_moments {
         settings.claim_moments = value;
@@ -936,7 +982,9 @@ fn ensure_streamer_override_fields(value: &mut Value, bet_defaults: &Value) -> b
     for key in [
         "make_predictions",
         "follow_raid",
+        "farm_drops",
         "claim_drops",
+        "watch_one_stream_when_drops_active",
         "claim_moments",
         "watch_streak",
         "community_goals",
@@ -1342,13 +1390,54 @@ mod tests {
             String::from("SomeStreamer"),
             StreamerSettingsOverride {
                 chat_presence: Some(String::from("invalid")),
+                farm_drops: Some(true),
                 claim_drops: Some(false),
+                watch_one_stream_when_drops_active: Some(false),
                 ..StreamerSettingsOverride::default()
             },
         )]);
         let merged = build_override_settings(&base, &overrides);
         let override_settings = merged.get("somestreamer").unwrap();
+        assert!(override_settings.farm_drops);
         assert!(!override_settings.claim_drops);
+        assert!(!override_settings.single_watcher_during_drops);
         assert_eq!(override_settings.irc_mode, base.irc_mode);
+    }
+
+    #[test]
+    fn migrates_legacy_drop_claiming_into_independent_farming_controls() {
+        let dir = unique_temp_dir("drop-farming-migration");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json!({
+                "username": "Alice",
+                "claim_drops": false,
+                "streamer_overrides": {
+                    "enabled": { "claim_drops": true },
+                    "inherited": { "claim_drops": Value::Null }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let config = load_or_create_config(&path).unwrap();
+        assert!(!config.farm_drops);
+        assert!(config.watch_one_stream_when_drops_active);
+        let base = build_base_streamer_settings(&config);
+        let merged = build_override_settings(&base, &config.streamer_overrides);
+        assert!(merged["enabled"].farm_drops);
+        assert!(merged["enabled"].claim_drops);
+        assert!(!merged["inherited"].farm_drops);
+
+        let migrated: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(migrated["farm_drops"], Value::Bool(false));
+        assert_eq!(
+            migrated["streamer_overrides"]["enabled"]["farm_drops"],
+            Value::Bool(true)
+        );
+        assert!(migrated["streamer_overrides"]["inherited"]["farm_drops"].is_null());
     }
 }

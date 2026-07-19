@@ -156,7 +156,9 @@ impl Default for BetSettings {
 pub struct StreamerSettings {
     pub make_predictions: bool,
     pub follow_raid: bool,
+    pub farm_drops: bool,
     pub claim_drops: bool,
+    pub single_watcher_during_drops: bool,
     pub claim_moments: bool,
     pub watch_streak: bool,
     pub community_goals: bool,

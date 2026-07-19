@@ -92,8 +92,10 @@ The miner will create and extend its config automatically, but a minimal manual 
 {
   "username": "your-twitch-username",
   "streamers": ["StreamerHouse"],
+  "farm_drops": true,
   "claim_drops": true,
   "claim_drops_startup": true,
+  "watch_one_stream_when_drops_active": true,
   "claim_moments": true,
   "followers_order": "DESC",
   "community_goals": false,
@@ -108,6 +110,11 @@ Notes:
 - Remove `password` from older configs if it is still present; device-code login does not use it and startup will reject a non-empty value.
 - `disable_ssl_cert_verification` is intentionally unsupported and will be rejected at startup/config validation.
 - Prediction bet percentages must be `0`-`100`; delays must be finite and non-negative, and `PERCENTAGE` delay mode accepts `0`-`1`. Invalid values are rejected before runtime.
+- `farm_drops` controls campaign discovery, `DROPS` priority, and drop-shaped
+  minute-watch metadata. `claim_drops` independently controls claim mutations.
+  `watch_one_stream_when_drops_active` limits the watch set to one deterministic
+  streamer while an eligible campaign is active, matching Twitch's
+  single-stream drop progress behavior. All three can be overridden per streamer.
 
 Important paths:
 

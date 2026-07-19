@@ -139,43 +139,10 @@ pub fn pick_streamers_to_watch(
         streak_ready: bool,
     }
 
-    fn game_for(streamers: &[Streamer], idx: usize) -> Option<String> {
-        streamers[idx]
-            .stream
-            .as_ref()
-            .map(|stream| stream.game_name().to_lowercase())
-            .filter(|value| !value.is_empty())
-    }
-
-    fn add_candidate(
-        candidate: Candidate,
-        streamers: &[Streamer],
-        candidates: &[Candidate],
-        selected: &mut Vec<usize>,
-        seen: &mut HashSet<usize>,
-        selected_games: &mut HashSet<String>,
-    ) {
+    fn add_candidate(candidate: Candidate, selected: &mut Vec<usize>, seen: &mut HashSet<usize>) {
         if selected.len() >= MAX_CONCURRENT_WATCHERS || !seen.insert(candidate.idx) {
             return;
         }
-
-        if let Some(candidate_game) = game_for(streamers, candidate.idx) {
-            if selected_games.contains(&candidate_game) {
-                let other_available = candidates.iter().any(|other| {
-                    if seen.contains(&other.idx) {
-                        return false;
-                    }
-                    game_for(streamers, other.idx)
-                        .is_some_and(|other_game| other_game != candidate_game)
-                });
-                if other_available {
-                    seen.remove(&candidate.idx);
-                    return;
-                }
-            }
-            selected_games.insert(candidate_game);
-        }
-
         selected.push(candidate.idx);
     }
 
@@ -247,9 +214,36 @@ pub fn pick_streamers_to_watch(
         watch_priorities.to_vec()
     };
 
+    let mut drop_candidates = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let streamer = &streamers[candidate.idx];
+            streamer.settings.farm_drops
+                && streamer
+                    .stream
+                    .as_ref()
+                    .is_some_and(Stream::has_active_drop_campaign)
+        })
+        .collect::<Vec<_>>();
+    drop_candidates.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.position.cmp(&right.position))
+    });
+    if priorities.contains(&WatchPriority::Drops) {
+        if let Some(candidate) = drop_candidates.first() {
+            if streamers[candidate.idx]
+                .settings
+                .single_watcher_during_drops
+            {
+                return vec![candidate.idx];
+            }
+        }
+    }
+
     let mut selected = Vec::new();
     let mut seen = HashSet::new();
-    let mut selected_games = HashSet::new();
 
     let skip_early_streak = !game_priority.is_empty() && !has_priority_game_streak;
 
@@ -265,18 +259,7 @@ pub fn pick_streamers_to_watch(
                     streak_candidates.clone()
                 }
             }
-            WatchPriority::Drops => candidates
-                .iter()
-                .copied()
-                .filter(|candidate| {
-                    let streamer = &streamers[candidate.idx];
-                    streamer.settings.claim_drops
-                        && streamer
-                            .stream
-                            .as_ref()
-                            .is_some_and(Stream::has_active_drop_campaign)
-                })
-                .collect(),
+            WatchPriority::Drops => drop_candidates.clone(),
             WatchPriority::Subscribed => candidates
                 .iter()
                 .copied()
@@ -312,14 +295,7 @@ pub fn pick_streamers_to_watch(
         });
 
         for candidate in ordered {
-            add_candidate(
-                candidate,
-                streamers,
-                &candidates,
-                &mut selected,
-                &mut seen,
-                &mut selected_games,
-            );
+            add_candidate(candidate, &mut selected, &mut seen);
             if selected.len() >= MAX_CONCURRENT_WATCHERS {
                 break;
             }
@@ -343,14 +319,7 @@ pub fn pick_streamers_to_watch(
             .find(|candidate| !seen.contains(&candidate.idx))
         {
             if selected.len() < MAX_CONCURRENT_WATCHERS {
-                add_candidate(
-                    streak_pick,
-                    streamers,
-                    &candidates,
-                    &mut selected,
-                    &mut seen,
-                    &mut selected_games,
-                );
+                add_candidate(streak_pick, &mut selected, &mut seen);
             } else {
                 let keep = selected[0];
                 selected = vec![keep, streak_pick.idx];
@@ -377,14 +346,7 @@ pub fn pick_streamers_to_watch(
                 .then_with(|| left.position.cmp(&right.position))
         });
         for candidate in fallback {
-            add_candidate(
-                candidate,
-                streamers,
-                &candidates,
-                &mut selected,
-                &mut seen,
-                &mut selected_games,
-            );
+            add_candidate(candidate, &mut selected, &mut seen);
             if selected.len() >= MAX_CONCURRENT_WATCHERS {
                 break;
             }
@@ -516,7 +478,7 @@ mod tests {
             is_online: true,
             online_at: Some(online_at),
             settings: StreamerSettings {
-                claim_drops: true,
+                farm_drops: true,
                 ..StreamerSettings::default()
             },
             stream: Some(Stream {
@@ -592,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_picker_avoids_duplicate_games_when_alternatives_exist() {
+    fn watch_picker_preserves_configured_order_across_duplicate_games() {
         let online_at = datetime!(2026-03-27 05:58 UTC);
         let streamers = vec![
             Streamer {
@@ -636,7 +598,107 @@ mod tests {
             datetime!(2026-03-27 06:00 UTC),
         );
 
-        assert_eq!(selected, vec![0, 2]);
+        assert_eq!(selected, vec![0, 1]);
+    }
+
+    #[test]
+    fn active_drop_campaign_can_reserve_the_single_watch_slot() {
+        let online_at = datetime!(2026-03-27 05:58 UTC);
+        let make_streamer = |username: &str, single_watcher: bool| Streamer {
+            username: username.to_string(),
+            is_online: true,
+            online_at: Some(online_at),
+            settings: StreamerSettings {
+                farm_drops: true,
+                single_watcher_during_drops: single_watcher,
+                ..StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                drop_campaign_eligible: Some(true),
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        };
+        let streamers = vec![make_streamer("first", true), make_streamer("second", true)];
+
+        let selected = pick_streamers_to_watch(
+            &streamers,
+            &[WatchPriority::Drops, WatchPriority::Order],
+            &[],
+            &[],
+            None,
+            datetime!(2026-03-27 06:00 UTC),
+        );
+
+        assert_eq!(selected, vec![0]);
+    }
+
+    #[test]
+    fn active_drop_campaign_uses_both_slots_when_single_watcher_is_disabled() {
+        let online_at = datetime!(2026-03-27 05:58 UTC);
+        let streamers = (0..2)
+            .map(|index| Streamer {
+                username: format!("streamer{index}"),
+                is_online: true,
+                online_at: Some(online_at),
+                settings: StreamerSettings {
+                    farm_drops: true,
+                    single_watcher_during_drops: false,
+                    ..StreamerSettings::default()
+                },
+                stream: Some(Stream {
+                    drop_campaign_eligible: Some(true),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            })
+            .collect::<Vec<_>>();
+
+        let selected = pick_streamers_to_watch(
+            &streamers,
+            &[WatchPriority::Drops],
+            &[],
+            &[],
+            None,
+            datetime!(2026-03-27 06:00 UTC),
+        );
+
+        assert_eq!(selected, vec![0, 1]);
+    }
+
+    #[test]
+    fn highest_ranked_drop_candidate_controls_single_watcher_override() {
+        let online_at = datetime!(2026-03-27 05:58 UTC);
+        let streamers = [false, true]
+            .into_iter()
+            .enumerate()
+            .map(|(index, single_watcher)| Streamer {
+                username: format!("streamer{index}"),
+                is_online: true,
+                online_at: Some(online_at),
+                settings: StreamerSettings {
+                    farm_drops: true,
+                    single_watcher_during_drops: single_watcher,
+                    ..StreamerSettings::default()
+                },
+                stream: Some(Stream {
+                    drop_campaign_eligible: Some(true),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            })
+            .collect::<Vec<_>>();
+
+        let selected = pick_streamers_to_watch(
+            &streamers,
+            &[WatchPriority::Drops],
+            &[],
+            &[],
+            None,
+            datetime!(2026-03-27 06:00 UTC),
+        );
+
+        assert_eq!(selected, vec![0, 1]);
     }
 
     #[test]

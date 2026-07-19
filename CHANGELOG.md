@@ -13,6 +13,10 @@
 - Replaces blanket short-restart streak suppression with explicit resolved
   state carryover across repeated sub-30-minute stream segments, uses a measured
   15-minute streak budget, and removes the unnecessary 30-second online delay.
+- Separates drop farming from reward claiming, migrates legacy `claim_drops`
+  choices without changing their effective behavior, optionally limits the
+  watch set to one verified active campaign, and removes same-game watcher
+  diversification that unnecessarily reduced channel-point throughput.
 - Restores the independently supervised PubSub `/v1` compatibility transport
   for viewer prediction discovery/results, immediate points and bonus events,
   moments, raid IDs, and community goals while retaining EventSub as the
@@ -55,7 +59,7 @@
 - Treats Twitch's null available-drops channel/list as an empty result, matching
   the Go miner while retaining strict campaign IDs for present entries.
 - Restores the Python parent's campaign-aware `DROPS` watch priority: only a
-  live, drop-enabled channel with a validated active campaign is promoted,
+  live, drop-farming-enabled channel with a validated active campaign is promoted,
   campaign state is invalidated on broadcast/game changes, and later configured
   priorities safely fill unused watch slots.
 - Removes the dormant automatic updater and migrates/rejects legacy

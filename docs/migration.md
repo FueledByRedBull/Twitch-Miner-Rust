@@ -17,6 +17,9 @@ normal Rust startup performs a versioned config migration only when necessary:
 
 - it adds `config_schema_version`;
 - it fills missing supported defaults;
+- it initializes a missing `farm_drops` field from the legacy `claim_drops`
+  value, including per-streamer overrides, and adds the default single-watcher
+  campaign control;
 - it removes a legacy `auto_update=false` field; and
 - it writes `<config>.bak` before the atomic replacement.
 

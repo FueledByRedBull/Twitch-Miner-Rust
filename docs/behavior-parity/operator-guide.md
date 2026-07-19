@@ -19,6 +19,11 @@ If you want to watch logs in the foreground, run the command directly in the ter
 - Remove `password` from older configs; device-code login does not use it.
 - `claim_moments` is the global moment-discovery/claim default; a streamer
   override can enable or disable it for one channel.
+- `farm_drops` controls drop progress and campaign-aware selection, while
+  `claim_drops` controls only claim mutations. Leave
+  `watch_one_stream_when_drops_active=true` to limit watching to the
+  highest-ranked eligible campaign; all three settings support per-streamer
+  overrides.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 - A saved session starts reauthorization only after a definitive authentication

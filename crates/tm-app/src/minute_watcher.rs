@@ -212,7 +212,7 @@ async fn refresh_drop_campaign_eligibility(
     streamer: &Streamer,
     info: &tm_twitch::StreamInfo,
 ) -> Result<()> {
-    if !streamer.settings.claim_drops {
+    if !streamer.settings.farm_drops {
         return Ok(());
     }
 
@@ -357,12 +357,10 @@ pub(crate) async fn handle_minute_watched_info_error(
                     runtime
                         .update_streamer_login(streamer.channel_id.clone(), login.clone())
                         .await?;
+                    let streamer_name = observability.streamer_name(streamer);
                     tracing::warn!(
                         operation = "update_streamer_login",
-                        old_login = %streamer.username,
-                        new_login = %login,
-                        channel_id = %streamer.channel_id,
-                        "streamer login changed; runtime identity refreshed, update config before restart"
+                        "streamer login changed for {streamer_name}; runtime identity refreshed, update config before restart"
                     );
                     let mut recovered = streamer.clone();
                     recovered.username = login;
@@ -376,12 +374,11 @@ pub(crate) async fn handle_minute_watched_info_error(
                     now + std::time::Duration::from_secs(RENAME_RECOVERY_SUSPENSION_SECONDS),
                 )
                 .await?;
+            let streamer_name = observability.streamer_name(streamer);
             tracing::warn!(
                 operation = "suspend_watching",
-                streamer = %streamer.username,
-                channel_id = %streamer.channel_id,
                 suspension_seconds = RENAME_RECOVERY_SUSPENSION_SECONDS,
-                "live channel identity could not be refreshed; releasing watch slot temporarily"
+                "live channel identity for {streamer_name} could not be refreshed; releasing watch slot temporarily"
             );
         }
         return Err(error.into());
@@ -551,7 +548,7 @@ pub(crate) fn build_minute_watched_event(
         (String::from("live"), json!(true)),
         (String::from("channel"), json!(streamer.username)),
     ]);
-    if streamer.settings.claim_drops && !info.game_name.trim().is_empty() {
+    if streamer.settings.farm_drops && !info.game_name.trim().is_empty() {
         properties.insert(String::from("game"), json!(info.game_name));
         if let Some(game_id) = info
             .game_id
