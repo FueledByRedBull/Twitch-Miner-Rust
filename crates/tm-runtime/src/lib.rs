@@ -136,6 +136,28 @@ mod tests {
     }
 
     #[test]
+    fn watch_streak_event_records_resolution_time_for_warm_restart() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].stream = Some(Stream::default());
+        let event = PubSubEvent::PointsEarned {
+            channel_id: String::from("100"),
+            earned: 50,
+            reason: String::from("WATCH_STREAK"),
+            balance: 50,
+        };
+
+        assert!(state.apply_event_with_outcome(&event, ts(42)).changed);
+        let stream = state.streamers[0].stream.as_ref().unwrap();
+        assert!(!stream.watch_streak_missing);
+        assert_eq!(stream.watch_streak_resolved_at, Some(ts(42)));
+    }
+
+    #[test]
     fn session_summary_hides_points_in_privacy_mode() {
         let streamer = Streamer {
             username: "tester".into(),

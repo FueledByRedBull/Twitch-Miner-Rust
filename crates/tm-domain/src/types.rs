@@ -161,6 +161,7 @@ pub struct StreamerSettings {
     pub single_watcher_during_drops: bool,
     pub claim_moments: bool,
     pub watch_streak: bool,
+    pub watch_streak_vod_recovery: bool,
     pub community_goals: bool,
     pub bet: BetSettings,
     #[serde(rename = "chat_presence")]
@@ -207,6 +208,12 @@ pub struct Stream {
     pub payload: Vec<serde_json::Value>,
     pub watch_streak_missing: bool,
     #[serde(skip)]
+    pub watch_streak_count: Option<u32>,
+    #[serde(skip)]
+    pub watch_streak_resolved_at: Option<OffsetDateTime>,
+    #[serde(skip)]
+    pub watch_streak_expires_at: Option<OffsetDateTime>,
+    #[serde(skip)]
     pub streak_carryover_until: Option<OffsetDateTime>,
     pub minute_watched: f64,
     pub stream_up_at: Option<OffsetDateTime>,
@@ -225,6 +232,9 @@ impl Default for Stream {
             viewers_count: 0,
             payload: Vec::new(),
             watch_streak_missing: true,
+            watch_streak_count: None,
+            watch_streak_resolved_at: None,
+            watch_streak_expires_at: None,
             streak_carryover_until: None,
             minute_watched: 0.0,
             stream_up_at: None,
@@ -269,6 +279,23 @@ impl Stream {
             self.minute_watched += elapsed.whole_milliseconds() as f64 / 60_000.0;
         }
         self.last_minute_update = Some(now);
+    }
+
+    pub fn apply_watch_streak_milestone(
+        &mut self,
+        value: Option<u32>,
+        resolved_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    ) {
+        self.watch_streak_missing = false;
+        self.watch_streak_count = value;
+        self.watch_streak_resolved_at = Some(resolved_at);
+        self.watch_streak_expires_at = expires_at;
+    }
+
+    pub fn mark_watch_streak_resolved(&mut self, resolved_at: OffsetDateTime) {
+        self.watch_streak_missing = false;
+        self.watch_streak_resolved_at = Some(resolved_at);
     }
 
     pub fn reset_watch_progress(&mut self) {

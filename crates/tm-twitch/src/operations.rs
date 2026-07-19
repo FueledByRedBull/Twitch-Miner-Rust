@@ -41,6 +41,16 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
         read_only: true,
     },
     PersistedOperationContract {
+        operation_name: "FilterableVideoTower_Videos",
+        sha256_hash: "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f",
+        read_only: true,
+    },
+    PersistedOperationContract {
+        operation_name: "ClipsCards__User",
+        sha256_hash: "1cd671bfa12cec480499c087319f26d21925e9695d1f80225aae6a4354f23088",
+        read_only: true,
+    },
+    PersistedOperationContract {
         operation_name: "ClaimCommunityPoints",
         sha256_hash: "46aaeebe02c99afdf4fc97c7c0cba964124bf6b0af229395f1f6d1feed05b3d0",
         read_only: false,
@@ -145,6 +155,34 @@ pub fn reward_list(channel_id: &str) -> GqlPersistedOperation {
         json!({
             "channelID": channel_id,
             "shouldIncludeAllSuspendedStreaks": false
+        }),
+    )
+}
+
+#[must_use]
+pub fn recent_archived_videos(channel_login: &str) -> GqlPersistedOperation {
+    GqlPersistedOperation::new(
+        "FilterableVideoTower_Videos",
+        "67004f7881e65c297936f32c75246470629557a393788fb5a69d6d9a25a8fd5f",
+        json!({
+            "broadcastType": "ARCHIVE",
+            "channelOwnerLogin": channel_login.to_lowercase(),
+            "includePreviewBlur": false,
+            "limit": 7,
+            "videoSort": "TIME"
+        }),
+    )
+}
+
+#[must_use]
+pub fn recent_clips(channel_login: &str) -> GqlPersistedOperation {
+    GqlPersistedOperation::new(
+        "ClipsCards__User",
+        "1cd671bfa12cec480499c087319f26d21925e9695d1f80225aae6a4354f23088",
+        json!({
+            "criteria": { "filter": "ALL_TIME" },
+            "limit": 20,
+            "login": channel_login.to_lowercase()
         }),
     )
 }

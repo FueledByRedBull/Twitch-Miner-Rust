@@ -97,6 +97,7 @@ The miner will create and extend its config automatically, but a minimal manual 
   "claim_drops_startup": true,
   "watch_one_stream_when_drops_active": true,
   "claim_moments": true,
+  "watch_streak_vod_recovery": false,
   "followers_order": "DESC",
   "community_goals": false,
   "privacy": {
@@ -115,12 +116,21 @@ Notes:
   `watch_one_stream_when_drops_active` limits the watch set to one deterministic
   streamer while an eligible campaign is active, matching Twitch's
   single-stream drop progress behavior. All three can be overridden per streamer.
+- `watch_streak_vod_recovery` is off by default. When enabled globally or for a
+  streamer, one bounded worker can submit offline VOD/clip playback evidence for
+  an unresolved known streak for up to 23.5 hours after the channel goes offline.
+  Exact broadcast-matched VODs are preferred, live streams preempt recovery, and
+  HTTP acceptance is never reported as recovery without a newer typed milestone.
+- `LONGEST_STREAK` and `EXPIRING_STREAK` are deterministic watch-priority values.
+  They use typed/cache-backed streak metadata and retain the existing 15-minute
+  live streak budget.
 
 Important paths:
 
 - config: `data/config.json`
 - cookies: `data/cookies/<username>.json`
 - optional logs: `data/log/`
+- bounded streak metadata cache: `data/streak-cache.json` (no auth material)
 - the repo also ignores local root runtime paths such as `./config.json`, `./cookies/`, `./log/`, and `.env*`
 
 `auto_update` was removed. A legacy `false` value is migrated away; `true` is rejected.

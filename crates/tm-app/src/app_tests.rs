@@ -754,6 +754,30 @@ mod tests {
     }
 
     #[test]
+    fn drop_progress_message_is_typed_and_privacy_aware() {
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            true,
+            false,
+            true,
+            true,
+        );
+        let drop = InventoryDrop {
+            drop_instance_id: String::from("private-id"),
+            reward_name: String::from("private-reward"),
+            campaign_name: String::from("private-campaign"),
+            current_minutes_watched: 15,
+            required_minutes_watched: 60,
+            is_claimed: false,
+        };
+
+        let message = observability.drop_progress_message(&drop);
+        assert!(message.contains("Progress: 15/60 (25%)"));
+        assert!(!message.contains("private"));
+    }
+
+    #[test]
     fn minute_watcher_resume_gap_uses_threshold() {
         assert_eq!(minute_watcher_resume_gap(ts(0), ts(599)), None);
         assert_eq!(
@@ -904,11 +928,18 @@ mod tests {
             streamers: vec![String::from("alice")],
             ..ConfigFile::default()
         };
+        let mut streak_cache = crate::streak_cache::StreakCache::default();
 
-        let state =
-            bootstrap_runtime_state(&config, &twitch, Some("user-1"), ts(0), &observability)
-                .await
-                .unwrap();
+        let state = bootstrap_runtime_state(
+            &config,
+            &twitch,
+            Some("user-1"),
+            ts(0),
+            &observability,
+            &mut streak_cache,
+        )
+        .await
+        .unwrap();
 
         server.join().unwrap();
         let requests = requests.lock().unwrap();
@@ -958,12 +989,14 @@ mod tests {
             twitch_endpoints,
         );
 
+        let mut streak_cache = crate::streak_cache::StreakCache::default();
         let state = bootstrap_runtime_state(
             &config,
             &twitch,
             session.user_id(),
             ts(0),
             &test_observability(),
+            &mut streak_cache,
         )
         .await
         .unwrap();

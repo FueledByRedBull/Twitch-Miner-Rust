@@ -6,6 +6,7 @@ use tm_twitch::TwitchClient;
 
 use crate::context::{apply_context_to_streamer, contribute_streamer_community_goals};
 use crate::observability::AppObservability;
+use crate::streak_cache::StreakCache;
 
 pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
     LoggerSettings {
@@ -33,6 +34,7 @@ pub(crate) async fn bootstrap_runtime_state(
     user_id: Option<&str>,
     started_at: tm_runtime::RuntimeTime,
     observability: &AppObservability,
+    streak_cache: &mut StreakCache,
 ) -> Result<tm_runtime::RuntimeState> {
     let targets = load_targets(config, twitch).await?;
     let mut state = tm_runtime::RuntimeState::from_targets(config, &targets, started_at);
@@ -43,7 +45,15 @@ pub(crate) async fn bootstrap_runtime_state(
     );
 
     for streamer in &mut state.streamers {
-        bootstrap_streamer(streamer, twitch, user_id, started_at, observability).await?;
+        bootstrap_streamer(
+            streamer,
+            twitch,
+            user_id,
+            started_at,
+            observability,
+            streak_cache,
+        )
+        .await?;
     }
     state.capture_initial_points();
     Ok(state)
@@ -62,12 +72,14 @@ pub(crate) async fn load_targets(
         .context("load followers")
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn bootstrap_streamer(
     streamer: &mut Streamer,
     twitch: &TwitchClient,
     user_id: Option<&str>,
     started_at: tm_runtime::RuntimeTime,
     observability: &AppObservability,
+    streak_cache: &mut StreakCache,
 ) -> Result<()> {
     streamer.channel_id = twitch
         .fetch_channel_id(&streamer.username)
@@ -133,21 +145,49 @@ pub(crate) async fn bootstrap_streamer(
         );
         if streamer.settings.watch_streak {
             match twitch
-                .fetch_watch_streak_achievement(&streamer.channel_id)
+                .fetch_watch_streak_milestone(&streamer.channel_id)
                 .await
             {
-                Ok(Some(achievement))
-                    if info
-                        .created_at
-                        .is_some_and(|created_at| achievement >= created_at) =>
-                {
-                    stream.watch_streak_missing = false;
+                Ok(Some(milestone)) => {
+                    streak_cache.record_milestone(
+                        &streamer.channel_id,
+                        milestone.value,
+                        milestone.achievement_timestamp,
+                        milestone.expires_at,
+                        started_at,
+                    );
+                    stream.watch_streak_count = milestone.value;
+                    stream.watch_streak_resolved_at = Some(milestone.achievement_timestamp);
+                    stream.watch_streak_expires_at = milestone.expires_at;
+                    if info.created_at.is_some_and(|created_at| {
+                        milestone.achievement_timestamp >= created_at
+                            && milestone
+                                .expires_at
+                                .is_none_or(|expires_at| expires_at > started_at)
+                    }) {
+                        stream.watch_streak_missing = false;
+                    }
                 }
-                Ok(_) => {}
-                Err(error) => tracing::debug!(
-                    failure_class = ?error.failure_class(),
-                    "watch streak startup reconciliation unavailable"
-                ),
+                Ok(None) => {
+                    streak_cache.apply_to_stream(
+                        &streamer.channel_id,
+                        stream,
+                        info.created_at,
+                        started_at,
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        failure_class = ?error.failure_class(),
+                        "watch streak startup reconciliation unavailable"
+                    );
+                    streak_cache.apply_to_stream(
+                        &streamer.channel_id,
+                        stream,
+                        info.created_at,
+                        started_at,
+                    );
+                }
             }
         }
         tracing::info!(

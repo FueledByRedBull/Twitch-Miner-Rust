@@ -27,18 +27,19 @@ pub use parsers::{
     validate_gql_mutation_response,
 };
 pub use types::{
-    ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage,
+    ArchivedVideo, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage,
     GqlPersistedExtensions, GqlPersistedOperation, GqlPersistedQuery, GqlRequest, InventoryDrop,
-    MinuteWatchedRequest, StreamInfo, TwitchClientError, TwitchContractError, TwitchEndpoints,
-    TwitchFailureClass, ViewerDropsDashboard,
+    MinuteWatchedRequest, RecentClip, StreamInfo, TwitchClientError, TwitchContractError,
+    TwitchEndpoints, TwitchFailureClass, ViewerDropsDashboard, WatchStreakMilestone,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::{
-        available_drop_campaign_ids_from_typed, channel_points_context_from_typed,
-        inventory_drops_from_typed, user_contributions_from_typed,
+        archived_videos_from_typed, available_drop_campaign_ids_from_typed,
+        channel_points_context_from_typed, inventory_drops_from_typed, recent_clips_from_typed,
+        user_contributions_from_typed, watch_streak_milestone_from_typed,
     };
     use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
     use reqwest::StatusCode;
@@ -219,6 +220,14 @@ mod tests {
         );
         assert_eq!(operations::reward_list("abc").operation_name, "RewardList");
         assert_eq!(
+            operations::recent_archived_videos("abc").operation_name,
+            "FilterableVideoTower_Videos"
+        );
+        assert_eq!(
+            operations::recent_clips("abc").operation_name,
+            "ClipsCards__User"
+        );
+        assert_eq!(
             operations::claim_drop_rewards("drop").operation_name,
             "DropsPage_ClaimDropRewards"
         );
@@ -242,6 +251,8 @@ mod tests {
             operations::is_stream_live("1"),
             operations::stream_info_overlay("abc"),
             operations::reward_list("abc"),
+            operations::recent_archived_videos("abc"),
+            operations::recent_clips("abc"),
             operations::claim_community_points("1", "2"),
             operations::community_moment_claim("moment"),
             operations::join_raid("raid"),
@@ -869,10 +880,30 @@ mod tests {
 
         let reward: types::GqlResponse<types::RewardListData> =
             serde_json::from_value(protocol_fixture("twitch.reward_list.json")).unwrap();
-        let achievement = client::watch_streak_achievement_from_typed(reward.data.unwrap())
+        let milestone = watch_streak_milestone_from_typed(reward.data.unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(achievement.unix_timestamp(), 1_783_938_600);
+        assert_eq!(milestone.value, Some(5));
+        assert_eq!(
+            milestone.achievement_timestamp.unix_timestamp(),
+            1_783_938_600
+        );
+        assert_eq!(
+            milestone.expires_at.unwrap().unix_timestamp(),
+            1_784_025_000
+        );
+
+        let videos: types::GqlResponse<types::ArchivedVideosData> =
+            serde_json::from_value(protocol_fixture("twitch.archived_videos.json")).unwrap();
+        let videos = archived_videos_from_typed(videos.data.unwrap()).unwrap();
+        assert_eq!(videos[0].broadcast_id.as_deref(), Some("broadcast-1"));
+        assert_eq!(videos[0].length_seconds, 1200);
+
+        let clips: types::GqlResponse<types::RecentClipsData> =
+            serde_json::from_value(protocol_fixture("twitch.recent_clips.json")).unwrap();
+        let clips = recent_clips_from_typed(clips.data.unwrap()).unwrap();
+        assert_eq!(clips[0].slug, "UsefulClip");
+        assert!((clips[0].duration_seconds - 24.5).abs() < f64::EPSILON);
 
         let followers: types::GqlResponse<types::FollowersData> =
             serde_json::from_value(protocol_fixture("twitch.followers.json")).unwrap();

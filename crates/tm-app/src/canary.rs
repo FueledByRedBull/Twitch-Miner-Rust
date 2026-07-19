@@ -54,6 +54,7 @@ pub(crate) async fn run_read_only_canary(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_read_only_canary_inner(
     config: &ConfigFile,
     work_dir: &Path,
@@ -84,6 +85,10 @@ async fn run_read_only_canary_inner(
     let target = canary_target(config);
     let target_channel_id =
         canary_step("target-channel-id", twitch.fetch_channel_id(target).await)?;
+    let _ = canary_step(
+        "target-login-by-id",
+        twitch.fetch_channel_login_by_id(&target_channel_id).await,
+    )?;
     let base_settings = tm_config::build_base_streamer_settings(config);
     let override_settings =
         tm_config::build_override_settings(&base_settings, &config.streamer_overrides);
@@ -104,6 +109,11 @@ async fn run_read_only_canary_inner(
             .fetch_watch_streak_achievement(&target_channel_id)
             .await,
     )?;
+    let _ = canary_step(
+        "archived-videos",
+        twitch.fetch_recent_archived_videos(target).await,
+    )?;
+    let _ = canary_step("recent-clips", twitch.fetch_recent_clips(target).await)?;
     let target_is_live = canary_step(
         "stream-live",
         twitch.is_stream_live(&target_channel_id).await,
@@ -155,7 +165,7 @@ async fn run_read_only_canary_inner(
     )?;
 
     tracing::info!(
-        read_operations = if stream_info_checked { 11 } else { 10 },
+        read_operations = if stream_info_checked { 14 } else { 13 },
         stream_info_applicable = stream_info_checked,
         own_channel_id_present = !own_channel_id.is_empty(),
         "credential-safe Twitch canary passed"

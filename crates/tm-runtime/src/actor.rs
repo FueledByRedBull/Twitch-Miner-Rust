@@ -133,6 +133,12 @@ enum RuntimeCommand {
         channel_id: String,
         now: OffsetDateTime,
     },
+    MarkWatchStreakRecovered {
+        channel_id: String,
+        streak_count: Option<u32>,
+        resolved_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    },
     RecordPredictionPlaced {
         event_id: String,
         decision: PredictionDecision,
@@ -268,6 +274,21 @@ pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
                 RuntimeCommand::MarkMinuteWatched { channel_id, now } => {
                     state.mark_minute_watched(&channel_id, now);
                     notify_state_change(&state_revision_tx, &mut state_revision);
+                }
+                RuntimeCommand::MarkWatchStreakRecovered {
+                    channel_id,
+                    streak_count,
+                    resolved_at,
+                    expires_at,
+                } => {
+                    if state.mark_watch_streak_recovered(
+                        &channel_id,
+                        streak_count,
+                        resolved_at,
+                        expires_at,
+                    ) {
+                        notify_state_change(&state_revision_tx, &mut state_revision);
+                    }
                 }
                 RuntimeCommand::RecordPredictionPlaced {
                     event_id,
@@ -584,6 +605,26 @@ impl RuntimeHandle {
             .await
             .map_err(|_| RuntimeError::SendFailed {
                 command: "MarkMinuteWatched",
+            })
+    }
+
+    pub async fn mark_watch_streak_recovered(
+        &self,
+        channel_id: impl Into<String>,
+        streak_count: Option<u32>,
+        resolved_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    ) -> Result<()> {
+        self.sender
+            .send(RuntimeCommand::MarkWatchStreakRecovered {
+                channel_id: channel_id.into(),
+                streak_count,
+                resolved_at,
+                expires_at,
+            })
+            .await
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "MarkWatchStreakRecovered",
             })
     }
 

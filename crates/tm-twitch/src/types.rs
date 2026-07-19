@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tm_domain::{ActiveMultiplier, CommunityGoal};
+use tm_domain::{ActiveMultiplier, CommunityGoal, OffsetDateTime};
 
 use crate::{GQL_URL, TWITCH_URL};
 
@@ -152,6 +152,28 @@ pub struct StreamInfo {
     pub viewers_count: u32,
     pub tags: Vec<String>,
     pub created_at: Option<tm_domain::OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchStreakMilestone {
+    pub value: Option<u32>,
+    pub achievement_timestamp: OffsetDateTime,
+    pub expires_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedVideo {
+    pub id: String,
+    pub broadcast_id: Option<String>,
+    pub length_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentClip {
+    pub id: String,
+    pub slug: String,
+    pub url: String,
+    pub duration_seconds: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -322,13 +344,81 @@ pub(crate) struct RewardListSelf {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct WatchStreakMilestoneEnvelope {
     #[serde(rename = "watchStreakMilestone")]
-    pub(crate) milestone: Option<WatchStreakMilestone>,
+    pub(crate) milestone: Option<WatchStreakMilestoneData>,
+    #[serde(rename = "expiresAt")]
+    pub(crate) expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct WatchStreakMilestone {
+pub(crate) struct WatchStreakMilestoneData {
+    pub(crate) value: Option<String>,
     #[serde(rename = "achievementTimestamp")]
     pub(crate) achievement_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ArchivedVideosData {
+    pub(crate) user: Option<ArchivedVideosUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ArchivedVideosUser {
+    pub(crate) videos: Option<ArchivedVideosConnection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ArchivedVideosConnection {
+    #[serde(default)]
+    pub(crate) edges: Vec<ArchivedVideoEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ArchivedVideoEdge {
+    pub(crate) node: Option<ArchivedVideoNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ArchivedVideoNode {
+    pub(crate) id: Option<String>,
+    #[serde(rename = "broadcastIdentifier")]
+    pub(crate) broadcast_identifier: Option<BroadcastIdentifier>,
+    #[serde(rename = "lengthSeconds")]
+    pub(crate) length_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct BroadcastIdentifier {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipsData {
+    pub(crate) user: Option<RecentClipsUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipsUser {
+    pub(crate) clips: Option<RecentClipsConnection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipsConnection {
+    #[serde(default)]
+    pub(crate) edges: Vec<RecentClipEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipEdge {
+    pub(crate) node: Option<RecentClipNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipNode {
+    pub(crate) id: Option<String>,
+    pub(crate) slug: Option<String>,
+    pub(crate) url: Option<String>,
+    #[serde(rename = "durationSeconds")]
+    pub(crate) duration_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
