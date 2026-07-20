@@ -36,6 +36,11 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
         read_only: true,
     },
     PersistedOperationContract {
+        operation_name: "PlaybackAccessToken",
+        sha256_hash: "3093517e37e4f4cb48906155bcd894150aef92617939236d2508f3375ab732ce",
+        read_only: true,
+    },
+    PersistedOperationContract {
         operation_name: "RewardList",
         sha256_hash: "0b1471876d7647993731b9e3c6a13bf304c67fb31d07f06a945d42286ee377c4",
         read_only: true,
@@ -144,6 +149,21 @@ pub fn stream_info_overlay(channel_login: &str) -> GqlPersistedOperation {
         "VideoPlayerStreamInfoOverlayChannel",
         "e785b65ff71ad7b363b34878335f27dd9372869ad0c5740a130b9268bcdbe7e7",
         json!({ "channel": channel_login.to_lowercase() }),
+    )
+}
+
+#[must_use]
+pub fn playback_access_token(channel_login: &str) -> GqlPersistedOperation {
+    GqlPersistedOperation::new(
+        "PlaybackAccessToken",
+        "3093517e37e4f4cb48906155bcd894150aef92617939236d2508f3375ab732ce",
+        json!({
+            "isLive": true,
+            "isVod": false,
+            "login": channel_login.to_lowercase(),
+            "playerType": "site",
+            "vodID": ""
+        }),
     )
 }
 

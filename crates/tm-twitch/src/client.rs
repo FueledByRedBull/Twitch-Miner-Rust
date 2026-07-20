@@ -15,9 +15,9 @@ use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
     ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
     EmptyMutationData, FollowersData, GqlPersistedOperation, GqlResponse, InventoryData,
-    InventoryDrop, LiveStatusData, RecentClip, RecentClipsData, RewardListData, StreamInfo,
-    StreamInfoData, TwitchClientError, TwitchEndpoints, UserContributionData, UserIdData,
-    UserLoginData, ViewerDropsDashboard, WatchStreakMilestone,
+    InventoryDrop, LiveStatusData, PlaybackAccessTokenData, RecentClip, RecentClipsData,
+    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
+    UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard, WatchStreakMilestone,
 };
 use crate::{operations, CLIENT_ID, DEFAULT_CLIENT_VERSION};
 
@@ -344,6 +344,99 @@ impl TwitchClient {
             .post_gql_typed(&operations::stream_info_overlay(channel_login))
             .await?;
         stream_info_from_typed(response)
+    }
+
+    pub async fn prime_live_playback(&self, channel_login: &str) -> Result<(), TwitchClientError> {
+        let channel_login = channel_login.trim().to_ascii_lowercase();
+        if channel_login.is_empty()
+            || !channel_login
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(TwitchClientError::InvalidField("channel_login"));
+        }
+
+        let response: PlaybackAccessTokenData = self
+            .post_gql_typed(&operations::playback_access_token(&channel_login))
+            .await?;
+        let token =
+            response
+                .stream_playback_access_token
+                .ok_or(TwitchClientError::MissingField(
+                    "data.streamPlaybackAccessToken",
+                ))?;
+        if token.signature.trim().is_empty() || token.value.trim().is_empty() {
+            return Err(TwitchClientError::InvalidField(
+                "data.streamPlaybackAccessToken",
+            ));
+        }
+
+        let mut master_url = reqwest::Url::parse(&self.endpoints.playback_url)
+            .map_err(|_| TwitchClientError::InvalidField("playback_url"))?
+            .join(&format!("{channel_login}.m3u8"))
+            .map_err(|_| TwitchClientError::InvalidField("channel_login"))?;
+        master_url
+            .query_pairs_mut()
+            .append_pair("sig", &token.signature)
+            .append_pair("token", &token.value);
+        validate_playback_url(&master_url, "playback_url")?;
+
+        let master = self
+            .client
+            .get(master_url)
+            .header("User-Agent", self.user_agent())
+            .send()
+            .await
+            .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
+        if !master.status().is_success() {
+            return Err(TwitchClientError::UnexpectedStatus {
+                status: master.status(),
+                context: "fetch playback master playlist",
+            });
+        }
+        let master_url = master.url().clone();
+        let master_body = master
+            .text()
+            .await
+            .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
+        let variant_url = last_playlist_url(&master_url, &master_body, "master playlist")?;
+        validate_playback_url(&variant_url, "master playlist")?;
+
+        let variant = self
+            .client
+            .get(variant_url)
+            .header("User-Agent", self.user_agent())
+            .send()
+            .await
+            .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
+        if !variant.status().is_success() {
+            return Err(TwitchClientError::UnexpectedStatus {
+                status: variant.status(),
+                context: "fetch playback media playlist",
+            });
+        }
+        let variant_url = variant.url().clone();
+        let variant_body = variant
+            .text()
+            .await
+            .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
+        let segment_url = last_playlist_url(&variant_url, &variant_body, "media playlist")?;
+        validate_playback_url(&segment_url, "media playlist")?;
+
+        let segment = self
+            .client
+            .head(segment_url)
+            .header("User-Agent", self.user_agent())
+            .send()
+            .await
+            .map_err(|error| sanitize_playback_error(&error, "media segment"))?;
+        if !segment.status().is_success() {
+            return Err(TwitchClientError::UnexpectedStatus {
+                status: segment.status(),
+                context: "prime playback media segment",
+            });
+        }
+        Ok(())
     }
 
     pub async fn fetch_watch_streak_achievement(
@@ -817,6 +910,49 @@ fn operation_is_read_only(operation_name: &str) -> bool {
         .iter()
         .find(|contract| contract.operation_name == operation_name)
         .is_some_and(|contract| contract.read_only)
+}
+
+pub(crate) fn last_playlist_url(
+    base_url: &reqwest::Url,
+    playlist: &str,
+    field: &'static str,
+) -> Result<reqwest::Url, TwitchClientError> {
+    let uri = playlist
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .ok_or(TwitchClientError::MissingField(field))?;
+    base_url
+        .join(uri)
+        .map_err(|_| TwitchClientError::InvalidField(field))
+}
+
+fn validate_playback_url(url: &reqwest::Url, field: &'static str) -> Result<(), TwitchClientError> {
+    let host = url
+        .host_str()
+        .ok_or(TwitchClientError::InvalidField(field))?;
+    let is_loopback = host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback());
+    let is_public_domain = host.parse::<std::net::IpAddr>().is_err()
+        && !host.eq_ignore_ascii_case("localhost")
+        && !host.to_ascii_lowercase().ends_with(".local");
+    if (url.scheme() == "https" && is_public_domain) || (url.scheme() == "http" && is_loopback) {
+        return Ok(());
+    }
+    Err(TwitchClientError::InvalidField(field))
+}
+
+fn sanitize_playback_error(error: &reqwest::Error, context: &'static str) -> TwitchClientError {
+    let failure = if error.is_timeout() {
+        crate::types::TwitchFailureClass::Timeout
+    } else if error.is_connect() || error.is_request() {
+        crate::types::TwitchFailureClass::ConnectionReset
+    } else {
+        crate::types::TwitchFailureClass::Other
+    };
+    TwitchClientError::PlaybackRequest { context, failure }
 }
 
 fn decode_gql_data<T>(

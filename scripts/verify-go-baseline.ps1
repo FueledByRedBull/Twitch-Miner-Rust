@@ -114,8 +114,7 @@ $rustMap = Convert-ToContractMap $rustMatches 'Rust'
 $allowedGoOnly = @(
     'DropCampaignDetails',
     'ModViewChannelQuery',
-    'PersonalSections',
-    'PlaybackAccessToken'
+    'PersonalSections'
 )
 $allowedRustOnly = @(
     'FilterableVideoTower_Videos',

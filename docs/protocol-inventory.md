@@ -3,7 +3,7 @@
 The Rust client keeps persisted-operation names and SHA-256 hashes in
 `tm-twitch::PERSISTED_OPERATION_CONTRACTS`. A unit test verifies that every
 builder uses an inventoried, unique contract. The comparison source is the Go
-implementation at commit `91f00698314d`; the baseline gate permits only its four
+implementation at commit `91f00698314d`; the baseline gate permits only its three
 documented unused definitions plus Rust's two typed offline-recovery reads.
 
 When both repositories are available, run the baseline tests and the explicit
@@ -24,6 +24,7 @@ exercises.
 | `ChannelPointsContext` | Read-only |
 | `WithIsStreamLiveQuery` | Read-only |
 | `VideoPlayerStreamInfoOverlayChannel` | Read-only |
+| `PlaybackAccessToken` | Read-only |
 | `RewardList` | Read-only |
 | `FilterableVideoTower_Videos` | Read-only |
 | `ClipsCards__User` | Read-only |
@@ -46,7 +47,9 @@ twitch-miner --data-dir /data --canary
 ```
 
 The canary validates an existing session and performs only the read-only
-operations listed above. It does not start workers, claim a reward, make a
+operations listed above. When its target is live it also resolves the HLS master
+and media playlists and performs one media-segment HEAD request. It does not
+start workers, claim a reward, make a
 prediction, join a raid, contribute points, mutate cookies, or send Discord
 notifications. Record the source revision, image digest, date, and success or
 failure class in the release notes; never record cookies, account IDs, raw

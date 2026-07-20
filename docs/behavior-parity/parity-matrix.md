@@ -31,7 +31,7 @@ working Rust implementation:
 | --- | --- |
 | Username, streamers, follower/game/watch selection | Preserved. |
 | Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
-| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Preserved. Drop farming is independently configurable with `farm_drops`; `watch_one_stream_when_drops_active` defaults to true and can be disabled to mine every eligible live channel concurrently. Both support per-streamer overrides. |
+| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved. Drop farming is independently configurable with `farm_drops`; `watch_one_stream_when_drops_active` defaults to true and can be disabled to include every eligible live channel. The full prioritized set rotates fairly through Twitch's two creditable watch slots in 15-minute turns. Both settings support per-streamer overrides. |
 | Raid observation and auto-join | Preserved with compatibility risk | EventSub observes the raid lifecycle; PubSub compatibility supplies the legacy raid ID required by the typed single-attempt `JoinRaid` mutation. Repeated raid IDs are ignored. Live acceptance is still required before release. |
 | Prediction and per-streamer override settings | Preserved. |
 | `password` | Rejected when non-empty; device login does not need it. |
@@ -43,10 +43,10 @@ working Rust implementation:
 
 The persisted-operation names/hashes that Rust actively uses are captured from
 the Go source and checked against Rust builders in [protocol-inventory.md](../protocol-inventory.md).
-Go contains a few unused operation definitions (`PlaybackAccessToken`,
-`ModViewChannelQuery`, `DropCampaignDetails`, and `PersonalSections`); they are
-not part of either miner's exercised runtime behavior and are intentionally not
-copied into Rust.
+Rust now exercises the Go/Python `PlaybackAccessToken` contract as part of the
+live HLS preflight. Go's remaining unused definitions (`ModViewChannelQuery`,
+`DropCampaignDetails`, and `PersonalSections`) are not part of either miner's
+exercised runtime behavior and are intentionally not copied into Rust.
 
 The normalized cross-process vectors in `tests/parity/vectors.json` are run by
 the Rust contract tests and by the pinned Go baseline through

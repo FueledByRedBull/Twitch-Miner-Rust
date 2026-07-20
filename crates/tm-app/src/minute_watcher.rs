@@ -13,7 +13,7 @@ use crate::observability::{streamer_game_name, AppObservability};
 use crate::status::HealthTracker;
 use crate::utilities::{sleep_or_stop, time_now};
 use crate::watching::{
-    minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction,
+    minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction, WatchRotation,
 };
 use crate::{MINUTE_WATCHER_REQUEST_TIMEOUT, SPADE_URL_TTL, WATCH_SELECTION_REFRESH_CONCURRENCY};
 
@@ -30,6 +30,7 @@ pub(crate) fn spawn_minute_watcher_loop(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let spade_urls = tokio::sync::Mutex::new(HashMap::<String, SpadeCacheEntry>::new());
+        let mut watch_rotation = WatchRotation::default();
         let mut stop = stop;
         let mut last_loop_at = time_now();
         'outer: loop {
@@ -66,7 +67,8 @@ pub(crate) fn spawn_minute_watcher_loop(
                     break;
                 }
             };
-            let watch_logins = snapshot.watch_target_logins(now);
+            let eligible_watch_logins = snapshot.watch_target_logins(now);
+            let watch_logins = watch_rotation.select(&eligible_watch_logins, now);
             if watch_logins.is_empty() {
                 health.success("minute");
                 if sleep_or_stop(&mut stop, std::time::Duration::from_secs(20)).await {
@@ -301,6 +303,11 @@ pub(crate) async fn send_minute_watched_for_streamer(
         now,
     );
     stream.payload = vec![build_minute_watched_event(&streamer, &info, user_id)];
+
+    twitch
+        .prime_live_playback(&streamer.username)
+        .await
+        .with_context(|| format!("prime live playback for {}", streamer.username))?;
 
     let status = send_minute_watched_with_spade_cache(
         spade_urls,
