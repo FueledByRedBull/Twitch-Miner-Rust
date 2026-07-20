@@ -1,13 +1,16 @@
-# Twitch Miner differential review: network-outage recovery
+# Twitch Miner differential review: recovery and fair watch rotation
 
 Review date: 2026-07-20
 
-Base revision: `95a5de03fd43cd3d37a68ed6b9bd0e6c24b9a117`
+Original recovery base: `95a5de03fd43cd3d37a68ed6b9bd0e6c24b9a117`
 
-Candidate: the `fix/network-outage-recovery` working tree. The review covers the
-startup authentication retry and runtime task-supervision changes prompted by
-the failed 24-hour soak. Final deployment evidence belongs in the release
-record after the candidate is merged and published by CI.
+Current follow-up base: `5db10101845b98eae161051df2d0e82b1c2fec33`
+
+Candidate: the `fix/fair-all-channel-rotation` working tree. This cumulative
+report covers startup/network recovery, the narrow read-only service-error
+retry, and the live-rate correction prompted by successful-but-uncredited direct
+Spade watch requests. Final deployment evidence belongs in the release record
+after the candidate is merged and published by CI.
 
 ## Executive summary
 
@@ -18,9 +21,9 @@ record after the candidate is merged and published by CI.
 | Medium | 0 |
 | Low | 0 |
 
-**Overall risk:** Medium. Authentication and process supervision are high-risk
-paths, but the change is narrow, preserves fail-closed validation, and adds
-focused regression coverage.
+**Overall risk:** Medium. Authentication, process supervision, and external
+watch scheduling are high-risk paths, but each correction is narrow, preserves
+fail-closed validation, and adds focused regression coverage.
 
 **Recommendation:** Approve after the full workspace, documentation, release,
 dependency, and build-integrity gates pass. Deploy only the exact CI-published
@@ -28,11 +31,11 @@ digest and start a new acceptance clock; the failed clock must not be backdated.
 
 Key metrics:
 
-- 8 files reviewed before this report: 4 production/test Rust files and 4
-  operator/release documents.
-- 277 additions and 40 deletions before this report.
-- 119 Rust, manifest, Markdown, and PowerShell files in the medium-sized
-  repository; focused review covered every changed file and direct callers.
+- Current follow-up includes the scheduler plus the typed playback/HLS client,
+  canary, protocol inventory, tests, and operator documentation.
+- 80 Rust files in the medium-sized repository; focused review covered every
+  changed file, the runtime selector, external minute-watch path, and the single
+  production caller.
 - 0 changed high-risk functions without focused tests.
 - 0 removed authorization, TLS, contract-validation, or mutation-idempotency
   checks.
@@ -218,18 +221,57 @@ response-shape failures, and all mutations remain fail-closed/single-attempt.
 
 ## All-channel watch follow-up
 
-Live rate evidence found six online channels but one five-minute WATCH reward
-stream. The runtime was healthy; the configured campaign single-watcher policy
-had reduced the historical two-slot selector to one. The final follow-up removes
-the unconditional two-channel truncation so disabling
-`watch_one_stream_when_drops_active` selects every eligible online channel.
-Offline, suspended, and game-excluded channels remain ineligible, ordering stays
-deterministic, and the explicit single-watcher campaign policy remains available.
-Unit and application integration coverage include six simultaneous eligible
-campaign channels and metadata-driven exclusion after initial selection.
+Live rate evidence first found six online channels but one five-minute WATCH
+reward stream. The configured campaign single-watcher policy had reduced the
+historical two-slot selector to one. Disabling that policy and sending minute-
+watched heartbeats to all five channels in a later fresh session produced zero
+WATCH rewards over 15.5 minutes despite continuous HTTP 204 responses and zero
+task failures. The protected historical two-slot image was restored as a control
+and also produced zero rewards over 19.2 minutes. That disproves concurrency as
+the sole cause and isolates the shared direct-Spade path, which omitted the
+Python parent's playback-token/HLS media preflight.
+
+The corrected follow-up restores that algorithmic stage using a typed read-only
+`PlaybackAccessToken`, bounded HLS master/media reads, and a media-segment HEAD
+request before Spade. It also keeps every eligible online channel in the
+deterministic priority set, but fairly rotates that set through Twitch's two
+creditable slots every 15 minutes. Fifteen-minute dwell preserves three five-
+minute WATCH opportunities, the bonus opportunity, and streak eligibility before
+rotation. Offline, suspended, and game-excluded channels are removed immediately; newly eligible
+channels join the queue; the explicit single-watcher campaign policy remains
+available. Focused tests cover dwell boundaries, wraparound fairness, immediate
+ineligible removal/refill, and one/two-channel operation.
 
 The differential blast radius is limited to minute-watcher target selection:
 authentication, EventSub/PubSub routing, point mutations, and retry policy are
 unchanged. The existing sequential loop and five-second minimum request spacing
-remain in force, so selecting more channels does not create an unbounded request
-burst. Review found no unresolved critical, high, medium, or low issue.
+remain in force; the active count is now at most two, so the request interval is
+the established ten seconds per slot.
+
+Adversarial review covered Twitch-driven online/offline flapping, reordered and
+duplicate eligible input, odd-sized queues, newly eligible channels, empty
+queues, process restarts, and backward wall-clock adjustment. Active-channel
+removal refills immediately without resetting the rotation deadline, preventing
+a flapping channel from starving the rest of the queue. Queue construction
+deduplicates input, odd-sized wraparound remains balanced, and process restarts
+reset only in-memory scheduling without changing points or persisted state. A
+large backward host-clock jump can delay one rotation; this is an operational
+clock-integrity limitation rather than an attacker-controlled Twitch input and
+is covered by the zero-restart/host-health soak gate.
+
+The playback token crosses a high-risk external boundary. Its signature/value
+remain private typed fields, query parameters are never logged, request failures
+are reduced to fixed context plus failure class, and malformed or empty token/
+playlist fields fail closed. HLS URLs require HTTPS public-domain syntax in
+production; HTTP is accepted only for loopback fixtures. No cookies or
+authorization headers are sent to HLS/CDN requests. The shared HTTP client still
+follows provider-directed redirects, so exact-image canary and sanitized failure-
+log review remain mandatory.
+
+The scheduling blast radius is one production caller; playback adds one typed
+read-only contract and three bounded media reads to that caller. All new
+scheduling, protocol, parsing, and tokenized-error-redaction branches have
+focused tests. Review found no unresolved critical, high, medium, or low issue.
+Recommendation remains conditional on the full validation ladder, exact-image
+canary, and live two-slot WATCH/CLAIM acquisition plus full-queue rotation
+evidence.

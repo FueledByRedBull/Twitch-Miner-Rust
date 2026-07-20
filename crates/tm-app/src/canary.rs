@@ -125,6 +125,10 @@ async fn run_read_only_canary_inner(
         "stream-info",
         fetch_stream_info_if_live(&twitch, target, target_is_live).await,
     )?;
+    let playback_checked = canary_step(
+        "playback-preflight",
+        prime_playback_if_live(&twitch, target, target_is_live).await,
+    )?;
     let _ = canary_step("inventory", twitch.fetch_inventory_typed().await)?;
     let _ = canary_step(
         "drops-dashboard",
@@ -165,8 +169,9 @@ async fn run_read_only_canary_inner(
     )?;
 
     tracing::info!(
-        read_operations = if stream_info_checked { 14 } else { 13 },
+        read_operations = if stream_info_checked { 15 } else { 13 },
         stream_info_applicable = stream_info_checked,
+        playback_preflight_applicable = playback_checked,
         own_channel_id_present = !own_channel_id.is_empty(),
         "credential-safe Twitch canary passed"
     );
@@ -237,6 +242,18 @@ async fn fetch_stream_info_if_live(
         return Ok(false);
     }
     let _ = twitch.fetch_stream_info(target).await?;
+    Ok(true)
+}
+
+async fn prime_playback_if_live(
+    twitch: &TwitchClient,
+    target: &str,
+    target_is_live: bool,
+) -> std::result::Result<bool, TwitchClientError> {
+    if !target_is_live {
+        return Ok(false);
+    }
+    twitch.prime_live_playback(target).await?;
     Ok(true)
 }
 
@@ -422,11 +439,16 @@ mod tests {
             tm_twitch::TwitchEndpoints {
                 twitch_url: String::from("http://127.0.0.1:9"),
                 gql_url: String::from("http://127.0.0.1:9"),
+                ..tm_twitch::TwitchEndpoints::default()
             },
         );
 
         assert!(matches!(
             fetch_stream_info_if_live(&twitch, "fixture", false).await,
+            Ok(false)
+        ));
+        assert!(matches!(
+            prime_playback_if_live(&twitch, "fixture", false).await,
             Ok(false)
         ));
     }

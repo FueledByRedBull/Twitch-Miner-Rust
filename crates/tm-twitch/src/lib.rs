@@ -1,5 +1,6 @@
 pub const TWITCH_URL: &str = "https://www.twitch.tv";
 pub const GQL_URL: &str = "https://gql.twitch.tv/gql";
+pub const PLAYBACK_URL: &str = "https://usher.ttvnw.net/api/channel/hls/";
 pub const CLIENT_ID: &str = "ue6666qo983tsx6so1t0vnawi233wa";
 pub const DROP_ID: &str = "c2542d6d-cd10-4532-919b-3d19f30a768b";
 pub const DEFAULT_CLIENT_VERSION: &str = "ef928475-9403-42f2-8a34-55784bd08e16";
@@ -38,8 +39,8 @@ mod tests {
     use super::*;
     use crate::client::{
         archived_videos_from_typed, available_drop_campaign_ids_from_typed,
-        channel_points_context_from_typed, inventory_drops_from_typed, recent_clips_from_typed,
-        user_contributions_from_typed, watch_streak_milestone_from_typed,
+        channel_points_context_from_typed, inventory_drops_from_typed, last_playlist_url,
+        recent_clips_from_typed, user_contributions_from_typed, watch_streak_milestone_from_typed,
     };
     use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
     use reqwest::StatusCode;
@@ -120,6 +121,31 @@ mod tests {
         assert!(batch.body.starts_with('['));
         assert!(batch.body.contains("ViewerDropsDashboard"));
         assert!(batch.body.contains("DropsPage_ClaimDropRewards"));
+
+        let playback = operations::playback_access_token("TeStEr");
+        assert_eq!(playback.operation_name, "PlaybackAccessToken");
+        assert_eq!(playback.variables["login"], "tester");
+        assert_eq!(playback.variables["isLive"], true);
+        assert_eq!(playback.variables["playerType"], "site");
+    }
+
+    #[test]
+    fn resolves_last_hls_entry_and_rejects_empty_playlists() {
+        let base = reqwest::Url::parse("https://video.example/path/master.m3u8").unwrap();
+        assert_eq!(
+            last_playlist_url(
+                &base,
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow/index.m3u8\n\n",
+                "playlist",
+            )
+            .unwrap()
+            .as_str(),
+            "https://video.example/path/low/index.m3u8"
+        );
+        assert!(matches!(
+            last_playlist_url(&base, "#EXTM3U\n", "playlist"),
+            Err(TwitchClientError::MissingField("playlist"))
+        ));
     }
 
     #[test]
@@ -218,6 +244,10 @@ mod tests {
             operations::stream_info_overlay("abc").operation_name,
             "VideoPlayerStreamInfoOverlayChannel"
         );
+        assert_eq!(
+            operations::playback_access_token("abc").operation_name,
+            "PlaybackAccessToken"
+        );
         assert_eq!(operations::reward_list("abc").operation_name, "RewardList");
         assert_eq!(
             operations::recent_archived_videos("abc").operation_name,
@@ -250,6 +280,7 @@ mod tests {
             operations::channel_points_context("abc"),
             operations::is_stream_live("1"),
             operations::stream_info_overlay("abc"),
+            operations::playback_access_token("abc"),
             operations::reward_list("abc"),
             operations::recent_archived_videos("abc"),
             operations::recent_clips("abc"),
@@ -467,6 +498,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: String::from("http://127.0.0.1:1234"),
                 gql_url: String::from("http://127.0.0.1:1234/gql"),
+                ..TwitchEndpoints::default()
             },
         );
         assert_eq!(client.auth_token(), "token");
@@ -539,11 +571,47 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: format!("{base_url}/gql"),
+                ..TwitchEndpoints::default()
             },
         );
 
         assert_eq!(client.fetch_channel_id("tester").await.unwrap(), "100");
         assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn playback_network_errors_do_not_expose_tokenized_urls() {
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (
+                200,
+                r#"{"data":{"streamPlaybackAccessToken":{"signature":"secret-signature","value":"secret-token"}}}"#,
+            ),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(100))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: format!("{base_url}/gql"),
+                playback_url: String::from("http://127.0.0.1:9/hls/"),
+            },
+        );
+
+        let error = client.prime_live_playback("tester").await.unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, TwitchClientError::PlaybackRequest { .. }));
+        assert!(!message.contains("secret-signature"));
+        assert!(!message.contains("secret-token"));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
         server.join().unwrap();
     }
 
@@ -567,6 +635,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: base_url,
+                ..TwitchEndpoints::default()
             },
         );
 
@@ -594,6 +663,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: base_url,
+                ..TwitchEndpoints::default()
             },
         );
 
@@ -623,6 +693,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: base_url,
+                ..TwitchEndpoints::default()
             },
         );
 
@@ -653,6 +724,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: format!("{base_url}/gql"),
+                ..TwitchEndpoints::default()
             },
         );
 
@@ -683,6 +755,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: format!("{base_url}/gql"),
+                ..TwitchEndpoints::default()
             },
         );
 
@@ -738,6 +811,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: format!("{base_url}/gql"),
+                ..TwitchEndpoints::default()
             },
         );
 
@@ -759,6 +833,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: base_url.clone(),
                 gql_url: format!("{base_url}/gql"),
+                ..TwitchEndpoints::default()
             },
         );
 

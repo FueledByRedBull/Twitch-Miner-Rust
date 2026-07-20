@@ -275,6 +275,20 @@ mod tests {
                     .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)
                 {
                     http_response("200 OK", &fixture_json("twitch.stream_info.json"))
+                } else if request.contains(r#""operationName":"PlaybackAccessToken""#) {
+                    http_response(
+                        "200 OK",
+                        r#"{"data":{"streamPlaybackAccessToken":{"signature":"sig","value":"token"}}}"#,
+                    )
+                } else if request.starts_with("GET /hls/") {
+                    http_response(
+                        "200 OK",
+                        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n/variant.m3u8\n",
+                    )
+                } else if request.starts_with("GET /variant.m3u8") {
+                    http_response("200 OK", "#EXTM3U\n#EXTINF:2,\n/segment.ts\n")
+                } else if request.starts_with("HEAD /segment.ts") {
+                    empty_http_response("200 OK")
                 } else if request.contains(r#""operationName":"RewardList""#) {
                     http_response("200 OK", &fixture_json("twitch.reward_list.json"))
                 } else {
@@ -288,6 +302,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: format!("http://{address}"),
                 gql_url: format!("http://{address}/gql"),
+                playback_url: format!("http://{address}/hls/"),
             },
             requests,
             handle,
@@ -330,13 +345,19 @@ mod tests {
         let recorded = std::sync::Arc::clone(&requests);
         let handle = thread::spawn(move || {
             let mut responses = std::collections::VecDeque::from(responses);
-            while !responses.is_empty() {
+            let mut playback_remaining = 0_usize;
+            loop {
                 let wait_started = std::time::Instant::now();
+                let wait_limit = if responses.is_empty() && playback_remaining == 0 {
+                    Duration::from_millis(250)
+                } else {
+                    Duration::from_secs(5)
+                };
                 let (mut stream, _) = loop {
                     match listener.accept() {
                         Ok(connection) => break connection,
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if wait_started.elapsed() >= Duration::from_secs(5) {
+                            if wait_started.elapsed() >= wait_limit {
                                 return;
                             }
                             thread::sleep(Duration::from_millis(10));
@@ -353,6 +374,24 @@ mod tests {
                         "200 OK",
                         r#"<!doctype html><script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#,
                     )
+                } else if latest_request.contains(r#""operationName":"PlaybackAccessToken""#) {
+                    playback_remaining = 3;
+                    http_response(
+                        "200 OK",
+                        r#"{"data":{"streamPlaybackAccessToken":{"signature":"sig","value":"token"}}}"#,
+                    )
+                } else if latest_request.starts_with("GET /hls/") {
+                    playback_remaining = playback_remaining.saturating_sub(1);
+                    http_response(
+                        "200 OK",
+                        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n/variant.m3u8\n",
+                    )
+                } else if latest_request.starts_with("GET /variant.m3u8") {
+                    playback_remaining = playback_remaining.saturating_sub(1);
+                    http_response("200 OK", "#EXTM3U\n#EXTINF:2,\n/segment.ts\n")
+                } else if latest_request.starts_with("HEAD /segment.ts") {
+                    playback_remaining = playback_remaining.saturating_sub(1);
+                    empty_http_response("200 OK")
                 } else {
                     let body = responses.pop_front().unwrap();
                     http_response("200 OK", &body)
@@ -364,6 +403,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: format!("http://{address}"),
                 gql_url: format!("http://{address}/gql"),
+                playback_url: format!("http://{address}/hls/"),
             },
             requests,
             handle,
@@ -1618,7 +1658,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_minute_watched_for_streamer_updates_presence_and_watch_progress() {
-        let (endpoints, _requests, twitch_server) = spawn_twitch_server(2);
+        let (endpoints, _requests, twitch_server) = spawn_twitch_server(6);
         let twitch = TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -1712,7 +1752,7 @@ mod tests {
         let (endpoints, requests, twitch_server) = spawn_json_response_server(vec![
             String::from(r#"{"data":{"user":null}}"#),
             fixture_json("twitch.stream_live.online.json"),
-            String::from(r#"{"data":{"user":{"id":"100","login":"new-login"}}}"#),
+            String::from(r#"{"data":{"user":{"id":"100","login":"new_login"}}}"#),
             fixture_json("twitch.stream_info.json"),
         ]);
         let twitch = TwitchClient::with_client_and_endpoints(
@@ -1726,7 +1766,7 @@ mod tests {
         );
         let (spade_url, spade_requests, spade_server) = spawn_status_server(vec!["204 No Content"]);
         let spade_urls = tokio::sync::Mutex::new(HashMap::from([(
-            String::from("new-login"),
+            String::from("new_login"),
             SpadeCacheEntry::Ready(CachedSpadeUrl {
                 url: spade_url,
                 fetched_at: StdInstant::now(),
@@ -1765,8 +1805,8 @@ mod tests {
         twitch_server.join().unwrap();
         spade_server.join().unwrap();
         let snapshot = runtime.state_snapshot().await.unwrap();
-        assert_eq!(snapshot.streamers[0].username, "new-login");
-        assert_eq!(snapshot.initial_points.get("new-login"), Some(&500));
+        assert_eq!(snapshot.streamers[0].username, "new_login");
+        assert_eq!(snapshot.initial_points.get("new_login"), Some(&500));
         assert!(snapshot.streamers[0]
             .stream
             .as_ref()

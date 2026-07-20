@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tm_domain::{ActiveMultiplier, CommunityGoal, OffsetDateTime};
 
-use crate::{GQL_URL, TWITCH_URL};
+use crate::{GQL_URL, PLAYBACK_URL, TWITCH_URL};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TwitchContractError {
@@ -21,6 +21,11 @@ pub enum TwitchContractError {
 pub enum TwitchClientError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("playback request failed for {context}: {failure:?}")]
+    PlaybackRequest {
+        context: &'static str,
+        failure: TwitchFailureClass,
+    },
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("protocol response decode failed for {context}: {detail} ({shape})")]
@@ -73,6 +78,7 @@ impl TwitchClientError {
             Self::Http(error) if error.is_connect() || error.is_request() => {
                 TwitchFailureClass::ConnectionReset
             }
+            Self::PlaybackRequest { failure, .. } => *failure,
             _ => TwitchFailureClass::Other,
         }
     }
@@ -290,6 +296,18 @@ pub(crate) struct ProtocolCommunityGoal {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct StreamInfoData {
     pub(crate) user: Option<StreamInfoUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PlaybackAccessTokenData {
+    #[serde(rename = "streamPlaybackAccessToken")]
+    pub(crate) stream_playback_access_token: Option<PlaybackAccessToken>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PlaybackAccessToken {
+    pub(crate) signature: String,
+    pub(crate) value: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -657,6 +675,7 @@ pub enum ClaimDropOutcome {
 pub struct TwitchEndpoints {
     pub twitch_url: String,
     pub gql_url: String,
+    pub playback_url: String,
 }
 
 impl Default for TwitchEndpoints {
@@ -664,6 +683,7 @@ impl Default for TwitchEndpoints {
         Self {
             twitch_url: TWITCH_URL.to_string(),
             gql_url: GQL_URL.to_string(),
+            playback_url: PLAYBACK_URL.to_string(),
         }
     }
 }

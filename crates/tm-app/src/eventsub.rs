@@ -576,6 +576,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: format!("http://{address}"),
                 gql_url: format!("http://{address}/gql"),
+                ..TwitchEndpoints::default()
             },
         ));
         let config = tm_config::ConfigFile {
@@ -640,6 +641,7 @@ mod tests {
             TwitchEndpoints {
                 twitch_url: format!("http://{address}"),
                 gql_url: format!("http://{address}/gql"),
+                ..TwitchEndpoints::default()
             },
         ));
         let tracked_streamers = (0..9)
