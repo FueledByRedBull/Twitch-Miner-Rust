@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Retries read-only GQL requests when Twitch returns the observed HTTP-200
+  envelope containing only fixed `service error` entries. Unknown or mixed GQL
+  errors still fail closed, and mutations remain single-attempt.
 - Keeps saved-session validation inside the process across transient network,
   rate-limit, and Twitch server failures with capped interruptible backoff, and
   separates task activity from task success so active recovery is reported as

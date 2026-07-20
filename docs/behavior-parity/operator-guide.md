@@ -130,6 +130,10 @@ One fallback cycle may query many streamers, but health counts that batch as a
 single success or failure so a brief shared network outage cannot exhaust the
 consecutive-failure threshold in one minute.
 
+Read-only GQL operations also retry Twitch's fixed HTTP-200 `service error`
+envelope with the same bounded request budget. Other or mixed GraphQL errors
+remain contract failures, and points-changing mutations are never replayed.
+
 Repeated failures make `--health` fail and remain visible in `--status`, but an
 active retry loop no longer terminates the miner merely because it crossed the
 failure threshold. Supervision still requests a controlled restart if the task
