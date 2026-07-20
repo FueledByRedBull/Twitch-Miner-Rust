@@ -14,9 +14,9 @@ mod tests {
 
     use crate::bootstrap::{
         env_has_value, has_override, load_config_with_fallback_using,
-        load_or_login_session_with_auth_client, normalized_username, preview_config_with_fallback,
-        should_fallback_to_user_config, validate_timezone_override, TimezoneValidation,
-        READ_ONLY_FILE_SYSTEM_ERROR,
+        load_or_login_session_with_auth_client, load_or_login_session_with_auth_client_and_retry,
+        normalized_username, preview_config_with_fallback, should_fallback_to_user_config,
+        validate_timezone_override, TimezoneValidation, READ_ONLY_FILE_SYSTEM_ERROR,
     };
     use crate::context::{refresh_snapshot_streamers, spawn_pending_claim_loop};
     use crate::drops::{claim_available_drops, drop_is_claimable};
@@ -34,7 +34,7 @@ mod tests {
     use crate::Cli;
     use clap::Parser;
     use reqwest::StatusCode;
-    use tm_auth::{AuthEndpoints, TwitchAuthClient};
+    use tm_auth::{AuthEndpoints, AuthSession, CookieStore, TwitchAuthClient};
     use tm_config::{AppPaths, ConfigError, ConfigFile};
     use tm_domain::{
         BetSettings, DelayMode, Game, OffsetDateTime, PredictionDecision, PredictionEvent,
@@ -191,6 +191,39 @@ mod tests {
                 token_url: format!("http://{address}/oauth2/token"),
                 validate_url: format!("http://{address}/oauth2/validate"),
             },
+            handle,
+        )
+    }
+
+    fn spawn_auth_validation_server(
+        responses: Vec<Vec<u8>>,
+    ) -> (
+        AuthEndpoints,
+        Arc<Mutex<Vec<String>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(read_http_request(&mut stream));
+                stream.write_all(&response).unwrap();
+            }
+        });
+        let validate_url = format!("http://{address}/oauth2/validate");
+        (
+            AuthEndpoints {
+                device_code_url: validate_url.clone(),
+                token_url: validate_url.clone(),
+                validate_url,
+            },
+            requests,
             handle,
         )
     }
@@ -1022,6 +1055,49 @@ mod tests {
             .any(|request| request.contains(r#""operationName":"ChannelPointsContext""#)));
 
         fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_session_validation_recovers_without_device_login_after_transient_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("saved-token");
+        stored.save_to_dir(directory.path()).unwrap();
+
+        let responses = vec![
+            Vec::new(),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-123","scopes":["channel:read:predictions"]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("saved-token"));
+        assert_eq!(session.user_id(), Some("user-123"));
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

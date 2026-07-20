@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Keeps saved-session validation inside the process across transient network,
+  rate-limit, and Twitch server failures with capped interruptible backoff, and
+  separates task activity from task success so active recovery is reported as
+  degraded without creating a container restart storm. Definitive auth
+  rejection still enters device reauthorization, contract failures remain
+  fail-closed, and silent or exited tasks remain fatal to supervision.
 - Adds a versioned, bounded private streak cache, deterministic longest/expiring
   streak priorities, and opt-in 23.5-hour offline VOD/clip streak recovery with
   exact broadcast matching, live preemption, sanitized progress, and typed

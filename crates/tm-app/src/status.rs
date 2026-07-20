@@ -11,7 +11,7 @@ use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use crate::build_info;
 
 pub(crate) const STATUS_FILE_NAME: &str = "runtime-status.json";
-const STATUS_SCHEMA_VERSION: u8 = 4;
+const STATUS_SCHEMA_VERSION: u8 = 5;
 const MAX_HEARTBEAT_AGE_SECONDS: u64 = 120;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const MAX_COUNTER_VALUE: u64 = 1_000_000_000;
@@ -21,6 +21,7 @@ const MAX_DROP_PROGRESS_ENTRIES: usize = 16;
 struct TaskStatus {
     name: String,
     last_success_unix: u64,
+    last_activity_unix: u64,
     consecutive_failures: u32,
     stale_after_seconds: u64,
     last_error_class: Option<String>,
@@ -70,11 +71,13 @@ pub(crate) struct HealthTracker {
 
 impl HealthTracker {
     pub(crate) fn register(&self, name: &'static str, stale_after: std::time::Duration) {
+        let now = unix_now_infallible();
         self.lock_tasks().insert(
             name.to_string(),
             TaskStatus {
                 name: name.to_string(),
-                last_success_unix: unix_now_infallible(),
+                last_success_unix: now,
+                last_activity_unix: now,
                 consecutive_failures: 0,
                 stale_after_seconds: stale_after.as_secs(),
                 last_error_class: None,
@@ -84,7 +87,9 @@ impl HealthTracker {
 
     pub(crate) fn success(&self, name: &'static str) {
         if let Some(task) = self.lock_tasks().get_mut(name) {
-            task.last_success_unix = unix_now_infallible();
+            let now = unix_now_infallible();
+            task.last_success_unix = now;
+            task.last_activity_unix = now;
             task.consecutive_failures = 0;
             task.last_error_class = None;
         }
@@ -92,6 +97,7 @@ impl HealthTracker {
 
     pub(crate) fn failure(&self, name: &'static str, error_class: &'static str) {
         if let Some(task) = self.lock_tasks().get_mut(name) {
+            task.last_activity_unix = unix_now_infallible();
             task.consecutive_failures = task.consecutive_failures.saturating_add(1);
             task.last_error_class = Some(error_class.to_string());
         }
@@ -413,16 +419,12 @@ fn validate_status(status: &RuntimeStatus, now: u64) -> Result<()> {
 }
 
 fn validate_status_for_supervision(status: &RuntimeStatus, now: u64) -> Result<()> {
-    // PubSub is a compatibility adapter. Its degradation must remain visible to --health,
-    // but it must not terminate EventSub, polling, IRC, drops, or minute watching.
+    // Retry loops remain visible as degraded to --health, but active retries must not
+    // terminate the process. Unexpected task exits are supervised separately.
     validate_common_status(status, now, true)
 }
 
-fn validate_common_status(
-    status: &RuntimeStatus,
-    now: u64,
-    ignore_pubsub_task: bool,
-) -> Result<()> {
+fn validate_common_status(status: &RuntimeStatus, now: u64, supervision: bool) -> Result<()> {
     if status.schema_version != STATUS_SCHEMA_VERSION || status.state != "ready" {
         return Err(anyhow!("runtime status is not ready"));
     }
@@ -431,17 +433,20 @@ fn validate_common_status(
         return Err(anyhow!("runtime status is stale ({age}s old)"));
     }
     for task in &status.tasks {
-        if ignore_pubsub_task && task.name == "pubsub" {
-            continue;
-        }
-        let task_age = now.saturating_sub(task.last_success_unix);
+        let task_timestamp = if supervision {
+            task.last_activity_unix
+        } else {
+            task.last_success_unix
+        };
+        let task_age = now.saturating_sub(task_timestamp);
         if task_age > task.stale_after_seconds {
             return Err(anyhow!(
-                "runtime task {} is stale ({task_age}s old)",
-                task.name
+                "runtime task {} is {} ({task_age}s old)",
+                task.name,
+                if supervision { "inactive" } else { "stale" }
             ));
         }
-        if task.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+        if !supervision && task.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             return Err(anyhow!(
                 "runtime task {} has {} consecutive failures",
                 task.name,
@@ -565,6 +570,7 @@ mod tests {
             tasks: vec![TaskStatus {
                 name: String::from("pubsub"),
                 last_success_unix: 1,
+                last_activity_unix: 100,
                 consecutive_failures: 0,
                 stale_after_seconds: 10,
                 last_error_class: None,
@@ -580,7 +586,7 @@ mod tests {
         status.tasks[0].consecutive_failures = 5;
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());
-        status.tasks[0].name = String::from("minute");
+        status.tasks[0].last_activity_unix = 1;
         assert!(validate_status_for_supervision(&status, 100).is_err());
     }
 
