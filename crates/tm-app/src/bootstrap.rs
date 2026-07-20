@@ -1,9 +1,10 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use tm_auth::{AuthClientError, AuthSession, AuthSessionError, TwitchAuthClient};
+use tm_auth::{AuthClientError, AuthSession, AuthSessionError, LoginValidation, TwitchAuthClient};
 use tm_config::{
     default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
     ConfigError, ConfigFile,
@@ -15,6 +16,13 @@ use crate::Cli;
 pub(crate) const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 pub(crate) const READ_ONLY_FILE_SYSTEM_ERROR: i32 = 30;
+const SAVED_SESSION_RETRY_BASE: Duration = Duration::from_secs(5);
+const SAVED_SESSION_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+
+enum SavedSessionValidation {
+    Valid(LoginValidation),
+    Reauthorize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TimezoneValidation {
@@ -156,32 +164,51 @@ pub(crate) async fn load_or_login_session_with_auth_client(
     base_dir: &Path,
     auth_client: &TwitchAuthClient,
 ) -> Result<AuthSession> {
+    load_or_login_session_with_auth_client_and_retry(
+        config,
+        base_dir,
+        auth_client,
+        SAVED_SESSION_RETRY_BASE,
+        SAVED_SESSION_RETRY_MAX,
+    )
+    .await
+}
+
+pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
+    config: &ConfigFile,
+    base_dir: &Path,
+    auth_client: &TwitchAuthClient,
+    retry_base: Duration,
+    retry_max: Duration,
+) -> Result<AuthSession> {
     let username = normalized_username(&config.username)?;
     let device_id = generate_device_id();
 
     match AuthSession::load_from_dir(base_dir, &username) {
         Ok(mut session) => {
             if let Some(auth_token) = session.auth_token().map(str::to_string) {
-                match auth_client
-                    .validate_login_details(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
-                    .await
+                match validate_saved_session_with_retry(
+                    auth_client,
+                    &auth_token,
+                    &device_id,
+                    &username,
+                    retry_base,
+                    retry_max,
+                )
+                .await?
                 {
-                    Ok(validation) => {
+                    SavedSessionValidation::Valid(validation) => {
                         session.set_user_id(validation.user_id);
                         session.set_scopes(validation.scopes);
                         session.save_to_dir(base_dir)?;
                         tracing::debug!(username = %username, "loaded cookies from disk");
                         return Ok(session);
                     }
-                    Err(error) if saved_session_requires_reauthorization(&error) => {
+                    SavedSessionValidation::Reauthorize => {
                         tracing::warn!(
                             username = %username,
-                            %error,
                             "saved cookies are invalid; starting device login"
                         );
-                    }
-                    Err(error) => {
-                        return Err(error).context("validate saved Twitch session");
                     }
                 }
             } else {
@@ -237,6 +264,85 @@ pub(crate) async fn load_or_login_session_with_auth_client(
     Ok(session)
 }
 
+async fn validate_saved_session_with_retry(
+    auth_client: &TwitchAuthClient,
+    auth_token: &str,
+    device_id: &str,
+    username: &str,
+    retry_base: Duration,
+    retry_max: Duration,
+) -> Result<SavedSessionValidation> {
+    let mut failure_attempt = 0_u32;
+    loop {
+        match auth_client
+            .validate_login_details(auth_token, device_id, username, DEFAULT_USER_AGENT)
+            .await
+        {
+            Ok(validation) => return Ok(SavedSessionValidation::Valid(validation)),
+            Err(error) if saved_session_requires_reauthorization(&error) => {
+                return Ok(SavedSessionValidation::Reauthorize);
+            }
+            Err(error) => {
+                let Some(error_class) = saved_session_retry_class(&error) else {
+                    return Err(error).context("validate saved Twitch session");
+                };
+                failure_attempt = failure_attempt.saturating_add(1);
+                let delay = saved_session_retry_delay(failure_attempt, retry_base, retry_max);
+                tracing::warn!(
+                    operation = "auth",
+                    error_class,
+                    failure_attempt,
+                    retry_delay_seconds = delay.as_secs(),
+                    "saved session validation failed transiently; retrying"
+                );
+                if delay.is_zero() {
+                    continue;
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    result = crate::shutdown::wait_for_shutdown_signal() => {
+                        result?;
+                        return Err(anyhow!("shutdown requested while retrying saved session validation"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn saved_session_retry_class(error: &AuthClientError) -> Option<&'static str> {
+    match error {
+        AuthClientError::Http(error) if error.is_timeout() => Some("timeout"),
+        AuthClientError::Http(error)
+            if error.is_connect()
+                || (error.is_request() && !error.is_decode() && !error.is_body()) =>
+        {
+            Some("connection-reset")
+        }
+        AuthClientError::UnexpectedStatus { status, .. }
+            if *status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+        {
+            Some("rate-limited")
+        }
+        AuthClientError::UnexpectedStatus { status, .. } if status.is_server_error() => {
+            Some("server-error")
+        }
+        _ => None,
+    }
+}
+
+fn saved_session_retry_delay(
+    failure_attempt: u32,
+    retry_base: Duration,
+    retry_max: Duration,
+) -> Duration {
+    let exponent = failure_attempt.saturating_sub(1).min(6);
+    retry_base
+        .checked_mul(1_u32 << exponent)
+        .unwrap_or(retry_max)
+        .min(retry_max)
+}
+
 fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
     matches!(
         error,
@@ -290,7 +396,12 @@ pub(crate) fn should_fallback_to_user_config(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_http_client, saved_session_requires_reauthorization};
+    use std::time::Duration;
+
+    use super::{
+        build_http_client, saved_session_requires_reauthorization, saved_session_retry_class,
+        saved_session_retry_delay,
+    };
     use tm_auth::AuthClientError;
 
     #[test]
@@ -329,5 +440,35 @@ mod tests {
         assert!(!saved_session_requires_reauthorization(
             &AuthClientError::MissingUserId
         ));
+    }
+
+    #[test]
+    fn saved_session_retry_policy_is_transient_and_bounded() {
+        assert_eq!(
+            saved_session_retry_class(&AuthClientError::UnexpectedStatus {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                context: "validate login",
+            }),
+            Some("server-error")
+        );
+        assert_eq!(
+            saved_session_retry_class(&AuthClientError::UnexpectedStatus {
+                status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                context: "validate login",
+            }),
+            Some("rate-limited")
+        );
+        assert_eq!(
+            saved_session_retry_class(&AuthClientError::MissingUserId),
+            None
+        );
+        assert_eq!(
+            saved_session_retry_delay(1, Duration::from_secs(5), Duration::from_secs(300)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            saved_session_retry_delay(20, Duration::from_secs(5), Duration::from_secs(300)),
+            Duration::from_secs(300)
+        );
     }
 }

@@ -19,6 +19,7 @@ Shutdown and health:
 - The container uses `SIGTERM` for shutdown.
 - Compose examples use `init: true` and a `30s` grace period so the miner can flush session state cleanly.
 - There is no HTTP health endpoint. The image health check runs `twitch-miner --health`, which validates the runtime heartbeat file in `/data`.
+- Transient startup-auth and task recovery stays inside the process with bounded backoff. Docker may report the service unhealthy during an outage, but an active retry loop does not create a restart storm; silent or exited tasks still fail supervision.
 
 Build targets:
 

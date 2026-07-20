@@ -81,7 +81,7 @@ pub(crate) async fn wait_for_shutdown_or_task_failure(
     }
 }
 
-async fn wait_for_shutdown_signal() -> Result<()> {
+pub(crate) async fn wait_for_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
         let mut terminate =

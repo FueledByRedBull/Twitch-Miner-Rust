@@ -36,7 +36,8 @@ If you want to watch logs in the foreground, run the command directly in the ter
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 - A saved session starts reauthorization only after a definitive authentication
   rejection. Transient network or Twitch server failures leave the saved
-  session untouched and fail startup for the service supervisor to retry.
+  session untouched and retry validation in-process with capped backoff. The
+  wait remains interruptible by `CTRL-C` or container `SIGTERM`.
 
 ## Docker Run
 
@@ -59,10 +60,11 @@ docker exec twitch-miner /twitch-miner --status --data-dir /data
 docker exec twitch-miner /twitch-miner --health --data-dir /data
 ```
 
-`--status` prints only the sanitized runtime-status document. It includes task
-freshness, bounded claim/bet/reconnect/refresh counters, the last redacted error
-class, runtime queue/processing measurements, EventSub planned/active/cost
-capabilities, and PubSub configured/acknowledged/message/reconnect capabilities.
+`--status` prints only the sanitized runtime-status document. It includes each
+task's last successful work and last activity, bounded
+claim/bet/reconnect/refresh counters, the last redacted error class, runtime
+queue/processing measurements, EventSub planned/active/cost capabilities, and
+PubSub configured/acknowledged/message/reconnect capabilities.
 It never prints topic suffixes, channel/user IDs, cookies,
 tokens, request headers, or raw account payloads. `followers_order` accepts
 `ASC` or `DESC`; `DESC` remains the default.
@@ -127,6 +129,11 @@ whose source is `gql-polling` are intentionally covered by the fallback poller.
 One fallback cycle may query many streamers, but health counts that batch as a
 single success or failure so a brief shared network outage cannot exhaust the
 consecutive-failure threshold in one minute.
+
+Repeated failures make `--health` fail and remain visible in `--status`, but an
+active retry loop no longer terminates the miner merely because it crossed the
+failure threshold. Supervision still requests a controlled restart if the task
+stops reporting activity past its task-specific deadline, exits, or panics.
 
 PubSub `bad-auth` requires a fresh session. `listen-rejected` means one topic
 class was not accepted. `pong-timeout`, `connection-error`, `connection-closed`,

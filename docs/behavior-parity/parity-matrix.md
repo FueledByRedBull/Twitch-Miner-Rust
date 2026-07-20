@@ -17,7 +17,7 @@ gap before each release.
 | EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and IRC tests. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
 | Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
-| Runtime supervision and health | Improved | Task-exit/panic supervision plus task-specific freshness/failure thresholds; batched presence polling records at most one task failure per cycle. |
+| Runtime supervision and health | Improved | Task-exit/panic supervision plus separate success/activity freshness and failure thresholds; active bounded recovery remains degraded without restarting the whole miner, silent tasks remain fatal, saved-session validation retries transient startup failures in-process, and batched presence polling records at most one task failure per cycle. |
 | Docker amd64, arm64, arm/v7 | Supported | Per-platform digest and post-manifest smoke tests in release CI. |
 | Automatic updater | Deliberately removed | Legacy `auto_update=true` is rejected; no dormant binary replacement code remains. |
 | Config mutation | Improved | Versioned preview, atomic write, and rollback backup. |
