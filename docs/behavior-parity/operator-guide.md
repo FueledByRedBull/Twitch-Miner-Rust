@@ -23,7 +23,8 @@ If you want to watch logs in the foreground, run the command directly in the ter
   `claim_drops` controls only claim mutations. Leave
   `watch_one_stream_when_drops_active=true` to limit watching to the
   highest-ranked eligible campaign; all three settings support per-streamer
-  overrides.
+  overrides. Set it to `false` to watch every eligible live channel concurrently,
+  regardless of campaign availability.
 - `watch_streak_vod_recovery` is an opt-in global/per-streamer setting. It uses
   one bounded offline worker, exact missed-broadcast VOD matching where
   available, clip fallback, and immediate live-stream preemption. Accepted
