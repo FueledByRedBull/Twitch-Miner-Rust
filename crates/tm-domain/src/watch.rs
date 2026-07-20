@@ -9,8 +9,6 @@ use time::OffsetDateTime;
 use crate::types::{IrcMode, Stream, Streamer};
 
 const STREAK_PRIORITY_MINUTES: f64 = 15.0;
-const MAX_CONCURRENT_WATCHERS: usize = 2;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WatchPriority {
     Order,
@@ -144,7 +142,7 @@ pub fn pick_streamers_to_watch(
     }
 
     fn add_candidate(candidate: Candidate, selected: &mut Vec<usize>, seen: &mut HashSet<usize>) {
-        if selected.len() >= MAX_CONCURRENT_WATCHERS || !seen.insert(candidate.idx) {
+        if !seen.insert(candidate.idx) {
             return;
         }
         selected.push(candidate.idx);
@@ -252,9 +250,6 @@ pub fn pick_streamers_to_watch(
     let skip_early_streak = !game_priority.is_empty() && !has_priority_game_streak;
 
     for priority in priorities {
-        if selected.len() >= MAX_CONCURRENT_WATCHERS {
-            break;
-        }
         let mut ordered: Vec<Candidate> = match priority {
             WatchPriority::Streak => {
                 if skip_early_streak {
@@ -327,9 +322,6 @@ pub fn pick_streamers_to_watch(
 
         for candidate in ordered {
             add_candidate(candidate, &mut selected, &mut seen);
-            if selected.len() >= MAX_CONCURRENT_WATCHERS {
-                break;
-            }
         }
     }
 
@@ -349,12 +341,7 @@ pub fn pick_streamers_to_watch(
             .into_iter()
             .find(|candidate| !seen.contains(&candidate.idx))
         {
-            if selected.len() < MAX_CONCURRENT_WATCHERS {
-                add_candidate(streak_pick, &mut selected, &mut seen);
-            } else {
-                let keep = selected[0];
-                selected = vec![keep, streak_pick.idx];
-            }
+            add_candidate(streak_pick, &mut selected, &mut seen);
         }
     }
 
@@ -369,19 +356,14 @@ pub fn pick_streamers_to_watch(
         }
     }
 
-    if selected.len() < MAX_CONCURRENT_WATCHERS {
-        let mut fallback = candidates.clone();
-        fallback.sort_by(|left, right| {
-            left.rank
-                .cmp(&right.rank)
-                .then_with(|| left.position.cmp(&right.position))
-        });
-        for candidate in fallback {
-            add_candidate(candidate, &mut selected, &mut seen);
-            if selected.len() >= MAX_CONCURRENT_WATCHERS {
-                break;
-            }
-        }
+    let mut fallback = candidates.clone();
+    fallback.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.position.cmp(&right.position))
+    });
+    for candidate in fallback {
+        add_candidate(candidate, &mut selected, &mut seen);
     }
 
     selected
@@ -474,6 +456,7 @@ mod tests {
         assert_eq!(watch_interval(0), Duration::from_secs(20));
         assert_eq!(watch_interval(2), Duration::from_secs(10));
         assert_eq!(watch_interval(10), Duration::from_secs(5));
+        assert_eq!(watch_interval(17), Duration::from_secs(5));
     }
 
     #[test]
@@ -563,7 +546,7 @@ mod tests {
             datetime!(2026-03-27 06:00 UTC),
         );
 
-        assert_eq!(selected, vec![2, 0]);
+        assert_eq!(selected, vec![2, 0, 1]);
     }
 
     #[test]
@@ -611,7 +594,7 @@ mod tests {
             None,
             datetime!(2026-03-27 06:00 UTC),
         );
-        assert_eq!(selected, vec![2, 3]);
+        assert_eq!(selected, vec![2, 3, 1, 0]);
     }
 
     #[test]
@@ -659,7 +642,7 @@ mod tests {
             datetime!(2026-03-27 06:00 UTC),
         );
 
-        assert_eq!(selected, vec![0, 1]);
+        assert_eq!(selected, vec![0, 1, 2]);
     }
 
     #[test]
@@ -695,9 +678,9 @@ mod tests {
     }
 
     #[test]
-    fn active_drop_campaign_uses_both_slots_when_single_watcher_is_disabled() {
+    fn active_drop_campaign_watches_every_channel_when_single_watcher_is_disabled() {
         let online_at = datetime!(2026-03-27 05:58 UTC);
-        let streamers = (0..2)
+        let streamers = (0..6)
             .map(|index| Streamer {
                 username: format!("streamer{index}"),
                 is_online: true,
@@ -724,7 +707,7 @@ mod tests {
             datetime!(2026-03-27 06:00 UTC),
         );
 
-        assert_eq!(selected, vec![0, 1]);
+        assert_eq!(selected, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -763,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn streak_metadata_priorities_are_deterministic_and_bounded() {
+    fn streak_metadata_priorities_are_deterministic_for_every_channel() {
         let now = datetime!(2026-03-27 06:00 UTC);
         let make_streamer =
             |username: &str, count: Option<u32>, expiry_hours: Option<i64>| Streamer {
@@ -799,7 +782,7 @@ mod tests {
                 None,
                 now,
             ),
-            vec![1, 2]
+            vec![1, 2, 0, 3]
         );
         assert_eq!(
             pick_streamers_to_watch(
@@ -810,7 +793,7 @@ mod tests {
                 None,
                 now,
             ),
-            vec![2, 1]
+            vec![2, 1, 0, 3]
         );
     }
 

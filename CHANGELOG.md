@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Watches every eligible live channel instead of truncating the prioritized
+  watch set to two. The explicit `watch_one_stream_when_drops_active` policy can
+  still reserve one channel for Twitch drop progress when enabled.
 - Retries read-only GQL requests when Twitch returns the observed HTTP-200
   envelope containing only fixed `service error` entries. Unknown or mixed GQL
   errors still fail closed, and mutations remain single-attempt.

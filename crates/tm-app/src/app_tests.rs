@@ -1424,7 +1424,11 @@ mod tests {
                 .await
                 .unwrap()
                 .watch_target_logins(now),
-            vec![String::from("alice"), String::from("bob")]
+            vec![
+                String::from("alice"),
+                String::from("bob"),
+                String::from("carol")
+            ]
         );
 
         let stale_streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();

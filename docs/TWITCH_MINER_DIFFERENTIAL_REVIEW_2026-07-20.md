@@ -215,3 +215,21 @@ next responses contain seven valid, fully typed archived-video nodes. The final
 candidate therefore retries only read-only envelopes whose non-empty error list
 consists entirely of that fixed service error. Unknown or mixed GraphQL errors,
 response-shape failures, and all mutations remain fail-closed/single-attempt.
+
+## All-channel watch follow-up
+
+Live rate evidence found six online channels but one five-minute WATCH reward
+stream. The runtime was healthy; the configured campaign single-watcher policy
+had reduced the historical two-slot selector to one. The final follow-up removes
+the unconditional two-channel truncation so disabling
+`watch_one_stream_when_drops_active` selects every eligible online channel.
+Offline, suspended, and game-excluded channels remain ineligible, ordering stays
+deterministic, and the explicit single-watcher campaign policy remains available.
+Unit and application integration coverage include six simultaneous eligible
+campaign channels and metadata-driven exclusion after initial selection.
+
+The differential blast radius is limited to minute-watcher target selection:
+authentication, EventSub/PubSub routing, point mutations, and retry policy are
+unchanged. The existing sequential loop and five-second minimum request spacing
+remain in force, so selecting more channels does not create an unbounded request
+burst. Review found no unresolved critical, high, medium, or low issue.

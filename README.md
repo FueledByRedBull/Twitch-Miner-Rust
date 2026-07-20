@@ -115,7 +115,9 @@ Notes:
   minute-watch metadata. `claim_drops` independently controls claim mutations.
   `watch_one_stream_when_drops_active` limits the watch set to one deterministic
   streamer while an eligible campaign is active, matching Twitch's
-  single-stream drop progress behavior. All three can be overridden per streamer.
+  single-stream drop progress behavior. Set it to `false` to mine every eligible
+  live channel concurrently, including while campaigns are active. All three can
+  be overridden per streamer.
 - `watch_streak_vod_recovery` is off by default. When enabled globally or for a
   streamer, one bounded worker can submit offline VOD/clip playback evidence for
   an unresolved known streak for up to 23.5 hours after the channel goes offline.
