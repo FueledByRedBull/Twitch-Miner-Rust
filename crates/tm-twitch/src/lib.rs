@@ -548,6 +548,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_only_fixed_read_only_gql_service_errors() {
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (200, r#"{"errors":[{"message":"service error","path":["user","videos"]}]}"#),
+            (200, r#"{"data":{"user":{"id":"100"}}}"#),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: base_url,
+            },
+        );
+
+        assert_eq!(client.fetch_channel_id("tester").await.unwrap(), "100");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.join().unwrap();
+
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (
+                200,
+                r#"{"errors":[{"message":"service error"},{"message":"contract changed"}]}"#,
+            ),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: base_url,
+            },
+        );
+
+        assert!(matches!(
+            client.fetch_channel_id("tester").await,
+            Err(TwitchClientError::GqlErrors { .. })
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.join().unwrap();
+
+        let (base_url, requests, server) = spawn_http_server([
+            (
+                200,
+                "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+            ),
+            (200, r#"{"errors":[{"message":"service error"}]}"#),
+            (200, r#"{"errors":[{"message":"service error"}]}"#),
+            (200, r#"{"errors":[{"message":"service error"}]}"#),
+        ]);
+        let client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.clone(),
+                gql_url: base_url,
+            },
+        );
+
+        assert!(matches!(
+            client.fetch_channel_id("tester").await,
+            Err(TwitchClientError::GqlErrors { .. })
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn resolves_current_login_from_stable_channel_id() {
         let (base_url, requests, server) = spawn_http_server([
             (

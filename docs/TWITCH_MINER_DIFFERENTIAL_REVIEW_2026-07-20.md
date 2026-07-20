@@ -204,3 +204,14 @@ availability behavior until the replacement soak passes.
    available to recover.
 7. Silent, exited, or panicked mandatory tasks still cause controlled process
    termination.
+
+## Canary follow-up
+
+The first published network-recovery candidate and its rollback both failed the
+same exclusive canary stage while Twitch intermittently returned HTTP 200 with
+one GraphQL error at the `user.videos` path. Sanitized repeated probes confirmed
+that the error message is exactly the fixed `service error` value and that the
+next responses contain seven valid, fully typed archived-video nodes. The final
+candidate therefore retries only read-only envelopes whose non-empty error list
+consists entirely of that fixed service error. Unknown or mixed GraphQL errors,
+response-shape failures, and all mutations remain fail-closed/single-attempt.

@@ -665,11 +665,10 @@ impl TwitchClient {
             }
             request
         };
-        let response = if retry_read_only {
-            self.send_read_request(build_request, "post gql").await?
-        } else {
-            build_request().send().await?
-        };
+        if retry_read_only {
+            return self.send_read_gql_value(build_request, "post gql").await;
+        }
+        let response = build_request().send().await?;
         if !response.status().is_success() {
             return Err(TwitchClientError::UnexpectedStatus {
                 status: response.status(),
@@ -677,6 +676,50 @@ impl TwitchClient {
             });
         }
         Ok(response.json().await?)
+    }
+
+    async fn send_read_gql_value<F>(
+        &self,
+        mut build_request: F,
+        context: &'static str,
+    ) -> Result<serde_json::Value, TwitchClientError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        for attempt in 0..MAX_READ_ATTEMPTS {
+            match build_request().send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if is_retryable_read_status(status) && attempt + 1 < MAX_READ_ATTEMPTS {
+                        let delay = retry_delay(&response, attempt);
+                        drop(response);
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    if !status.is_success() {
+                        return Err(TwitchClientError::UnexpectedStatus { status, context });
+                    }
+                    let payload = response.json().await?;
+                    if gql_has_only_transient_service_errors(&payload)
+                        && attempt + 1 < MAX_READ_ATTEMPTS
+                    {
+                        tokio::time::sleep(read_backoff(attempt)).await;
+                        continue;
+                    }
+                    return Ok(payload);
+                }
+                Err(error) => {
+                    if !is_retryable_read_error(&error) || attempt + 1 == MAX_READ_ATTEMPTS {
+                        return Err(TwitchClientError::Http(error));
+                    }
+                    tokio::time::sleep(read_backoff(attempt)).await;
+                }
+            }
+        }
+        Err(TwitchClientError::UnexpectedStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            context,
+        })
     }
 
     async fn post_mutation_typed<T>(
@@ -747,6 +790,19 @@ impl TwitchClient {
 
 fn is_retryable_read_status(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn gql_has_only_transient_service_errors(payload: &serde_json::Value) -> bool {
+    let Some(errors) = payload.get("errors").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    !errors.is_empty()
+        && errors.iter().all(|error| {
+            error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message == "service error")
+        })
 }
 
 fn invalid_mutation(context: &'static str, detail: &'static str) -> TwitchClientError {
