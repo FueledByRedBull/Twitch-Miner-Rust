@@ -4,7 +4,7 @@ use tm_config::{build_base_streamer_settings, build_override_settings, ConfigFil
 use tm_domain::{
     normalize_game_list, normalize_streamer_list, parse_watch_priorities, pick_streamers_to_watch,
     should_join_chat, CommunityGoal, Game, OffsetDateTime, PredictionDecision, PredictionEvent,
-    Stream, Streamer,
+    Stream, Streamer, WatchPriority,
 };
 use tm_events::{
     CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
@@ -113,6 +113,26 @@ impl RuntimeState {
         self.watch_target_indices(now)
             .into_iter()
             .filter_map(|idx| self.streamers.get(idx))
+            .map(|streamer| streamer.username.clone())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn campaign_watch_logins(&self, now: OffsetDateTime) -> Vec<String> {
+        if !self.watch_priorities.contains(&WatchPriority::Drops) {
+            return Vec::new();
+        }
+
+        self.watch_target_indices(now)
+            .into_iter()
+            .filter_map(|idx| self.streamers.get(idx))
+            .filter(|streamer| {
+                streamer.settings.farm_drops
+                    && streamer
+                        .stream
+                        .as_ref()
+                        .is_some_and(Stream::has_active_drop_campaign)
+            })
             .map(|streamer| streamer.username.clone())
             .collect()
     }

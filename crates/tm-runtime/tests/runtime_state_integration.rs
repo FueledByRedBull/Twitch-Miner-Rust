@@ -227,3 +227,60 @@ fn runtime_state_applies_pubsub_sequence_end_to_end() {
     assert_eq!(summary.streamers.len(), 1);
     assert_eq!(summary.streamers[0].username, "alpha");
 }
+
+#[test]
+fn runtime_state_selects_the_first_eligible_campaign_for_pinning() {
+    let campaign_stream = || Stream {
+        drop_campaign_eligible: Some(true),
+        ..Stream::default()
+    };
+    let campaign_settings = || StreamerSettings {
+        farm_drops: true,
+        ..StreamerSettings::default()
+    };
+    let mut state = RuntimeState {
+        started_at: ts(0),
+        follower_mode: false,
+        watch_priorities: vec![
+            WatchPriority::Streak,
+            WatchPriority::Drops,
+            WatchPriority::Order,
+        ],
+        game_priority: Vec::new(),
+        game_exclusions: Vec::new(),
+        streamers: vec![
+            Streamer {
+                username: "alpha".into(),
+                is_online: true,
+                stream: Some(Stream::default()),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: "bravo".into(),
+                is_online: true,
+                settings: campaign_settings(),
+                stream: Some(campaign_stream()),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: "charlie".into(),
+                is_online: true,
+                settings: campaign_settings(),
+                stream: Some(campaign_stream()),
+                ..Streamer::default()
+            },
+        ],
+        initial_points: HashMap::new(),
+        predictions: HashMap::new(),
+        processed_prediction_ids: std::collections::VecDeque::new(),
+        completed_predictions: std::collections::VecDeque::new(),
+    };
+
+    assert_eq!(state.campaign_watch_logins(ts(1)), vec!["bravo", "charlie"]);
+
+    state.streamers[1].is_online = false;
+    assert_eq!(state.campaign_watch_logins(ts(2)), vec!["charlie"]);
+
+    state.watch_priorities = vec![WatchPriority::Order];
+    assert!(state.campaign_watch_logins(ts(3)).is_empty());
+}

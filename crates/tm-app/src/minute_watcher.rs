@@ -68,7 +68,12 @@ pub(crate) fn spawn_minute_watcher_loop(
                 }
             };
             let eligible_watch_logins = snapshot.watch_target_logins(now);
-            let watch_logins = watch_rotation.select(&eligible_watch_logins, now);
+            let campaign_watch_logins = snapshot.campaign_watch_logins(now);
+            let watch_logins = watch_rotation.select_with_campaigns(
+                &eligible_watch_logins,
+                &campaign_watch_logins,
+                now,
+            );
             if watch_logins.is_empty() {
                 health.success("minute");
                 if sleep_or_stop(&mut stop, std::time::Duration::from_secs(20)).await {
