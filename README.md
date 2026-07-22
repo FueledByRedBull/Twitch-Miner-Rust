@@ -115,13 +115,15 @@ Notes:
   minute-watch metadata. `claim_drops` independently controls claim mutations.
   `watch_one_stream_when_drops_active` limits the watch set to one deterministic
   streamer while an eligible campaign is active, matching Twitch's
-  single-stream drop progress behavior. Set it to `false` to mine every eligible
-  live channel, including while campaigns are active. Twitch credits at most two
-  watched channels at once, so the miner keeps two active slots for 15 minutes
-  and rotates them fairly through the complete prioritized set. Each watch
-  heartbeat first performs the Python-compatible typed playback-token and HLS
-  media preflight, then sends the Spade minute-watch event. All three settings
-  can be overridden per streamer.
+  single-stream drop progress behavior. When it is `false`, the highest-ranked
+  eligible campaign immediately pins one watch slot until the campaign finishes
+  or its channel becomes ineligible; other campaign channels wait their turn so
+  Drop progress is not split, while the second slot continues fair 15-minute
+  rotation through non-campaign channels. With no eligible campaign, both of
+  Twitch's creditable slots rotate through the complete prioritized set. Each
+  watch heartbeat first performs the Python-compatible typed playback-token and
+  HLS media preflight, then sends the Spade minute-watch event. All three
+  settings can be overridden per streamer.
 - `watch_streak_vod_recovery` is off by default. When enabled globally or for a
   streamer, one bounded worker can submit offline VOD/clip playback evidence for
   an unresolved known streak for up to 23.5 hours after the channel goes offline.

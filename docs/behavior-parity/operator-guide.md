@@ -23,10 +23,12 @@ If you want to watch logs in the foreground, run the command directly in the ter
   `claim_drops` controls only claim mutations. Leave
   `watch_one_stream_when_drops_active=true` to limit watching to the
   highest-ranked eligible campaign; all three settings support per-streamer
-  overrides. Set it to `false` to include every eligible live channel regardless
-  of campaign availability. Twitch credits at most two watched channels at once;
-  the miner rotates those two slots every 15 minutes so the full eligible set is
-  covered without sacrificing the normal aggregate acquisition rate.
+  overrides. Set it to `false` to pin the highest-ranked eligible campaign in
+  one slot while the other slot rotates fairly through non-campaign channels.
+  Competing campaign channels wait until the pinned campaign completes or goes
+  offline, preventing Twitch's single-channel Drop progress from being split.
+  With no active campaign, both creditable slots rotate every 15 minutes through
+  the full eligible set.
 - `watch_streak_vod_recovery` is an opt-in global/per-streamer setting. It uses
   one bounded offline worker, exact missed-broadcast VOD matching where
   available, clip fallback, and immediate live-stream preemption. Accepted

@@ -31,7 +31,7 @@ working Rust implementation:
 | --- | --- |
 | Username, streamers, follower/game/watch selection | Preserved. |
 | Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
-| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved. Drop farming is independently configurable with `farm_drops`; `watch_one_stream_when_drops_active` defaults to true and can be disabled to include every eligible live channel. The full prioritized set rotates fairly through Twitch's two creditable watch slots in 15-minute turns. Both settings support per-streamer overrides. |
+| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved. Drop farming is independently configurable with `farm_drops`. The highest-ranked eligible campaign preempts immediately and stays pinned until completion or ineligibility. `watch_one_stream_when_drops_active=true` retains Twitch's strict one-channel Drop mode; when false, the other watch slot rotates fairly through non-campaign channels, and both slots resume 15-minute fair rotation when no campaign is active. Both settings support per-streamer overrides. |
 | Raid observation and auto-join | Preserved with compatibility risk | EventSub observes the raid lifecycle; PubSub compatibility supplies the legacy raid ID required by the typed single-attempt `JoinRaid` mutation. Repeated raid IDs are ignored. Live acceptance is still required before release. |
 | Prediction and per-streamer override settings | Preserved. |
 | `password` | Rejected when non-empty; device login does not need it. |

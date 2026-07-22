@@ -4,9 +4,11 @@
 
 - Mines every eligible live channel through fair 15-minute turns in Twitch's two
   creditable watch slots. This preserves the platform's normal points/bonus rate
-  while avoiding permanent priority starvation. The explicit
-  `watch_one_stream_when_drops_active` policy can still reserve one channel for
-  Twitch drop progress when enabled.
+  while avoiding permanent priority starvation. An eligible Drop campaign now
+  preempts immediately and pins its highest-ranked channel until completion or
+  ineligibility. With `watch_one_stream_when_drops_active=false`, the second slot
+  continues fair non-campaign rotation; when enabled, the existing explicit
+  one-channel Drop policy remains unchanged.
 - Restores the Python parent's live-playback preflight before minute-watch
   heartbeats: a typed read-only playback token, lowest-quality HLS playlist, and
   media-segment HEAD request. Direct Spade requests remain fail-closed when the
