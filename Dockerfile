@@ -85,7 +85,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cargo build --locked --release --target "${rust_target}" -p tm-app \
     && install -D "/workspace/target/${rust_target}/release/tm-app" /workspace/bin/twitch-miner
 
-FROM scratch
+FROM build AS replay-build
+ARG TARGETARCH
+ARG TARGETVARIANT
+COPY tests/integration ./tests/integration
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/workspace/target \
+    case "${TARGETARCH}:${TARGETVARIANT}" in \
+        "amd64:") rust_target="x86_64-unknown-linux-musl" ;; \
+        "arm64:") rust_target="aarch64-unknown-linux-musl" ;; \
+        "arm:v7") rust_target="armv7-unknown-linux-musleabihf" ;; \
+        *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
+    esac \
+    && cargo build --locked --release --target "${rust_target}" \
+        --package tm-integration-tests --example replay_benchmark \
+    && install -D \
+        "/workspace/target/${rust_target}/release/examples/replay_benchmark" \
+        /workspace/bin/replay_benchmark
+
+FROM scratch AS replay-artifact
+COPY --from=replay-build /workspace/bin/replay_benchmark /replay_benchmark
+
+FROM scratch AS runtime
 COPY --from=build /workspace/bin/twitch-miner /twitch-miner
 ENV TCPM_DATA_DIR=/data
 ENV TCPM_CONFIG=/data/config.json

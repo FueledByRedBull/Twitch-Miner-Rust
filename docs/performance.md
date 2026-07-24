@@ -38,6 +38,22 @@ profiles first show a material snapshot cost. Both direct and wrapped reports
 record the OS, architecture, hardware-class label, and source revision; use
 `-HardwareClass pi-class` for a native Pi measurement.
 
+Manual multiarch builds also export an ARM64 `pi-replay-benchmark` artifact
+built from the exact workflow revision. Download that artifact on the release
+operator host, copy only the binary to the Pi, and run it natively:
+
+```sh
+chmod 0755 ./replay_benchmark
+TM_REPLAY_REPETITIONS=10 \
+TM_REPLAY_HARDWARE_CLASS=pi-class \
+./replay_benchmark > replay-performance-report.json
+```
+
+This keeps compilers and source trees off the production Pi while recording
+measurements from Pi-class hardware. Confirm the report revision matches the
+candidate image revision, archive the sanitized JSON as release evidence, and
+remove the transferred binary after verification.
+
 The deterministic PR replay remains evidence-only. The scheduled/manual Deep
 Quality workflow runs a longer five-process, ten-repetition sample and compares
 only stable 200-streamer latency/throughput, 1,000-streamer snapshot latency,
