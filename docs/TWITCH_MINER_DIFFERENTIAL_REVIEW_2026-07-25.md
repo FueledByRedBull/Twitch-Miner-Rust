@@ -249,6 +249,14 @@ five-process/50-inner-run replay successfully. Its 200-streamer p95-of-p95 was
 1,000-streamer snapshot p95-of-p95 was 708 microseconds, and peak RSS p95 was
 13.92 MiB.
 
+The separate ARM64 replay artifact was then verified by SHA-256 and executed
+natively on the Pi without a source tree or compiler. Revision `5d42c6e7cf71`
+reported `linux/aarch64`, hardware class `pi-class`, 70,637 median commands per
+second and 26,868-microsecond p95 latency at 200 streamers, and
+3,074-microsecond p95 snapshot cloning at 1,000 streamers. The transferred
+binary and temporary Pi report were removed after the sanitized report was
+retrieved.
+
 The original findings are closed. Publication, exact-image Pi canary, and live
 reward-rate acceptance remain release gates rather than differential-review
 code findings.

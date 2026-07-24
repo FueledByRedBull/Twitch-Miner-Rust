@@ -2,9 +2,6 @@ name: Deep Quality
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - hardening/code-quality-repro-performance
   schedule:
     - cron: '17 3 * * 1'
 
