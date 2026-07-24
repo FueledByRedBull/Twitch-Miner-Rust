@@ -41,7 +41,10 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
    compatibility changes. Review and attach the candidate's differential-review
    artifact to the release evidence.
 2. Run the local QA commands in `CONTRIBUTING.md`, run
-   `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and push the
+   `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and require
+   a successful Deep Quality run for the exact revision. Deep Quality must pass
+   bounded parser fuzzing and mutation, the ratcheted critical-crate branch
+   coverage floor, and the noise-tolerant replay comparison. Then push the
    candidate commit to `main`. The multiarch workflow builds the three platform
    images, SBOM/provenance attestations, the manifest, and the immutable
    `sha-<40-character-commit>` tag.

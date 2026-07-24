@@ -705,3 +705,36 @@ fn remember_mutation_id(values: &mut std::collections::VecDeque<String>, value: 
 fn tm_twitch_drop_id() -> &'static str {
     "c2542d6d-cd10-4532-919b-3d19f30a768b"
 }
+
+#[cfg(test)]
+mod mutation_id_tests {
+    use super::{remember_mutation_id, MAX_PROCESSED_MUTATION_IDS};
+    use std::collections::VecDeque;
+
+    #[test]
+    fn mutation_ids_reject_empty_and_exact_duplicates_only() {
+        let mut values = VecDeque::new();
+
+        assert!(!remember_mutation_id(&mut values, ""));
+        assert!(!remember_mutation_id(&mut values, "   "));
+        assert!(remember_mutation_id(&mut values, "claim-1"));
+        assert!(!remember_mutation_id(&mut values, "claim-1"));
+        assert!(remember_mutation_id(&mut values, "claim-10"));
+        assert_eq!(
+            values,
+            VecDeque::from([String::from("claim-1"), String::from("claim-10")])
+        );
+    }
+
+    #[test]
+    fn mutation_ids_evict_only_the_oldest_entry_at_capacity() {
+        let mut values = (0..MAX_PROCESSED_MUTATION_IDS)
+            .map(|index| format!("id-{index}"))
+            .collect::<VecDeque<_>>();
+
+        assert!(remember_mutation_id(&mut values, "new-id"));
+        assert_eq!(values.len(), MAX_PROCESSED_MUTATION_IDS);
+        assert_eq!(values.front().map(String::as_str), Some("id-1"));
+        assert_eq!(values.back().map(String::as_str), Some("new-id"));
+    }
+}

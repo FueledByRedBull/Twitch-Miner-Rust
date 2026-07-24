@@ -403,6 +403,14 @@ async fn benchmark_report() -> Result<Value, tm_runtime::RuntimeError> {
     Ok(json!({
         "schema": 2,
         "revision": option_env!("BUILD_REVISION").unwrap_or("development"),
+        "host": {
+            "hardware_class": std::env::var("TM_REPLAY_HARDWARE_CLASS")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| String::from("unspecified")),
+            "operating_system": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH,
+        },
         "workload": "sanitized-twitch-free-replay",
         "repetitions": repetitions,
         "workloads": workloads,

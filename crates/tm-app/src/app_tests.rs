@@ -923,6 +923,20 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn pubsub_join_failures_retry_unless_the_task_was_cancelled() {
+        let cancelled_task = tokio::spawn(std::future::pending::<()>());
+        cancelled_task.abort();
+        let cancelled = Err(cancelled_task.await.unwrap_err());
+        assert_eq!(pubsub_reconnect_delay(&cancelled, 0, 1, 1), None);
+
+        let panicked_task = tokio::spawn(async {
+            panic!("join-error fixture");
+        });
+        let panicked = Err(panicked_task.await.unwrap_err());
+        assert!(pubsub_reconnect_delay(&panicked, 0, 1, 1).is_some());
+    }
+
     #[test]
     fn timezone_validation_accepts_iana_names() {
         assert_eq!(

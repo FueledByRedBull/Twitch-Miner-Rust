@@ -35,6 +35,7 @@ jobs:
           --package tm-runtime
           --all-features
           --locked
+          --fail-under-branches 60
           --json
           --output-path critical-branch-coverage.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -60,7 +61,14 @@ jobs:
           ./scripts/measure-replay.ps1
           -Iterations 5
           -WorkloadRepetitions 10
+          -HardwareClass github-actions-hosted
           -OutputPath replay-performance-report.json
+      - name: Compare stable replay metrics
+        shell: pwsh
+        run: >-
+          ./scripts/compare-replay-baseline.ps1
+          -ReportPath replay-performance-report.json
+          -BaselinePath benchmarks/replay-baseline.github-ubuntu-x64.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: replay-performance-report
@@ -86,7 +94,17 @@ jobs:
 
   mutation:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runtime-reducers
+            package: tm-runtime
+            filter: ' in (apply_pubsub_gain|update_history|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id)$'
+          - name: app-retries
+            package: tm-app
+            filter: ' in (pubsub_reconnect_delay|eventsub_reconnect_delay|saved_session_retry_delay)$'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -96,11 +114,19 @@ jobs:
           toolchain: 1.94.0
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: List selected mutants
+        run: cargo mutants --package "$MUTANT_PACKAGE" --list --re "$MUTANT_FILTER"
+        env:
+          MUTANT_PACKAGE: ${{ matrix.package }}
+          MUTANT_FILTER: ${{ matrix.filter }}
       - name: Mutate critical reducers and retry policy
-        run: >-
-          cargo mutants
-          --workspace
-          --test-workspace=true
-          --timeout 120
-          --jobs 2
-          --re 'apply_pubsub_gain|update_history|apply_event_with_outcome|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id|pubsub_reconnect_delay|eventsub_reconnect_delay|saved_session_retry_delay'
+        run: cargo mutants --package "$MUTANT_PACKAGE" --timeout 60 --jobs 2 --re "$MUTANT_FILTER"
+        env:
+          MUTANT_PACKAGE: ${{ matrix.package }}
+          MUTANT_FILTER: ${{ matrix.filter }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: bounded-mutation-report-${{ matrix.name }}
+          path: mutants.out
+          if-no-files-found: warn

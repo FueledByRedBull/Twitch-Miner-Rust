@@ -159,4 +159,14 @@ mod tests {
             assert_eq!(canceled.result_string, "REFUND, Refunded: +0");
         }
     }
+
+    #[test]
+    fn resolved_status_classifier_accepts_only_terminal_statuses() {
+        for status in ["RESOLVED", "CANCELED", "CANCELLED"] {
+            assert!(prediction_status_is_resolved(status));
+        }
+        for status in ["", "ACTIVE", "LOCKED", "resolved", "CANCEL"] {
+            assert!(!prediction_status_is_resolved(status));
+        }
+    }
 }

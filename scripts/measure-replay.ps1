@@ -1,7 +1,9 @@
 param(
     [int]$Iterations = 5,
     [int]$WorkloadRepetitions = 20,
-    [string]$OutputPath = "./replay-performance-report.json"
+    [string]$OutputPath = "./replay-performance-report.json",
+    [ValidateSet('desktop', 'github-actions-hosted', 'pi-class')]
+    [string]$HardwareClass = 'desktop'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,19 +36,22 @@ for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.EnvironmentVariables['TM_REPLAY_REPETITIONS'] = $WorkloadRepetitions.ToString()
+    $startInfo.EnvironmentVariables['TM_REPLAY_HARDWARE_CLASS'] = $HardwareClass
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $wallClock = [System.Diagnostics.Stopwatch]::StartNew()
     if (-not $process.Start()) {
         throw 'Replay benchmark process did not start.'
     }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $peakWorkingSet = 0L
     while (-not $process.WaitForExit(20)) {
         $process.Refresh()
         $peakWorkingSet = [Math]::Max($peakWorkingSet, $process.WorkingSet64)
     }
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $wallClock.Stop()
     if ($process.ExitCode -ne 0) {
         throw "Replay benchmark failed with exit code $($process.ExitCode): $stderr"
@@ -134,6 +139,14 @@ $snapshotSummaries = foreach ($streamerCount in @(17, 100, 1000)) {
 }
 
 $revision = (git rev-parse --short=12 HEAD).Trim()
+$firstReplay = $replays[0]
+if ($replays | Where-Object {
+        $_.host.hardware_class -ne $firstReplay.host.hardware_class -or
+        $_.host.operating_system -ne $firstReplay.host.operating_system -or
+        $_.host.architecture -ne $firstReplay.host.architecture
+    }) {
+    throw 'Replay process reports do not describe one consistent host class.'
+}
 $result = [ordered]@{
     schema = 2
     measured_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -141,6 +154,7 @@ $result = [ordered]@{
     worktree_dirty = -not [string]::IsNullOrWhiteSpace((git status --porcelain) -join "`n")
     iterations = $Iterations
     workload_repetitions = $WorkloadRepetitions
+    host = $firstReplay.host
     process = [ordered]@{
         wall_milliseconds = [ordered]@{
             p50 = Get-Percentile $samples.wall_milliseconds 50

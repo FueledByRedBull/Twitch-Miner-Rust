@@ -23,16 +23,30 @@ account data and performs no network requests:
 
 ```powershell
 cargo run -p tm-integration-tests --example replay_benchmark --release --locked
-./scripts/measure-replay.ps1 -Iterations 5 -OutputPath ./replay-performance-report.json
+./scripts/measure-replay.ps1 -Iterations 5 -HardwareClass desktop -OutputPath ./replay-performance-report.json
 ```
 
-The example reports p50/p95/p99 end-to-end command latency, mean actor queue
-wait, maximum queue depth, throughput, post-burst snapshot responsiveness, and
-snapshot-clone latency at 17, 100, and 1,000 streamers. The wrapper additionally
-records whole-process CPU time and peak resident memory. It deliberately does
-not install an allocator shim: allocation instrumentation is deferred unless
-profiles first show a material snapshot cost. Replay timing is uploaded as CI
-evidence but has no wall-clock pass/fail threshold.
+The example aggregates raw latency and snapshot samples across every requested
+repetition. The wrapper retains every process report and then reports
+distributions across all process runs, so `repetitions` never describes
+discarded work. Reports include p50/p95/p99 end-to-end command latency, mean
+actor queue wait, maximum queue depth, throughput, post-burst snapshot
+responsiveness, snapshot-clone latency at 17, 100, and 1,000 streamers,
+whole-process CPU time, and peak resident memory. It deliberately does not
+install an allocator shim: allocation instrumentation is deferred unless
+profiles first show a material snapshot cost. Both direct and wrapped reports
+record the OS, architecture, hardware-class label, and source revision; use
+`-HardwareClass pi-class` for a native Pi measurement.
+
+The deterministic PR replay remains evidence-only. The scheduled/manual Deep
+Quality workflow runs a longer five-process, ten-repetition sample and compares
+only stable 200-streamer latency/throughput, 1,000-streamer snapshot latency,
+and peak RSS against
+`benchmarks/replay-baseline.github-ubuntu-x64.json`. Its 1.75x latency, 0.6x
+throughput, and 1.5x RSS tolerances are deliberately noise-tolerant: they catch
+material regressions without turning shared-runner timing variance into a PR
+gate. Update the baseline only from an archived clean-run report, record the
+source revision, and review the change like production code.
 
 On the initial Windows x64 development run for this hardening branch, snapshot
 p95 was 53 microseconds at 17 streamers, 120 microseconds at 100, and 736
