@@ -1,10 +1,10 @@
 # Twitch Miner Rust Differential Review
 
-**Review date:** 2026-07-25  
-**Baseline:** `2d0e380da4a8` (`Pin active drop campaigns (#31)`)  
-**Reviewed revision:** `70922da70c34` (`Harden runtime and reproducible release pipeline`)  
-**Branch:** `hardening/code-quality-repro-performance`  
-**Worktree before report:** clean  
+**Review date:** 2026-07-25
+**Baseline:** `2d0e380da4a8` (`Pin active drop campaigns (#31)`)
+**Reviewed revision:** `70922da70c34` (`Harden runtime and reproducible release pipeline`)
+**Branch:** `hardening/code-quality-repro-performance`
+**Worktree before report:** clean
 **Scope:** 52 changed files, 4,328 insertions, 954 deletions
 
 ## Executive summary
@@ -239,6 +239,15 @@ configuration, or the single-writer runtime model.
   builds export the exact-revision ARM64 replay executable as a separate
   artifact so it can be measured natively on the Pi without building source
   there; the artifact is removed after evidence collection.
+
+Code-equivalent remediation revision `5d42c6e7cf71` passed CI run
+`30132527599` and Deep Quality run `30132527486`. The latter enforced 476/754
+critical branches (63.13%), caught 22/22 selected runtime mutants and 4/4
+selected retry-policy mutants, passed both bounded fuzz targets, and compared a
+five-process/50-inner-run replay successfully. Its 200-streamer p95-of-p95 was
+8,569 microseconds, median throughput was 254,284 commands/second,
+1,000-streamer snapshot p95-of-p95 was 708 microseconds, and peak RSS p95 was
+13.92 MiB.
 
 The original findings are closed. Publication, exact-image Pi canary, and live
 reward-rate acceptance remain release gates rather than differential-review
