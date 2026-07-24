@@ -1,0 +1,33 @@
+[package]
+name = "twitch-miner-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+serde_json = "1.0.145"
+tm-auth = { path = "../crates/tm-auth" }
+tm-config = { path = "../crates/tm-config" }
+tm-pubsub = { path = "../crates/tm-pubsub" }
+tm-twitch = { path = "../crates/tm-twitch" }
+
+[[bin]]
+name = "transport_parsers"
+path = "fuzz_targets/transport_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured_input"
+path = "fuzz_targets/structured_input.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

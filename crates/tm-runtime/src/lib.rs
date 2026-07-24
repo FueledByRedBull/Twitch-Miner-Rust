@@ -19,6 +19,7 @@ pub use types::{
     StreamUpdate, StreamerSummary,
 };
 
+// Retained as the stable async bootstrap API even though construction currently needs no await.
 #[allow(clippy::unused_async)]
 pub async fn run(config: &tm_config::ConfigFile) -> RuntimeSession {
     bootstrap(config, tm_domain::OffsetDateTime::now_utc())
@@ -104,6 +105,57 @@ mod tests {
         let delta = apply_pubsub_gain(&mut streamer, 10, "WATCH", 900);
         assert_eq!(delta, 10);
         assert_eq!(streamer.channel_points, 1_010);
+    }
+
+    #[test]
+    fn point_gain_properties_hold_across_extreme_values() {
+        let starting_balances = [0, 1, 1_000, i64::MAX - 1, i64::MAX];
+        let gains = [i64::MIN, -1_000, -1, 0, 1, 1_000, i64::MAX];
+
+        for starting_balance in starting_balances {
+            for earned in gains {
+                let mut streamer = Streamer {
+                    username: String::from("tester"),
+                    channel_points: starting_balance,
+                    points_init: true,
+                    ..Streamer::default()
+                };
+
+                apply_pubsub_gain(&mut streamer, earned, "WATCH", 0);
+
+                assert!(
+                    streamer.channel_points >= 0,
+                    "balance became negative for start={starting_balance}, earned={earned}"
+                );
+                if earned >= 0 {
+                    assert!(
+                        streamer.channel_points >= starting_balance,
+                        "positive gain moved backward for start={starting_balance}, earned={earned}"
+                    );
+                }
+                assert_eq!(streamer.history["WATCH"].count, 1);
+                assert_eq!(streamer.history["WATCH"].amount, earned);
+            }
+        }
+    }
+
+    #[test]
+    fn point_history_saturates_instead_of_panicking_on_external_extremes() {
+        let mut streamer = Streamer {
+            history: HashMap::from([(
+                String::from("WATCH"),
+                HistoryEntry {
+                    count: u32::MAX,
+                    amount: i64::MAX,
+                },
+            )]),
+            ..Streamer::default()
+        };
+
+        update_history(&mut streamer, "WATCH", i64::MAX);
+
+        assert_eq!(streamer.history["WATCH"].count, u32::MAX);
+        assert_eq!(streamer.history["WATCH"].amount, i64::MAX);
     }
 
     #[test]
@@ -984,6 +1036,34 @@ mod tests {
         assert_eq!(state.streamers[0].channel_points, 1_100);
         assert_eq!(state.streamers[0].history["WATCH"].count, 2);
         assert_eq!(state.streamers[0].history["WATCH"].amount, 100);
+    }
+
+    #[test]
+    fn points_replay_dedupe_property_tracks_post_application_balance() {
+        for earned in [1, 12, 50, 1_000, i64::from(u32::MAX)] {
+            for starting_balance in [0, 100, 1_000_000] {
+                let config = ConfigFile {
+                    streamers: vec![String::from("tester")],
+                    ..ConfigFile::default()
+                };
+                let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+                state.streamers[0].channel_id = String::from("100");
+                state.streamers[0].channel_points = starting_balance;
+                let event = PubSubEvent::PointsEarned {
+                    channel_id: String::from("100"),
+                    earned,
+                    reason: String::from("WATCH"),
+                    balance: starting_balance.saturating_add(earned),
+                };
+
+                assert!(state.apply_event_with_outcome(&event, ts(1)).changed);
+                assert!(!state.apply_event_with_outcome(&event, ts(2)).changed);
+
+                apply_pubsub_gain(&mut state.streamers[0], -earned, "PREDICTION", 0);
+                assert!(state.apply_event_with_outcome(&event, ts(3)).changed);
+                assert_eq!(state.streamers[0].history["WATCH"].count, 2);
+            }
+        }
     }
 
     #[test]

@@ -30,6 +30,7 @@ const MAX_LOG_ARCHIVES: usize = 5;
 const MAX_LOG_ARCHIVE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// Logger flags are independent user-facing switches and serialize as a stable flat policy.
 #[allow(clippy::struct_excessive_bools)]
 pub struct LoggerSettings {
     pub save: bool,

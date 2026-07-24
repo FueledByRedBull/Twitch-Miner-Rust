@@ -164,11 +164,12 @@ impl RuntimeState {
         )
     }
 
-    #[allow(clippy::too_many_lines, clippy::redundant_closure_for_method_calls)]
     pub fn apply_event(&mut self, event: &MinerEvent, now: OffsetDateTime) -> Vec<RuntimeEffect> {
         self.apply_event_with_outcome(event, now).effects
     }
 
+    // The exhaustive reducer keeps every external event variant and its dedupe/effect decision in
+    // one auditable match. Variant-specific network work lives outside this state-only boundary.
     #[allow(clippy::too_many_lines, clippy::redundant_closure_for_method_calls)]
     pub fn apply_event_with_outcome(
         &mut self,

@@ -24,6 +24,10 @@ $buildTime = (git show -s --format=%cI HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildTime)) {
     throw "Unable to determine the deterministic source timestamp for build metadata."
 }
+$sourceDateEpoch = (git show -s --format=%ct HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceDateEpoch -notmatch '^\d+$') {
+    throw "Unable to determine SOURCE_DATE_EPOCH."
+}
 
 function Get-LocalLinuxPlatform {
     $dockerPlatform = docker info --format '{{.OSType}}/{{.Architecture}}'
@@ -47,7 +51,8 @@ $args = @(
     "buildx", "build",
     "--tag", "$Image`:$Tag",
     "--build-arg", "BUILD_REVISION=$buildRevision",
-    "--build-arg", "BUILD_TIME=$buildTime"
+    "--build-arg", "BUILD_TIME=$buildTime",
+    "--build-arg", "SOURCE_DATE_EPOCH=$sourceDateEpoch"
 )
 
 if ($Push) {

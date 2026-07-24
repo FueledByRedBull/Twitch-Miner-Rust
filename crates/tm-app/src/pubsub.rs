@@ -13,7 +13,7 @@ use tm_pubsub::{
 use tm_twitch::TwitchClient;
 
 use crate::observability::AppObservability;
-use crate::runtime_effects::execute_runtime_effects;
+use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
@@ -26,31 +26,36 @@ enum SupervisedPubSubEvent {
     },
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct PubSubTaskContext {
+    pub(crate) runtime: tm_runtime::RuntimeHandle,
+    pub(crate) twitch: Arc<TwitchClient>,
+    pub(crate) auth_token: String,
+    pub(crate) user_id: String,
+    pub(crate) username: String,
+    pub(crate) tracked_streamers: Vec<Streamer>,
+    pub(crate) persistent_user_id: String,
+    pub(crate) observability: AppObservability,
+    pub(crate) health: HealthTracker,
+}
+
 pub(crate) fn spawn_pubsub_loop(
     stop: tokio::sync::watch::Receiver<bool>,
-    runtime: tm_runtime::RuntimeHandle,
-    twitch: Arc<TwitchClient>,
-    auth_token: String,
-    user_id: String,
-    username: String,
-    tracked_streamers: Vec<Streamer>,
-    persistent_user_id: String,
-    observability: AppObservability,
-    health: HealthTracker,
+    context: PubSubTaskContext,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let (sender, receiver) = tokio::sync::mpsc::channel(128);
         let (effect_sender, effect_receiver) = tokio::sync::mpsc::channel(128);
         let topic_batches = match build_topic_batches_with_policy(
-            &user_id,
-            &tracked_streamers,
+            &context.user_id,
+            &context.tracked_streamers,
             TransportSourcePolicy::viewer_compatibility(),
         ) {
             Ok(batches) => batches,
             Err(error) => {
-                health.failure("pubsub", pubsub_error_class(&error));
-                health.record_pubsub_setup(failed_pubsub_setup_report(&error));
+                context.health.failure("pubsub", pubsub_error_class(&error));
+                context
+                    .health
+                    .record_pubsub_setup(failed_pubsub_setup_report(&error));
                 tracing::warn!(
                     task = "pubsub",
                     error_class = pubsub_error_class(&error),
@@ -59,22 +64,24 @@ pub(crate) fn spawn_pubsub_loop(
                 return;
             }
         };
-        health.record_pubsub_setup(tm_pubsub::pubsub_setup_report(&topic_batches));
+        context
+            .health
+            .record_pubsub_setup(tm_pubsub::pubsub_setup_report(&topic_batches));
         let effect_task = spawn_pubsub_effect_task(
-            runtime.clone(),
-            Arc::clone(&twitch),
-            persistent_user_id.clone(),
-            observability.clone(),
+            context.runtime.clone(),
+            Arc::clone(&context.twitch),
+            context.persistent_user_id.clone(),
+            context.observability.clone(),
             effect_receiver,
-            health.clone(),
+            context.health.clone(),
         );
         let event_task = spawn_pubsub_event_task(
             stop.clone(),
-            runtime.clone(),
-            observability.clone(),
+            context.runtime.clone(),
+            context.observability.clone(),
             receiver,
             effect_sender.clone(),
-            health.clone(),
+            context.health.clone(),
         );
 
         let mut connections = Vec::with_capacity(topic_batches.len());
@@ -82,9 +89,9 @@ pub(crate) fn spawn_pubsub_loop(
             connections.push(spawn_pubsub_connection_loop(PubSubConnectionParams {
                 stop: stop.clone(),
                 sender: sender.clone(),
-                auth_token: auth_token.clone(),
-                username: username.clone(),
-                tracked_streamers: tracked_streamers.clone(),
+                auth_token: context.auth_token.clone(),
+                username: context.username.clone(),
+                tracked_streamers: context.tracked_streamers.clone(),
                 topics,
                 connection_index: index + 1,
             }));
@@ -109,18 +116,11 @@ fn spawn_pubsub_effect_task(
     mut receiver: tokio::sync::mpsc::Receiver<Vec<tm_runtime::RuntimeEffect>>,
     health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
+    let context =
+        RuntimeEffectContext::new(runtime, twitch, persistent_user_id, observability, health);
     tokio::spawn(async move {
         while let Some(effects) = receiver.recv().await {
-            if let Err(error) = execute_runtime_effects(
-                &runtime,
-                &twitch,
-                &persistent_user_id,
-                effects,
-                &observability,
-                health.clone(),
-            )
-            .await
-            {
+            if let Err(error) = execute_runtime_effects(&context, effects).await {
                 tracing::warn!(task = "pubsub", error_class = "runtime-effect", %error, "runtime effect execution failed");
             }
         }

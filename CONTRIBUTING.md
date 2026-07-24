@@ -7,11 +7,30 @@ Before submitting a change, run:
 
 ```powershell
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked --quiet
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo clippy --workspace --exclude tm-contract-tests --exclude tm-integration-tests --lib --bins --examples --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented
+cargo test --workspace --all-targets --all-features --locked --quiet
+$env:RUSTDOCFLAGS = '-D warnings'
+cargo doc --workspace --all-features --locked --no-deps
+cargo check --manifest-path fuzz/Cargo.toml --locked --all-targets
 cargo build --workspace --release --locked
+./scripts/verify-build-integrity.ps1
+./scripts/verify-release-hygiene.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
+
+Performance-sensitive changes should also run the sanitized, network-free
+replay. Timing is review evidence, not a wall-clock pass/fail gate:
+
+```powershell
+./scripts/measure-replay.ps1 -Iterations 5
+```
+
+The manually dispatched/weekly `Deep Quality` workflow pins its nightly and
+analysis executables. It measures critical-crate branch coverage, runs bounded
+pure-parser fuzzing from the isolated `fuzz/` workspace, and mutates only the
+state-reduction, prediction, dedupe, and retry functions named in the workflow.
+Do not expand it to network effects or treat timing as a correctness gate.
 
 Protocol changes need a sanitized fixture, parser test, and parity-matrix
 update. Run `tests/contract/tests/parser_robustness.rs` as part of the normal

@@ -1,3 +1,5 @@
+// Watch selection is one deterministic ranking pass whose ordering rules must remain visible
+// together; bounded count-to-f64 conversions are required for platform watch cadence.
 #![allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 
 use std::cmp::Ordering;

@@ -1,0 +1,79 @@
+name: Deep Quality
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  critical-branch-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # main
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Measure critical-crate branch coverage
+        run: >-
+          cargo +nightly-2026-07-01 llvm-cov
+          --branch
+          --package tm-domain
+          --package tm-pubsub
+          --package tm-runtime
+          --all-features
+          --locked
+          --json
+          --output-path critical-branch-coverage.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: critical-branch-coverage
+          path: critical-branch-coverage.json
+          if-no-files-found: error
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz transport parsers
+        run: cargo +nightly-2026-07-01 fuzz run transport_parsers -- -max_total_time=120 -max_len=65536
+      - name: Fuzz structured input parsers
+        run: cargo +nightly-2026-07-01 fuzz run structured_input -- -max_total_time=120 -max_len=65536
+
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - name: Install pinned cargo-mutants
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Mutate critical reducers and retry policy
+        run: >-
+          cargo mutants
+          --workspace
+          --test-workspace=true
+          --timeout 120
+          --jobs 2
+          --re 'apply_pubsub_gain|update_history|apply_event_with_outcome|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id|pubsub_reconnect_delay|eventsub_reconnect_delay|saved_session_retry_delay'

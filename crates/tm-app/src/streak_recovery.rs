@@ -138,6 +138,16 @@ async fn recover_streamer(
     let Some(stream) = streamer.stream.as_ref() else {
         return false;
     };
+    let attempt = RecoveryAttempt {
+        runtime,
+        twitch,
+        spade_url: &spade_url,
+        user_id,
+        streamer,
+        baseline: baseline.as_ref(),
+        started_at,
+        observability,
+    };
     let videos = match twitch
         .fetch_recent_archived_videos(&streamer.username)
         .await
@@ -149,19 +159,7 @@ async fn recover_streamer(
         }
     };
     if let Some(video) = exact_recovery_video(&videos, &stream.broadcast_id) {
-        return recover_with_vod(
-            stop,
-            runtime,
-            twitch,
-            &spade_url,
-            user_id,
-            streamer,
-            video,
-            baseline.as_ref(),
-            started_at,
-            observability,
-        )
-        .await;
+        return recover_with_vod(stop, &attempt, video).await;
     }
     let clips = match twitch.fetch_recent_clips(&streamer.username).await {
         Ok(clips) => clips,
@@ -170,19 +168,7 @@ async fn recover_streamer(
             return false;
         }
     };
-    recover_with_clips(
-        stop,
-        runtime,
-        twitch,
-        &spade_url,
-        user_id,
-        streamer,
-        &clips,
-        baseline.as_ref(),
-        started_at,
-        observability,
-    )
-    .await
+    recover_with_clips(stop, &attempt, &clips).await
 }
 
 fn exact_recovery_video<'a>(
@@ -195,48 +181,58 @@ fn exact_recovery_video<'a>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+struct RecoveryAttempt<'a> {
+    runtime: &'a tm_runtime::RuntimeHandle,
+    twitch: &'a TwitchClient,
+    spade_url: &'a str,
+    user_id: &'a str,
+    streamer: &'a Streamer,
+    baseline: Option<&'a WatchStreakMilestone>,
+    started_at: OffsetDateTime,
+    observability: &'a AppObservability,
+}
+
 async fn recover_with_vod(
     stop: &mut tokio::sync::watch::Receiver<bool>,
-    runtime: &tm_runtime::RuntimeHandle,
-    twitch: &TwitchClient,
-    spade_url: &str,
-    user_id: &str,
-    streamer: &Streamer,
+    attempt: &RecoveryAttempt<'_>,
     video: &ArchivedVideo,
-    baseline: Option<&WatchStreakMilestone>,
-    started_at: OffsetDateTime,
-    observability: &AppObservability,
 ) -> bool {
     let mut accepted = 0_u64;
     for _ in 0..(MAX_RECOVERY_SECONDS / VOD_EVENT_INTERVAL_SECONDS) {
-        if preempted(runtime, streamer).await {
-            log_preempted(observability, streamer);
+        if preempted(attempt.runtime, attempt.streamer).await {
+            log_preempted(attempt.observability, attempt.streamer);
             return true;
         }
         let playback = Stream {
-            payload: vec![vod_minute_event(streamer, user_id, &video.id)],
+            payload: vec![vod_minute_event(
+                attempt.streamer,
+                attempt.user_id,
+                &video.id,
+            )],
             ..Stream::default()
         };
         if matches!(
-            twitch.send_minute_watched(spade_url, &playback).await,
+            attempt
+                .twitch
+                .send_minute_watched(attempt.spade_url, &playback)
+                .await,
             Ok(StatusCode::NO_CONTENT)
         ) {
             accepted += 1;
             log_progress(
-                observability,
-                streamer,
+                attempt.observability,
+                attempt.streamer,
                 "VOD",
                 accepted,
                 MAX_RECOVERY_SECONDS / VOD_EVENT_INTERVAL_SECONDS,
             );
             if reconcile_typed_recovery(
-                runtime,
-                twitch,
-                streamer,
-                baseline,
-                started_at,
-                observability,
+                attempt.runtime,
+                attempt.twitch,
+                attempt.streamer,
+                attempt.baseline,
+                attempt.started_at,
+                attempt.observability,
             )
             .await
             {
@@ -247,22 +243,14 @@ async fn recover_with_vod(
             return true;
         }
     }
-    log_unconfirmed(observability, streamer, "VOD", accepted);
+    log_unconfirmed(attempt.observability, attempt.streamer, "VOD", accepted);
     accepted > 0
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn recover_with_clips(
     stop: &mut tokio::sync::watch::Receiver<bool>,
-    runtime: &tm_runtime::RuntimeHandle,
-    twitch: &TwitchClient,
-    spade_url: &str,
-    user_id: &str,
-    streamer: &Streamer,
+    attempt: &RecoveryAttempt<'_>,
     clips: &[RecentClip],
-    baseline: Option<&WatchStreakMilestone>,
-    started_at: OffsetDateTime,
-    observability: &AppObservability,
 ) -> bool {
     let mut elapsed = 0_u64;
     let mut accepted = 0_u64;
@@ -272,11 +260,19 @@ async fn recover_with_clips(
         }
         let play_session_id = tm_twitch::generate_client_session_id();
         let mut playback = Stream {
-            payload: vec![clip_play_event(streamer, user_id, clip, &play_session_id)],
+            payload: vec![clip_play_event(
+                attempt.streamer,
+                attempt.user_id,
+                clip,
+                &play_session_id,
+            )],
             ..Stream::default()
         };
         if matches!(
-            twitch.send_minute_watched(spade_url, &playback).await,
+            attempt
+                .twitch
+                .send_minute_watched(attempt.spade_url, &playback)
+                .await,
             Ok(StatusCode::NO_CONTENT)
         ) {
             accepted += 1;
@@ -288,8 +284,8 @@ async fn recover_with_clips(
             if elapsed >= MAX_RECOVERY_SECONDS {
                 break;
             }
-            if preempted(runtime, streamer).await {
-                log_preempted(observability, streamer);
+            if preempted(attempt.runtime, attempt.streamer).await {
+                log_preempted(attempt.observability, attempt.streamer);
                 return true;
             }
             if !wait_or_stop(stop, CLIP_EVENT_INTERVAL_SECONDS).await {
@@ -297,31 +293,34 @@ async fn recover_with_clips(
             }
             elapsed += CLIP_EVENT_INTERVAL_SECONDS;
             playback.payload = vec![clip_progress_event(
-                streamer,
-                user_id,
+                attempt.streamer,
+                attempt.user_id,
                 clip,
                 &play_session_id,
                 second,
             )];
             if matches!(
-                twitch.send_minute_watched(spade_url, &playback).await,
+                attempt
+                    .twitch
+                    .send_minute_watched(attempt.spade_url, &playback)
+                    .await,
                 Ok(StatusCode::NO_CONTENT)
             ) {
                 accepted += 1;
                 log_progress(
-                    observability,
-                    streamer,
+                    attempt.observability,
+                    attempt.streamer,
                     "clip",
                     elapsed,
                     MAX_RECOVERY_SECONDS,
                 );
                 if reconcile_typed_recovery(
-                    runtime,
-                    twitch,
-                    streamer,
-                    baseline,
-                    started_at,
-                    observability,
+                    attempt.runtime,
+                    attempt.twitch,
+                    attempt.streamer,
+                    attempt.baseline,
+                    attempt.started_at,
+                    attempt.observability,
                 )
                 .await
                 {
@@ -331,7 +330,7 @@ async fn recover_with_clips(
             second += CLIP_EVENT_INTERVAL_SECONDS;
         }
     }
-    log_unconfirmed(observability, streamer, "clip", accepted);
+    log_unconfirmed(attempt.observability, attempt.streamer, "clip", accepted);
     accepted > 0
 }
 

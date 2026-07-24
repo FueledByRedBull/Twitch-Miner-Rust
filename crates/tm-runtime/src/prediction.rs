@@ -51,21 +51,112 @@ fn payout_for_outcome(
         return 0;
     }
 
-    let total_points = outcomes
-        .iter()
-        .map(|outcome| outcome.total_points)
-        .sum::<i64>();
+    let total_points = outcomes.iter().fold(0_i128, |total, outcome| {
+        total.saturating_add(i128::from(outcome.total_points))
+    });
     let winning_points = outcomes
         .iter()
         .find(|outcome| outcome.id == winning_outcome_id)
-        .map(|outcome| outcome.total_points)
+        .map(|outcome| i128::from(outcome.total_points))
         .unwrap_or_default();
     if total_points <= 0 || winning_points <= 0 {
         return decision.amount;
     }
 
-    let numerator = i128::from(decision.amount) * i128::from(total_points);
-    let denominator = i128::from(winning_points);
-    let payout = i64::try_from((numerator + (denominator / 2)) / denominator).unwrap_or(i64::MAX);
+    let numerator = i128::from(decision.amount).saturating_mul(total_points);
+    let payout = i64::try_from(
+        numerator
+            .saturating_add(winning_points / 2)
+            .checked_div(winning_points)
+            .unwrap_or_default(),
+    )
+    .unwrap_or(i64::MAX);
     payout.max(decision.amount)
+}
+
+#[cfg(test)]
+mod tests {
+    use tm_domain::{OffsetDateTime, PredictionOutcome, Streamer};
+
+    use super::*;
+
+    fn prediction(amount: i64, left_points: i64, right_points: i64) -> PredictionEvent {
+        PredictionEvent {
+            streamer: Streamer {
+                username: String::from("tester"),
+                ..Streamer::default()
+            },
+            event_id: String::from("prediction-property"),
+            title: String::from("Fixture"),
+            status: String::from("RESOLVED"),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            window_seconds: 30.0,
+            outcomes: vec![
+                PredictionOutcome {
+                    id: String::from("a"),
+                    title: String::from("A"),
+                    total_points: left_points,
+                    ..PredictionOutcome::default()
+                },
+                PredictionOutcome {
+                    id: String::from("b"),
+                    title: String::from("B"),
+                    total_points: right_points,
+                    ..PredictionOutcome::default()
+                },
+            ],
+            decision: PredictionDecision {
+                choice: Some(0),
+                outcome_id: String::from("a"),
+                amount,
+            },
+            bet_placed: true,
+            bet_confirmed: true,
+            result_type: String::new(),
+            result_string: String::new(),
+        }
+    }
+
+    #[test]
+    fn settlement_properties_hold_across_extreme_valid_pools() {
+        for amount in [1, 100, i64::MAX] {
+            for left_points in [0, 1, 100, i64::MAX] {
+                for right_points in [0, 1, 100, i64::MAX] {
+                    for winner in ["a", "b"] {
+                        let mut event = prediction(amount, left_points, right_points);
+                        let effect = build_prediction_settlement_effect(&mut event, Some(winner))
+                            .expect("known winner must settle a resolved prediction");
+                        let expected_result = if winner == "a" { "WIN" } else { "LOSE" };
+
+                        assert_eq!(event.result_type, expected_result);
+                        assert!(event.result_string.starts_with(expected_result));
+                        assert!(matches!(
+                            effect,
+                            RuntimeEffect::PredictionSettled {
+                                ref result_type,
+                                ..
+                            } if result_type == expected_result
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settlement_requires_a_known_winner_and_refunds_both_cancel_spellings() {
+        let mut unresolved = prediction(100, 100, 100);
+        assert!(build_prediction_settlement_effect(&mut unresolved, None).is_none());
+        assert!(build_prediction_settlement_effect(&mut unresolved, Some("unknown")).is_none());
+
+        for status in ["CANCELED", "CANCELLED"] {
+            let mut canceled = prediction(100, i64::MAX, i64::MAX);
+            canceled.status = String::from(status);
+            let effect = build_prediction_settlement_effect(&mut canceled, None);
+
+            assert!(effect.is_some());
+            assert_eq!(canceled.result_type, "REFUND");
+            assert_eq!(canceled.result_string, "REFUND, Refunded: +0");
+        }
+    }
 }

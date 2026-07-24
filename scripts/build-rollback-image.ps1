@@ -24,6 +24,10 @@ $buildTime = (git show -s --format=%cI "$Revision^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildTime)) {
     throw "Unable to determine the rollback source timestamp for $resolved"
 }
+$sourceDateEpoch = (git show -s --format=%ct "$Revision^{commit}").Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceDateEpoch -notmatch '^\d+$') {
+    throw "Unable to determine rollback SOURCE_DATE_EPOCH for $resolved"
+}
 $archive = Join-Path $env:TEMP "twitch-miner-rollback-$PID.tar"
 try {
     git archive --format=tar --output=$archive "$Revision^{commit}"
@@ -34,7 +38,8 @@ try {
     $args = @(
         'buildx', 'build', '--platform', 'linux/arm64', '--tag', $reference,
         '--build-arg', "BUILD_REVISION=$resolved",
-        '--build-arg', "BUILD_TIME=$buildTime"
+        '--build-arg', "BUILD_TIME=$buildTime",
+        '--build-arg', "SOURCE_DATE_EPOCH=$sourceDateEpoch"
     )
     if ($Push) {
         $args += '--provenance', 'mode=max', '--sbom', 'true', '--push'

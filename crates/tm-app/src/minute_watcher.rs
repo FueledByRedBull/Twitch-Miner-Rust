@@ -19,7 +19,26 @@ use crate::{MINUTE_WATCHER_REQUEST_TIMEOUT, SPADE_URL_TTL, WATCH_SELECTION_REFRE
 
 const RENAME_RECOVERY_SUSPENSION_SECONDS: u64 = 5 * 60;
 
-#[allow(clippy::too_many_lines)]
+struct MinuteWatcherContext {
+    runtime: tm_runtime::RuntimeHandle,
+    twitch: Arc<TwitchClient>,
+    user_id: String,
+    observability: AppObservability,
+    health: HealthTracker,
+    spade_urls: tokio::sync::Mutex<HashMap<String, SpadeCacheEntry>>,
+}
+
+struct MinuteWatcherState {
+    watch_rotation: WatchRotation,
+    last_loop_at: tm_runtime::RuntimeTime,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WatchAction {
+    Continue,
+    Stop,
+}
+
 pub(crate) fn spawn_minute_watcher_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -28,127 +47,180 @@ pub(crate) fn spawn_minute_watcher_loop(
     observability: AppObservability,
     health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let spade_urls = tokio::sync::Mutex::new(HashMap::<String, SpadeCacheEntry>::new());
-        let mut watch_rotation = WatchRotation::default();
-        let mut stop = stop;
-        let mut last_loop_at = time_now();
-        'outer: loop {
-            if *stop.borrow() {
-                break;
-            }
+    let context = MinuteWatcherContext {
+        runtime,
+        twitch,
+        user_id,
+        observability,
+        health,
+        spade_urls: tokio::sync::Mutex::new(HashMap::new()),
+    };
+    tokio::spawn(run_minute_watcher_loop(stop, context))
+}
 
-            let now = time_now();
-            let loop_gap = minute_watcher_resume_gap(last_loop_at, now);
-            last_loop_at = now;
-            let snapshot = match runtime.state_snapshot().await {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    tracing::warn!(%error, "minute watcher snapshot failed");
-                    break;
-                }
-            };
-            if let Err(error) = refresh_watch_selection_metadata(
-                &runtime,
-                &twitch,
-                &snapshot.streamers,
-                &observability,
-                now,
-            )
-            .await
-            {
-                health.failure("minute", "metadata-refresh");
-                tracing::warn!(task = "minute", error_class = "metadata-refresh", %error, "watch selection metadata refresh failed");
-            }
-            let snapshot = match runtime.state_snapshot().await {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    tracing::warn!(%error, "minute watcher post-refresh snapshot failed");
-                    break;
-                }
-            };
-            let eligible_watch_logins = snapshot.watch_target_logins(now);
-            let campaign_watch_logins = snapshot.campaign_watch_logins(now);
-            let watch_logins = watch_rotation.select_with_campaigns(
-                &eligible_watch_logins,
-                &campaign_watch_logins,
-                now,
-            );
-            if watch_logins.is_empty() {
-                health.success("minute");
-                if sleep_or_stop(&mut stop, std::time::Duration::from_secs(20)).await {
-                    break;
-                }
-                continue;
-            }
-            if let Some(loop_gap) = loop_gap {
-                spade_urls.lock().await.clear();
-                let message =
-                    observability.minute_watcher_resume_message(loop_gap, watch_logins.len());
-                tracing::warn!("{message}");
-            }
-
-            let interval = tm_domain::watch_interval(watch_logins.len());
-            for login in watch_logins {
-                if *stop.borrow() {
-                    break 'outer;
-                }
-                let snapshot = match runtime.state_snapshot().await {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        tracing::warn!(%error, "minute watcher refresh snapshot failed");
-                        break 'outer;
-                    }
-                };
-                let Some(streamer) = snapshot
-                    .streamers
-                    .iter()
-                    .find(|streamer| streamer.username == login)
-                    .cloned()
-                else {
-                    continue;
-                };
-
-                if !streamer.is_online || streamer.channel_id.trim().is_empty() {
-                    continue;
-                }
-
-                match tokio::time::timeout(
-                    MINUTE_WATCHER_REQUEST_TIMEOUT,
-                    send_minute_watched_for_streamer(
-                        &runtime,
-                        &twitch,
-                        &spade_urls,
-                        &streamer,
-                        &user_id,
-                        &observability,
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(())) => health.success("minute"),
-                    Ok(Err(error)) => {
-                        health.failure("minute", "watch-request");
-                        tracing::warn!(task = "minute", error_class = "watch-request", streamer = %streamer.username, %error, "minute watched failed");
-                    }
-                    Err(_) => {
-                        health.failure("minute", "watch-timeout");
-                        tracing::warn!(
-                            task = "minute",
-                            error_class = "watch-timeout",
-                            streamer = %streamer.username,
-                            timeout_seconds = MINUTE_WATCHER_REQUEST_TIMEOUT.as_secs(),
-                            "minute watched timed out"
-                        );
-                    }
-                }
-
-                if sleep_or_stop(&mut stop, interval).await {
-                    break 'outer;
-                }
-            }
+async fn run_minute_watcher_loop(
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    context: MinuteWatcherContext,
+) {
+    let mut state = MinuteWatcherState {
+        watch_rotation: WatchRotation::default(),
+        last_loop_at: time_now(),
+    };
+    while !*stop.borrow() {
+        if run_minute_watcher_pass(&mut stop, &context, &mut state).await == WatchAction::Stop {
+            break;
         }
-    })
+    }
+}
+
+async fn run_minute_watcher_pass(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    context: &MinuteWatcherContext,
+    state: &mut MinuteWatcherState,
+) -> WatchAction {
+    let now = time_now();
+    let loop_gap = minute_watcher_resume_gap(state.last_loop_at, now);
+    state.last_loop_at = now;
+    let Some(watch_logins) = select_watch_logins(context, &mut state.watch_rotation, now).await
+    else {
+        return WatchAction::Stop;
+    };
+    if watch_logins.is_empty() {
+        context.health.success("minute");
+        return if sleep_or_stop(stop, std::time::Duration::from_secs(20)).await {
+            WatchAction::Stop
+        } else {
+            WatchAction::Continue
+        };
+    }
+    if let Some(loop_gap) = loop_gap {
+        context.spade_urls.lock().await.clear();
+        let message = context
+            .observability
+            .minute_watcher_resume_message(loop_gap, watch_logins.len());
+        tracing::warn!("{message}");
+    }
+    let interval = tm_domain::watch_interval(watch_logins.len());
+    for login in watch_logins {
+        if *stop.borrow()
+            || watch_streamer_login(stop, context, &login, interval).await == WatchAction::Stop
+        {
+            return WatchAction::Stop;
+        }
+    }
+    WatchAction::Continue
+}
+
+async fn select_watch_logins(
+    context: &MinuteWatcherContext,
+    watch_rotation: &mut WatchRotation,
+    now: tm_runtime::RuntimeTime,
+) -> Option<Vec<String>> {
+    let snapshot = snapshot_or_log(&context.runtime, "minute watcher snapshot failed").await?;
+    if let Err(error) = refresh_watch_selection_metadata(
+        &context.runtime,
+        &context.twitch,
+        &snapshot.streamers,
+        &context.observability,
+        now,
+    )
+    .await
+    {
+        context.health.failure("minute", "metadata-refresh");
+        tracing::warn!(task = "minute", error_class = "metadata-refresh", %error, "watch selection metadata refresh failed");
+    }
+    let snapshot = snapshot_or_log(
+        &context.runtime,
+        "minute watcher post-refresh snapshot failed",
+    )
+    .await?;
+    Some(watch_rotation.select_with_campaigns(
+        &snapshot.watch_target_logins(now),
+        &snapshot.campaign_watch_logins(now),
+        now,
+    ))
+}
+
+async fn snapshot_or_log(
+    runtime: &tm_runtime::RuntimeHandle,
+    message: &'static str,
+) -> Option<tm_runtime::RuntimeState> {
+    match runtime.state_snapshot().await {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            tracing::warn!(%error, "{message}");
+            None
+        }
+    }
+}
+
+async fn watch_streamer_login(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    context: &MinuteWatcherContext,
+    login: &str,
+    interval: std::time::Duration,
+) -> WatchAction {
+    let Some(snapshot) =
+        snapshot_or_log(&context.runtime, "minute watcher refresh snapshot failed").await
+    else {
+        return WatchAction::Stop;
+    };
+    let Some(streamer) = snapshot
+        .streamers
+        .iter()
+        .find(|streamer| streamer.username == login)
+        .cloned()
+    else {
+        return WatchAction::Continue;
+    };
+    if !streamer.is_online || streamer.channel_id.trim().is_empty() {
+        return WatchAction::Continue;
+    }
+    record_minute_watch_result(
+        context,
+        &streamer,
+        tokio::time::timeout(
+            MINUTE_WATCHER_REQUEST_TIMEOUT,
+            send_minute_watched_for_streamer(
+                &context.runtime,
+                &context.twitch,
+                &context.spade_urls,
+                &streamer,
+                &context.user_id,
+                &context.observability,
+            ),
+        )
+        .await,
+    );
+    if sleep_or_stop(stop, interval).await {
+        WatchAction::Stop
+    } else {
+        WatchAction::Continue
+    }
+}
+
+fn record_minute_watch_result(
+    context: &MinuteWatcherContext,
+    streamer: &Streamer,
+    result: std::result::Result<Result<()>, tokio::time::error::Elapsed>,
+) {
+    match result {
+        Ok(Ok(())) => context.health.success("minute"),
+        Ok(Err(error)) => {
+            context.health.failure("minute", "watch-request");
+            tracing::warn!(task = "minute", error_class = "watch-request", streamer = %streamer.username, %error, "minute watched failed");
+        }
+        Err(_) => {
+            context.health.failure("minute", "watch-timeout");
+            tracing::warn!(
+                task = "minute",
+                error_class = "watch-timeout",
+                streamer = %streamer.username,
+                timeout_seconds = MINUTE_WATCHER_REQUEST_TIMEOUT.as_secs(),
+                "minute watched timed out"
+            );
+        }
+    }
 }
 
 pub(crate) async fn refresh_watch_selection_metadata(

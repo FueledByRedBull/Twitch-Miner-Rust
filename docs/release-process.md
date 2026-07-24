@@ -11,6 +11,32 @@ The Docker builder also pins the Rust toolchain to an immutable manifest
 digest and pins `cargo-chef` to an exact locked version;
 `scripts/verify-release-hygiene.ps1` rejects mutable builder inputs.
 
+`scripts/verify-build-integrity.ps1` performs two isolated optimized builds and
+requires identical executable SHA-256 values before checking embedded revision
+metadata. It fixes the source timestamp, disables incremental compilation, and
+remaps source and target paths. On Windows/MSVC it also suppresses the unused
+absolute PDB reference and enables `/Brepro`; without reproducible-link mode,
+volatile PE metadata makes otherwise identical stripped builds hash
+differently.
+
+For an offline recovery build, package the exact Git revision together with
+every locked crates.io source:
+
+```powershell
+./scripts/create-offline-source-bundle.ps1 -Revision <40-character-source-revision>
+```
+
+The helper uses `git archive`, `cargo vendor --locked --versioned-dirs`, writes
+an offline Cargo source replacement, validates `cargo metadata --locked
+--offline`, and emits a `.tar.gz` plus `.sha256` under `target/` by default.
+Keep that checksum in the release record and store the bundle outside the
+repository. The bundle excludes working-tree edits and contains no runtime
+configuration, cookies, logs, or credentials.
+
+Maintainers can exercise the complete procedure without retaining the generated
+archive by adding `-ValidateOnly`; that mode is restricted to output under
+`target/`.
+
 1. Update `CHANGELOG.md` with behavior, configuration, migration, and known
    compatibility changes. Review and attach the candidate's differential-review
    artifact to the release evidence.

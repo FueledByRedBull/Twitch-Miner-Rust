@@ -43,6 +43,7 @@ jobs:
       - id: build_metadata
         run: |
           "time=$(git show -s --format=%cI $env:GITHUB_SHA)" >> $env:GITHUB_OUTPUT
+          "epoch=$(git show -s --format=%ct $env:GITHUB_SHA)" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
       - if: matrix.platform != 'linux/amd64'
@@ -72,6 +73,7 @@ jobs:
           build-args: |
             BUILD_REVISION=${{ github.sha }}
             BUILD_TIME=${{ steps.build_metadata.outputs.time }}
+            SOURCE_DATE_EPOCH=${{ steps.build_metadata.outputs.epoch }}
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
@@ -137,7 +139,7 @@ jobs:
         with:
           images: ${{ steps.image.outputs.name }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,format=long
             type=ref,event=tag
             type=ref,event=branch

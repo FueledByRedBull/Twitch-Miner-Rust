@@ -1,8 +1,12 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS chef
 WORKDIR /workspace
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends musl-tools \
+RUN printf '%s\n' \
+        'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250101T000000Z bookworm main' \
+        > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends musl-tools=1.2.3-1 \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -44,8 +48,12 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG BUILD_REVISION=unknown
 ARG BUILD_TIME=unknown
+ARG SOURCE_DATE_EPOCH=0
 ENV BUILD_REVISION=${BUILD_REVISION}
 ENV BUILD_TIME=${BUILD_TIME}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV CARGO_INCREMENTAL=0
+ENV RUSTFLAGS=--remap-path-prefix=/workspace=.
 COPY --from=planner /workspace/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -57,7 +65,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
     esac \
     && rustup target add "${rust_target}" \
-    && cargo chef cook --release --target "${rust_target}" --recipe-path recipe.json
+    && cargo chef cook --locked --release --target "${rust_target}" --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tests/contract/Cargo.toml tests/contract/Cargo.toml

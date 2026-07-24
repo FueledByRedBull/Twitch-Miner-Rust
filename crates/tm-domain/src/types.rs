@@ -1,3 +1,5 @@
+// Domain settings mirror the stable config/wire shape, and display/progress ratios intentionally
+// convert bounded counters to f64. Keep these schema/formatting exceptions at the module boundary.
 #![allow(clippy::cast_precision_loss, clippy::struct_excessive_bools)]
 
 use std::collections::{HashMap, VecDeque};
@@ -245,6 +247,8 @@ impl Default for Stream {
 }
 
 impl Stream {
+    // This method is the single atomic application boundary for one Twitch stream metadata record.
+    // Keeping the source fields visible avoids another public wrapper type with no separate policy.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,

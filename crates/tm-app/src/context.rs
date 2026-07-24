@@ -6,7 +6,7 @@ use tm_domain::Streamer;
 use tm_twitch::TwitchClient;
 
 use crate::observability::AppObservability;
-use crate::runtime_effects::execute_runtime_effects;
+use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 use crate::{CONTEXT_REFRESH_CONCURRENCY, PENDING_CLAIMS_INTERVAL};
@@ -171,15 +171,14 @@ pub(crate) async fn refresh_snapshot_streamers(
             let result = match refresh_streamer_context(&runtime, twitch.as_ref(), &streamer).await
             {
                 Ok(effects) => {
-                    execute_runtime_effects(
-                        &runtime,
-                        &twitch,
-                        &persistent_user_id,
-                        effects,
-                        &observability,
-                        health.clone(),
-                    )
-                    .await
+                    let context = RuntimeEffectContext::new(
+                        runtime,
+                        twitch,
+                        persistent_user_id,
+                        observability,
+                        health,
+                    );
+                    execute_runtime_effects(&context, effects).await
                 }
                 Err(error) => Err(error),
             };
