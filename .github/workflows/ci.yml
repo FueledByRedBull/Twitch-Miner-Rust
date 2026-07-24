@@ -112,7 +112,7 @@ jobs:
         with:
           toolchain: 1.94.0
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # main
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # main
         with:
           tool: cargo-llvm-cov
       - name: Measure workspace coverage
