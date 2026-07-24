@@ -12,6 +12,21 @@ use tm_runtime::{RuntimeMetricsSnapshot, RuntimeState};
 const WORKLOAD_SIZES: [usize; 4] = [1, 10, 50, 200];
 const SNAPSHOT_SIZES: [usize; 3] = [17, 100, 1_000];
 
+#[derive(Debug)]
+struct WorkloadRun {
+    latencies: Vec<Duration>,
+    throughput_commands_per_second: f64,
+    recovery_snapshot_latency: Duration,
+    campaign_target_count: usize,
+    campaign_pin_present: bool,
+    metrics: RuntimeMetricsSnapshot,
+}
+
+#[derive(Debug)]
+struct SnapshotRun {
+    samples: Vec<Duration>,
+}
+
 fn timestamp(seconds: u64) -> OffsetDateTime {
     OffsetDateTime::UNIX_EPOCH + Duration::from_secs(seconds)
 }
@@ -53,15 +68,19 @@ fn benchmark_state(streamer_count: usize) -> RuntimeState {
     }
 }
 
-fn percentile_micros(samples: &[Duration], percentile: usize) -> u128 {
-    let mut ordered = samples.iter().map(Duration::as_micros).collect::<Vec<_>>();
-    ordered.sort_unstable();
-    let numerator = ordered.len().saturating_mul(percentile).saturating_add(99);
-    let index = numerator
+fn percentile_index(sample_count: usize, percentile: usize) -> usize {
+    let numerator = sample_count.saturating_mul(percentile).saturating_add(99);
+    numerator
         .checked_div(100)
         .unwrap_or_default()
         .saturating_sub(1)
-        .min(ordered.len().saturating_sub(1));
+        .min(sample_count.saturating_sub(1))
+}
+
+fn percentile_micros(samples: &[Duration], percentile: usize) -> u128 {
+    let mut ordered = samples.iter().map(Duration::as_micros).collect::<Vec<_>>();
+    ordered.sort_unstable();
+    let index = percentile_index(ordered.len(), percentile);
     ordered.get(index).copied().unwrap_or_default()
 }
 
@@ -70,6 +89,22 @@ fn latency_summary(samples: &[Duration]) -> Value {
         "p50_micros": percentile_micros(samples, 50),
         "p95_micros": percentile_micros(samples, 95),
         "p99_micros": percentile_micros(samples, 99),
+    })
+}
+
+fn numeric_summary(samples: &[f64]) -> Value {
+    let mut ordered = samples.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    let percentile = |value| {
+        ordered
+            .get(percentile_index(ordered.len(), value))
+            .copied()
+            .unwrap_or_default()
+    };
+    json!({
+        "p50": percentile(50),
+        "p95": percentile(95),
+        "p99": percentile(99),
     })
 }
 
@@ -219,24 +254,42 @@ async fn replay_predictions(
     Ok(())
 }
 
-fn metric_summary(metrics: RuntimeMetricsSnapshot) -> Value {
-    let mean_wait = metrics
+fn metric_summary(runs: &[RuntimeMetricsSnapshot]) -> Value {
+    let totals = runs
+        .iter()
+        .fold(RuntimeMetricsSnapshot::default(), |mut total, metrics| {
+            total.processed_events = total
+                .processed_events
+                .saturating_add(metrics.processed_events);
+            total.total_command_wait_micros = total
+                .total_command_wait_micros
+                .saturating_add(metrics.total_command_wait_micros);
+            total.max_queue_depth = total.max_queue_depth.max(metrics.max_queue_depth);
+            total.transport_events = total
+                .transport_events
+                .saturating_add(metrics.transport_events);
+            total.total_transport_latency_micros = total
+                .total_transport_latency_micros
+                .saturating_add(metrics.total_transport_latency_micros);
+            total
+        });
+    let mean_wait = totals
         .total_command_wait_micros
-        .checked_div(metrics.processed_events.max(1))
+        .checked_div(totals.processed_events.max(1))
         .unwrap_or_default();
     json!({
-        "processed_events": metrics.processed_events,
+        "processed_events": totals.processed_events,
         "mean_actor_wait_micros": mean_wait,
-        "max_queue_depth": metrics.max_queue_depth,
-        "transport_events": metrics.transport_events,
-        "mean_transport_latency_micros": metrics
+        "max_queue_depth": totals.max_queue_depth,
+        "transport_events": totals.transport_events,
+        "mean_transport_latency_micros": totals
             .total_transport_latency_micros
-            .checked_div(metrics.transport_events.max(1))
+            .checked_div(totals.transport_events.max(1))
             .unwrap_or_default(),
     })
 }
 
-async fn run_workload(streamer_count: usize) -> Result<Value, tm_runtime::RuntimeError> {
+async fn run_workload(streamer_count: usize) -> Result<WorkloadRun, tm_runtime::RuntimeError> {
     let runtime = tm_runtime::spawn_runtime_state(benchmark_state(streamer_count));
     let started = Instant::now();
     let mut latencies = apply_queue_pressure(&runtime, streamer_count).await?;
@@ -251,18 +304,51 @@ async fn run_workload(streamer_count: usize) -> Result<Value, tm_runtime::Runtim
     let total_commands = metrics.processed_events;
     runtime.shutdown(true, timestamp(60)).await?;
 
-    Ok(json!({
-        "streamers": streamer_count,
-        "latency": latency_summary(&latencies),
-        "throughput_commands_per_second": total_commands as f64 / elapsed.as_secs_f64(),
-        "recovery_snapshot_micros": recovery_latency.as_micros(),
-        "campaign_target_count": campaign_targets.len(),
-        "campaign_pin_present": campaign_targets.first().is_some_and(|login| login == "streamer-0"),
-        "metrics": metric_summary(metrics),
-    }))
+    Ok(WorkloadRun {
+        latencies,
+        throughput_commands_per_second: total_commands as f64 / elapsed.as_secs_f64(),
+        recovery_snapshot_latency: recovery_latency,
+        campaign_target_count: campaign_targets.len(),
+        campaign_pin_present: campaign_targets
+            .first()
+            .is_some_and(|login| login == "streamer-0"),
+        metrics,
+    })
 }
 
-async fn profile_snapshots(streamer_count: usize) -> Result<Value, tm_runtime::RuntimeError> {
+fn workload_summary(streamer_count: usize, runs: &[WorkloadRun]) -> Value {
+    let latencies = runs
+        .iter()
+        .flat_map(|run| run.latencies.iter().copied())
+        .collect::<Vec<_>>();
+    let throughputs = runs
+        .iter()
+        .map(|run| run.throughput_commands_per_second)
+        .collect::<Vec<_>>();
+    let recovery_latencies = runs
+        .iter()
+        .map(|run| run.recovery_snapshot_latency)
+        .collect::<Vec<_>>();
+    let metrics = runs.iter().map(|run| run.metrics).collect::<Vec<_>>();
+    let campaign_target_count = runs.first().map_or(0, |run| run.campaign_target_count);
+
+    json!({
+        "streamers": streamer_count,
+        "run_count": runs.len(),
+        "latency_sample_count": latencies.len(),
+        "latency": latency_summary(&latencies),
+        "throughput_commands_per_second": numeric_summary(&throughputs),
+        "recovery_snapshot_latency": latency_summary(&recovery_latencies),
+        "campaign_target_count": campaign_target_count,
+        "campaign_target_count_consistent": runs
+            .iter()
+            .all(|run| run.campaign_target_count == campaign_target_count),
+        "campaign_pin_present": runs.iter().all(|run| run.campaign_pin_present),
+        "metrics": metric_summary(&metrics),
+    })
+}
+
+async fn profile_snapshots(streamer_count: usize) -> Result<SnapshotRun, tm_runtime::RuntimeError> {
     let runtime = tm_runtime::spawn_runtime_state(benchmark_state(streamer_count));
     let mut samples = Vec::with_capacity(50);
     for _ in 0..50 {
@@ -272,10 +358,20 @@ async fn profile_snapshots(streamer_count: usize) -> Result<Value, tm_runtime::R
         samples.push(started.elapsed());
     }
     runtime.shutdown(true, timestamp(60)).await?;
-    Ok(json!({
+    Ok(SnapshotRun { samples })
+}
+
+fn snapshot_summary(streamer_count: usize, runs: &[SnapshotRun]) -> Value {
+    let samples = runs
+        .iter()
+        .flat_map(|run| run.samples.iter().copied())
+        .collect::<Vec<_>>();
+    json!({
         "streamers": streamer_count,
+        "run_count": runs.len(),
+        "sample_count": samples.len(),
         "clone_latency": latency_summary(&samples),
-    }))
+    })
 }
 
 async fn benchmark_report() -> Result<Value, tm_runtime::RuntimeError> {
@@ -284,22 +380,28 @@ async fn benchmark_report() -> Result<Value, tm_runtime::RuntimeError> {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1)
         .clamp(1, 100);
-    let mut workloads = Vec::new();
-    let mut snapshots = Vec::new();
+    let mut workload_runs = WORKLOAD_SIZES.map(|_| Vec::with_capacity(repetitions));
+    let mut snapshot_runs = SNAPSHOT_SIZES.map(|_| Vec::with_capacity(repetitions));
     for _ in 0..repetitions {
-        workloads.clear();
-        workloads.reserve(WORKLOAD_SIZES.len());
-        for streamer_count in WORKLOAD_SIZES {
-            workloads.push(run_workload(streamer_count).await?);
+        for (index, streamer_count) in WORKLOAD_SIZES.into_iter().enumerate() {
+            workload_runs[index].push(run_workload(streamer_count).await?);
         }
-        snapshots.clear();
-        snapshots.reserve(SNAPSHOT_SIZES.len());
-        for streamer_count in SNAPSHOT_SIZES {
-            snapshots.push(profile_snapshots(streamer_count).await?);
+        for (index, streamer_count) in SNAPSHOT_SIZES.into_iter().enumerate() {
+            snapshot_runs[index].push(profile_snapshots(streamer_count).await?);
         }
     }
+    let workloads = WORKLOAD_SIZES
+        .into_iter()
+        .zip(workload_runs.iter())
+        .map(|(streamer_count, runs)| workload_summary(streamer_count, runs))
+        .collect::<Vec<_>>();
+    let snapshots = SNAPSHOT_SIZES
+        .into_iter()
+        .zip(snapshot_runs.iter())
+        .map(|(streamer_count, runs)| snapshot_summary(streamer_count, runs))
+        .collect::<Vec<_>>();
     Ok(json!({
-        "schema": 1,
+        "schema": 2,
         "revision": option_env!("BUILD_REVISION").unwrap_or("development"),
         "workload": "sanitized-twitch-free-replay",
         "repetitions": repetitions,
@@ -316,4 +418,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_string_pretty(&benchmark_report().await?)?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workload_run(latencies: &[u64], throughput: f64) -> WorkloadRun {
+        WorkloadRun {
+            latencies: latencies
+                .iter()
+                .copied()
+                .map(Duration::from_micros)
+                .collect(),
+            throughput_commands_per_second: throughput,
+            recovery_snapshot_latency: Duration::from_micros(10),
+            campaign_target_count: 1,
+            campaign_pin_present: true,
+            metrics: RuntimeMetricsSnapshot {
+                processed_events: 2,
+                total_command_wait_micros: 4,
+                max_queue_depth: 64,
+                transport_events: 1,
+                total_transport_latency_micros: 3,
+            },
+        }
+    }
+
+    #[test]
+    fn workload_summary_aggregates_every_repetition() {
+        let report = workload_summary(
+            10,
+            &[
+                workload_run(&[10, 20], 100.0),
+                workload_run(&[30, 40], 200.0),
+            ],
+        );
+
+        assert_eq!(report["run_count"], 2);
+        assert_eq!(report["latency_sample_count"], 4);
+        assert_eq!(report["latency"]["p95_micros"], 40);
+        assert_eq!(report["throughput_commands_per_second"]["p50"], 100.0);
+        assert_eq!(report["throughput_commands_per_second"]["p95"], 200.0);
+        assert_eq!(report["metrics"]["processed_events"], 4);
+    }
+
+    #[test]
+    fn snapshot_summary_aggregates_every_repetition() {
+        let report = snapshot_summary(
+            1_000,
+            &[
+                SnapshotRun {
+                    samples: vec![Duration::from_micros(10), Duration::from_micros(20)],
+                },
+                SnapshotRun {
+                    samples: vec![Duration::from_micros(30), Duration::from_micros(40)],
+                },
+            ],
+        );
+
+        assert_eq!(report["run_count"], 2);
+        assert_eq!(report["sample_count"], 4);
+        assert_eq!(report["clone_latency"]["p99_micros"], 40);
+    }
 }

@@ -15,6 +15,19 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 
 $repositoryRoot = (Resolve-Path -LiteralPath '.').Path
 $targetRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'target'))
+$outputCandidate = if ([System.IO.Path]::IsPathRooted($OutputPath)) {
+    $OutputPath
+} else {
+    Join-Path $repositoryRoot $OutputPath
+}
+$outputFullPath = [System.IO.Path]::GetFullPath($outputCandidate)
+if ($ValidateOnly -and
+    -not $outputFullPath.StartsWith(
+        $targetRoot + [System.IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'ValidateOnly output must remain under target/.'
+}
 $stageRoot = [System.IO.Path]::GetFullPath((Join-Path $targetRoot "offline-bundle-$PID"))
 $sourceArchive = [System.IO.Path]::GetFullPath((Join-Path $targetRoot "offline-source-$PID.tar"))
 foreach ($path in @($stageRoot, $sourceArchive)) {
@@ -72,7 +85,6 @@ offline = true
         Pop-Location
     }
 
-    $outputFullPath = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $OutputPath))
     $outputDirectory = Split-Path -Parent $outputFullPath
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
     tar -czf $outputFullPath -C $stageRoot .
@@ -83,9 +95,6 @@ offline = true
     "$hash  $([System.IO.Path]::GetFileName($outputFullPath))" |
         Set-Content -LiteralPath "$outputFullPath.sha256" -Encoding ascii
     if ($ValidateOnly) {
-        if (-not $outputFullPath.StartsWith($targetRoot + [System.IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'ValidateOnly output must remain under target/.'
-        }
         Remove-Item -LiteralPath $outputFullPath -Force
         Remove-Item -LiteralPath "$outputFullPath.sha256" -Force
         Write-Output "offline-source-bundle-validation-ok: revision=$resolved sha256=$hash"

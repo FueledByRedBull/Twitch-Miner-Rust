@@ -86,6 +86,34 @@ if (-not (Test-Path -LiteralPath 'fuzz/Cargo.lock' -PathType Leaf) -or
     throw 'The isolated fuzz workspace must retain its own manifest and lockfile.'
 }
 
+$sentinelPath = Join-Path (Resolve-Path -LiteralPath '.').Path "offline-bundle-validate-only-sentinel-$PID.txt"
+$sentinelContent = 'must-not-be-overwritten'
+try {
+    Set-Content -LiteralPath $sentinelPath -Value $sentinelContent -NoNewline
+    $rejected = $false
+    try {
+        & "$PSScriptRoot/create-offline-source-bundle.ps1" `
+            -Revision HEAD `
+            -OutputPath $sentinelPath `
+            -ValidateOnly
+    } catch {
+        if ($_.Exception.Message -notmatch 'ValidateOnly output must remain under target/') {
+            throw
+        }
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw 'ValidateOnly accepted an output path outside target/.'
+    }
+    if ((Get-Content -LiteralPath $sentinelPath -Raw) -ne $sentinelContent) {
+        throw 'ValidateOnly modified an output path before rejecting it.'
+    }
+} finally {
+    if (Test-Path -LiteralPath $sentinelPath) {
+        Remove-Item -LiteralPath $sentinelPath -Force
+    }
+}
+
 $releaseProcess = Get-Content -Raw docs/release-process.md
 if ($releaseProcess -match '(?m)^docker exec twitch-miner\b') {
     throw 'Release commands must resolve the Compose service instead of assuming a container name.'
