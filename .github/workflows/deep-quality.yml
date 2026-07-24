@@ -106,7 +106,7 @@ jobs:
         include:
           - name: runtime-reducers
             package: tm-runtime
-            file: crates/tm-runtime/src
+            file: ''
             filter: ' in (apply_pubsub_gain|update_history|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id)$'
             # Equality still assigns the same boundary value, so these three mutants are equivalent.
             exclude: '(summary\.rs:(17:20: replace < with <=|20:35: replace < with (==|<=))| in RuntimeState::from_targets$)'
@@ -135,27 +135,41 @@ jobs:
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: List selected mutants
-        run: >-
-          cargo mutants
-          --package "$MUTANT_PACKAGE"
-          --file "$MUTANT_FILE"
-          --list
-          --re "$MUTANT_FILTER"
-          --exclude-re "$MUTANT_EXCLUDE"
+        shell: bash
+        run: |
+          args=(
+            --package "$MUTANT_PACKAGE"
+            --list
+            --re "$MUTANT_FILTER"
+            --exclude-re "$MUTANT_EXCLUDE"
+          )
+          if [[ -n "$MUTANT_FILE" ]]; then
+            args+=(--file "$MUTANT_FILE")
+          fi
+          cargo mutants "${args[@]}" | tee selected-mutants.txt
+          if [[ ! -s selected-mutants.txt ]]; then
+            echo "No mutants selected; refusing to pass an empty mutation shard." >&2
+            exit 1
+          fi
         env:
           MUTANT_PACKAGE: ${{ matrix.package }}
           MUTANT_FILE: ${{ matrix.file }}
           MUTANT_FILTER: ${{ matrix.filter }}
           MUTANT_EXCLUDE: ${{ matrix.exclude }}
       - name: Mutate critical reducers and retry policy
-        run: >-
-          cargo mutants
-          --package "$MUTANT_PACKAGE"
-          --file "$MUTANT_FILE"
-          --timeout 60
-          --jobs 2
-          --re "$MUTANT_FILTER"
-          --exclude-re "$MUTANT_EXCLUDE"
+        shell: bash
+        run: |
+          args=(
+            --package "$MUTANT_PACKAGE"
+            --timeout 60
+            --jobs 2
+            --re "$MUTANT_FILTER"
+            --exclude-re "$MUTANT_EXCLUDE"
+          )
+          if [[ -n "$MUTANT_FILE" ]]; then
+            args+=(--file "$MUTANT_FILE")
+          fi
+          cargo mutants "${args[@]}"
         env:
           MUTANT_PACKAGE: ${{ matrix.package }}
           MUTANT_FILE: ${{ matrix.file }}
@@ -165,5 +179,7 @@ jobs:
         if: always()
         with:
           name: bounded-mutation-report-${{ matrix.name }}
-          path: mutants.out
+          path: |
+            mutants.out
+            selected-mutants.txt
           if-no-files-found: warn
