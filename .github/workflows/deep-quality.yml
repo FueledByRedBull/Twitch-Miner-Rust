@@ -35,9 +35,14 @@ jobs:
           --package tm-runtime
           --all-features
           --locked
-          --fail-under-branches 60
           --json
           --output-path critical-branch-coverage.json
+      - name: Enforce critical-crate branch coverage
+        shell: pwsh
+        run: >-
+          ./scripts/verify-branch-coverage.ps1
+          -ReportPath critical-branch-coverage.json
+          -MinimumPercent 60
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: critical-branch-coverage
@@ -101,10 +106,25 @@ jobs:
         include:
           - name: runtime-reducers
             package: tm-runtime
+            file: crates/tm-runtime/src
             filter: ' in (apply_pubsub_gain|update_history|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id)$'
-          - name: app-retries
+            # Equality still assigns the same boundary value, so these three mutants are equivalent.
+            exclude: '(summary\.rs:(17:20: replace < with <=|20:35: replace < with (==|<=))| in RuntimeState::from_targets$)'
+          - name: app-pubsub-retry
             package: tm-app
-            filter: ' in (pubsub_reconnect_delay|eventsub_reconnect_delay|saved_session_retry_delay)$'
+            file: crates/tm-app/src/pubsub.rs
+            filter: ' in pubsub_reconnect_delay$'
+            exclude: 'a^'
+          - name: app-eventsub-retry
+            package: tm-app
+            file: crates/tm-app/src/eventsub.rs
+            filter: ' in eventsub_reconnect_delay$'
+            exclude: 'a^'
+          - name: app-session-retry
+            package: tm-app
+            file: crates/tm-app/src/bootstrap.rs
+            filter: ' in saved_session_retry_delay$'
+            exclude: 'a^'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -115,15 +135,32 @@ jobs:
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: List selected mutants
-        run: cargo mutants --package "$MUTANT_PACKAGE" --list --re "$MUTANT_FILTER"
+        run: >-
+          cargo mutants
+          --package "$MUTANT_PACKAGE"
+          --file "$MUTANT_FILE"
+          --list
+          --re "$MUTANT_FILTER"
+          --exclude-re "$MUTANT_EXCLUDE"
         env:
           MUTANT_PACKAGE: ${{ matrix.package }}
+          MUTANT_FILE: ${{ matrix.file }}
           MUTANT_FILTER: ${{ matrix.filter }}
+          MUTANT_EXCLUDE: ${{ matrix.exclude }}
       - name: Mutate critical reducers and retry policy
-        run: cargo mutants --package "$MUTANT_PACKAGE" --timeout 60 --jobs 2 --re "$MUTANT_FILTER"
+        run: >-
+          cargo mutants
+          --package "$MUTANT_PACKAGE"
+          --file "$MUTANT_FILE"
+          --timeout 60
+          --jobs 2
+          --re "$MUTANT_FILTER"
+          --exclude-re "$MUTANT_EXCLUDE"
         env:
           MUTANT_PACKAGE: ${{ matrix.package }}
+          MUTANT_FILE: ${{ matrix.file }}
           MUTANT_FILTER: ${{ matrix.filter }}
+          MUTANT_EXCLUDE: ${{ matrix.exclude }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

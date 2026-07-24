@@ -79,7 +79,7 @@ if ($deepQualityWorkflow -notmatch 'nightly-\d{4}-\d{2}-\d{2}' -or
     $deepQualityWorkflow -notmatch 'cargo-mutants --version \d+\.\d+\.\d+ --locked' -or
     $deepQualityWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+' -or
     $deepQualityWorkflow -notmatch '--branch' -or
-    $deepQualityWorkflow -notmatch '--fail-under-branches\s+\d+' -or
+    $deepQualityWorkflow -notmatch 'verify-branch-coverage\.ps1' -or
     $deepQualityWorkflow -notmatch 'compare-replay-baseline\.ps1') {
     throw 'Deep quality tools, nightly, coverage, and replay comparison must be explicitly pinned.'
 }
