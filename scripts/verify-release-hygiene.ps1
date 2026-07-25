@@ -152,6 +152,13 @@ if ($deploymentHelper -notmatch 'started_at_unix -ge \$containerStarted' -or
     $deploymentHelper -notmatch '\$acknowledgedTopics -eq \$pubSub\.total_topics') {
     throw 'Guarded deployment must reject stale status and incomplete transport recovery.'
 }
+$exclusiveStop = $deploymentHelper.LastIndexOf('Stop-RollbackForExclusiveCanary')
+$candidateCanary = $deploymentHelper.LastIndexOf('Test-ImageCanary $CandidateImage')
+if ($exclusiveStop -lt 0 -or $candidateCanary -lt 0 -or $exclusiveStop -gt $candidateCanary -or
+    $deploymentHelper -notmatch '\$rollbackRecoveryRequired = \$true' -or
+    $deploymentHelper -notmatch 'Restore-RollbackService') {
+    throw 'Guarded deployment must stop the rollback service for an exclusive canary and restore it on failure.'
+}
 
 $candidateDigest = 'a' * 64
 $rollbackDigest = 'b' * 64
