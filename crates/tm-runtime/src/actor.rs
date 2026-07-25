@@ -21,6 +21,10 @@ pub struct RuntimeHandle {
     metrics: Arc<RuntimeMetrics>,
 }
 
+// A bounded queue applies backpressure instead of dropping transport events.
+// The capacity is covered by the ignored release-mode sweep below and by the
+// mixed replay benchmark; 64 absorbs realistic bursts without materially
+// increasing tail latency or memory relative to smaller/larger candidates.
 const RUNTIME_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Default)]
@@ -42,8 +46,8 @@ pub struct RuntimeMetricsSnapshot {
 }
 
 impl RuntimeMetrics {
-    fn record_enqueued(&self, available_capacity: usize) {
-        let capacity = u64::try_from(RUNTIME_QUEUE_CAPACITY).unwrap_or(u64::MAX);
+    fn record_enqueued(&self, available_capacity: usize, queue_capacity: usize) {
+        let capacity = u64::try_from(queue_capacity).unwrap_or(u64::MAX);
         let available = u64::try_from(available_capacity).unwrap_or(u64::MAX);
         let depth = capacity
             .saturating_sub(available)
@@ -391,7 +395,14 @@ impl RuntimeActor {
 }
 
 pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
-    let (sender, receiver) = mpsc::channel(RUNTIME_QUEUE_CAPACITY);
+    spawn_runtime_session_with_capacity(session, RUNTIME_QUEUE_CAPACITY)
+}
+
+fn spawn_runtime_session_with_capacity(
+    session: RuntimeSession,
+    queue_capacity: usize,
+) -> RuntimeHandle {
+    let (sender, receiver) = mpsc::channel(queue_capacity);
     let (state_revision_tx, state_revision_rx) = watch::channel(0_u64);
     let metrics = Arc::new(RuntimeMetrics::default());
     let RuntimeSession { summary, state } = session;
@@ -452,7 +463,8 @@ impl RuntimeHandle {
     ) -> Result<EventApplication> {
         let (send, recv) = oneshot::channel();
         let enqueued_at = Instant::now();
-        self.metrics.record_enqueued(self.sender.capacity());
+        self.metrics
+            .record_enqueued(self.sender.capacity(), self.sender.max_capacity());
         self.sender
             .send(RuntimeCommand::ApplyEvent {
                 event,
@@ -743,5 +755,82 @@ impl RuntimeHandle {
             .map_err(|_| RuntimeError::SendFailed {
                 command: "StopTrackingPrediction",
             })
+    }
+}
+
+#[cfg(test)]
+mod queue_profile {
+    use super::*;
+    use tm_config::ConfigFile;
+
+    const PROFILE_STREAMERS: usize = 17;
+    const PROFILE_EVENTS: usize = 5_000;
+
+    fn profile_session() -> RuntimeSession {
+        let targets = (0..PROFILE_STREAMERS)
+            .map(|index| format!("streamer-{index}"))
+            .collect::<Vec<_>>();
+        let config = ConfigFile {
+            streamers: targets.clone(),
+            ..ConfigFile::default()
+        };
+        let mut state = RuntimeState::from_targets(&config, &targets, OffsetDateTime::UNIX_EPOCH);
+        for (index, streamer) in state.streamers.iter_mut().enumerate() {
+            streamer.channel_id = format!("channel-{index}");
+        }
+        RuntimeSession::from_state(state)
+    }
+
+    async fn measure_capacity(capacity: usize) -> (f64, u128, RuntimeMetricsSnapshot) {
+        let runtime = spawn_runtime_session_with_capacity(profile_session(), capacity);
+        let started = Instant::now();
+        let mut tasks = Vec::with_capacity(PROFILE_EVENTS);
+        for index in 0..PROFILE_EVENTS {
+            let runtime = runtime.clone();
+            tasks.push(tokio::spawn(async move {
+                let event_started = Instant::now();
+                runtime
+                    .apply_event(
+                        MinerEvent::PointsEarned {
+                            channel_id: format!("channel-{}", index % PROFILE_STREAMERS),
+                            earned: 10,
+                            reason: String::from("WATCH"),
+                            balance: 1_000,
+                        },
+                        OffsetDateTime::UNIX_EPOCH,
+                    )
+                    .await
+                    .expect("profile event must be applied");
+                event_started.elapsed().as_micros()
+            }));
+        }
+        let mut latencies = Vec::with_capacity(PROFILE_EVENTS);
+        for task in tasks {
+            latencies.push(task.await.expect("profile task must complete"));
+        }
+        let elapsed = started.elapsed();
+        latencies.sort_unstable();
+        let p95 = latencies[latencies.len() * 95 / 100];
+        let metrics = runtime.metrics();
+        runtime
+            .shutdown(true, OffsetDateTime::UNIX_EPOCH)
+            .await
+            .expect("profile runtime must stop");
+        let event_count =
+            f64::from(u32::try_from(PROFILE_EVENTS).expect("profile event count must fit in u32"));
+        (event_count / elapsed.as_secs_f64(), p95, metrics)
+    }
+
+    #[tokio::test]
+    #[ignore = "manual release-mode actor queue capacity sweep"]
+    async fn actor_queue_capacity_sweep() {
+        println!("capacity,throughput_commands_per_second,p95_micros,max_queue_depth");
+        for capacity in [16, 32, 64, 128, 256] {
+            let (throughput, p95, metrics) = measure_capacity(capacity).await;
+            println!(
+                "{capacity},{throughput:.0},{p95},{}",
+                metrics.max_queue_depth
+            );
+        }
     }
 }

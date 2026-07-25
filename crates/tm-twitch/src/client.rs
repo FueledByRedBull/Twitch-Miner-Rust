@@ -15,11 +15,12 @@ use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
     ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
     EmptyMutationData, FollowersData, GqlPersistedOperation, GqlResponse, InventoryData,
-    InventoryDrop, LiveStatusData, PlaybackAccessTokenData, RecentClip, RecentClipsData,
-    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
-    UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard, WatchStreakMilestone,
+    InventoryDrop, InventorySnapshot, LiveStatusData, PlaybackAccessTokenData, RecentClip,
+    RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
+    WatchStreakMilestone,
 };
-use crate::{operations, CLIENT_ID, DEFAULT_CLIENT_VERSION};
+use crate::{operations, CLIENT_ID};
 
 const MAX_READ_ATTEMPTS: usize = 3;
 const READ_RETRY_BASE: Duration = Duration::from_millis(250);
@@ -39,7 +40,7 @@ pub struct TwitchClient {
 
 #[derive(Debug, Clone)]
 struct CachedClientVersion {
-    value: String,
+    value: Option<String>,
     fetched_at: Option<Instant>,
     ttl: Duration,
 }
@@ -116,7 +117,7 @@ impl TwitchClient {
             device_id: generate_device_id(),
             user_agent: user_agent.into().trim().to_string(),
             client_version: Mutex::new(CachedClientVersion {
-                value: DEFAULT_CLIENT_VERSION.to_string(),
+                value: None,
                 fetched_at: None,
                 ttl: Duration::from_secs(10 * 60 * 60),
             }),
@@ -150,11 +151,12 @@ impl TwitchClient {
                 .client_version
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if cache
-                .fetched_at
-                .is_some_and(|fetched_at| fetched_at.elapsed() < cache.ttl)
-            {
-                return Ok(cache.value.clone());
+            if let Some(value) = cache.value.as_ref().filter(|_| {
+                cache
+                    .fetched_at
+                    .is_some_and(|fetched_at| fetched_at.elapsed() < cache.ttl)
+            }) {
+                return Ok(value.clone());
             }
         }
 
@@ -185,7 +187,7 @@ impl TwitchClient {
             .client_version
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.value.clone_from(&build_id);
+        cache.value = Some(build_id.clone());
         cache.fetched_at = Some(Instant::now());
         Ok(build_id)
     }
@@ -587,8 +589,14 @@ impl TwitchClient {
     }
 
     pub async fn fetch_inventory_typed(&self) -> Result<Vec<InventoryDrop>, TwitchClientError> {
+        Ok(self.fetch_inventory_snapshot_typed().await?.drops)
+    }
+
+    pub async fn fetch_inventory_snapshot_typed(
+        &self,
+    ) -> Result<InventorySnapshot, TwitchClientError> {
         let response: InventoryData = self.post_gql_typed(&operations::inventory()).await?;
-        inventory_drops_from_typed(response)
+        inventory_snapshot_from_typed(response)
     }
 
     pub async fn fetch_claimable_drops(&self) -> Result<Vec<InventoryDrop>, TwitchClientError> {
@@ -1417,9 +1425,9 @@ fn followers_page_from_typed(
     })
 }
 
-pub(crate) fn inventory_drops_from_typed(
+pub(crate) fn inventory_snapshot_from_typed(
     data: InventoryData,
-) -> Result<Vec<InventoryDrop>, TwitchClientError> {
+) -> Result<InventorySnapshot, TwitchClientError> {
     let campaigns = data
         .current_user
         .ok_or(TwitchClientError::MissingField("data.currentUser"))?
@@ -1431,8 +1439,28 @@ pub(crate) fn inventory_drops_from_typed(
         .ok_or(TwitchClientError::MissingField(
             "data.currentUser.inventory.dropCampaignsInProgress",
         ))?;
-    let mut drops = Vec::new();
+    let mut snapshot = InventorySnapshot {
+        drops: Vec::new(),
+        completed_campaign_ids: Vec::new(),
+    };
     for campaign in campaigns {
+        let campaign_complete = !campaign.drops.is_empty()
+            && campaign.drops.iter().all(|drop| {
+                drop.self_data
+                    .as_ref()
+                    .and_then(|progress| progress.is_claimed)
+                    == Some(true)
+            });
+        if campaign_complete {
+            if let Some(id) = campaign
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                snapshot.completed_campaign_ids.push(id.to_owned());
+            }
+        }
         let campaign_name = campaign.name.or(campaign.display_name).unwrap_or_default();
         for drop in campaign.drops {
             let Some(self_data) = drop.self_data else {
@@ -1450,7 +1478,7 @@ pub(crate) fn inventory_drops_from_typed(
             let is_claimed = self_data.is_claimed.ok_or(TwitchClientError::MissingField(
                 "data.currentUser.inventory.timeBasedDrops.self.isClaimed",
             ))?;
-            drops.push(InventoryDrop {
+            snapshot.drops.push(InventoryDrop {
                 drop_instance_id,
                 reward_name: drop
                     .name
@@ -1466,7 +1494,9 @@ pub(crate) fn inventory_drops_from_typed(
             });
         }
     }
-    Ok(drops)
+    snapshot.completed_campaign_ids.sort_unstable();
+    snapshot.completed_campaign_ids.dedup();
+    Ok(snapshot)
 }
 
 fn is_retryable_read_error(error: &reqwest::Error) -> bool {

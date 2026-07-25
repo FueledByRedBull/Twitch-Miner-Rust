@@ -3,7 +3,6 @@ pub const GQL_URL: &str = "https://gql.twitch.tv/gql";
 pub const PLAYBACK_URL: &str = "https://usher.ttvnw.net/api/channel/hls/";
 pub const CLIENT_ID: &str = "ue6666qo983tsx6so1t0vnawi233wa";
 pub const DROP_ID: &str = "c2542d6d-cd10-4532-919b-3d19f30a768b";
-pub const DEFAULT_CLIENT_VERSION: &str = "ef928475-9403-42f2-8a34-55784bd08e16";
 
 mod client;
 mod contracts;
@@ -30,8 +29,9 @@ pub use parsers::{
 pub use types::{
     ArchivedVideo, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage,
     GqlPersistedExtensions, GqlPersistedOperation, GqlPersistedQuery, GqlRequest, InventoryDrop,
-    MinuteWatchedRequest, RecentClip, StreamInfo, TwitchClientError, TwitchContractError,
-    TwitchEndpoints, TwitchFailureClass, ViewerDropsDashboard, WatchStreakMilestone,
+    InventorySnapshot, MinuteWatchedRequest, RecentClip, StreamInfo, TwitchClientError,
+    TwitchContractError, TwitchEndpoints, TwitchFailureClass, ViewerDropsDashboard,
+    WatchStreakMilestone,
 };
 
 #[cfg(test)]
@@ -39,7 +39,7 @@ mod tests {
     use super::*;
     use crate::client::{
         archived_videos_from_typed, available_drop_campaign_ids_from_typed,
-        channel_points_context_from_typed, inventory_drops_from_typed, last_playlist_url,
+        channel_points_context_from_typed, inventory_snapshot_from_typed, last_playlist_url,
         recent_clips_from_typed, user_contributions_from_typed, watch_streak_milestone_from_typed,
     };
     use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
@@ -1283,7 +1283,7 @@ mod tests {
             }))
             .unwrap();
         assert!(matches!(
-            inventory_drops_from_typed(missing_required.data.unwrap()),
+            inventory_snapshot_from_typed(missing_required.data.unwrap()),
             Err(TwitchClientError::MissingField(
                 "data.currentUser.inventory.timeBasedDrops.requiredMinutesWatched"
             ))
@@ -1306,11 +1306,72 @@ mod tests {
             }))
             .unwrap();
         assert!(matches!(
-            inventory_drops_from_typed(missing_claimed.data.unwrap()),
+            inventory_snapshot_from_typed(missing_claimed.data.unwrap()),
             Err(TwitchClientError::MissingField(
                 "data.currentUser.inventory.timeBasedDrops.self.isClaimed"
             ))
         ));
+    }
+
+    #[test]
+    fn typed_inventory_classifies_only_fully_claimed_campaigns_as_complete() {
+        let inventory: types::GqlResponse<types::InventoryData> =
+            serde_json::from_value(serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [
+                                {
+                                    "id": "campaign-complete",
+                                    "timeBasedDrops": [{
+                                        "requiredMinutesWatched": 60,
+                                        "self": {
+                                            "dropInstanceID": "drop-complete",
+                                            "currentMinutesWatched": 60,
+                                            "isClaimed": true
+                                        }
+                                    }]
+                                },
+                                {
+                                    "id": "campaign-incomplete",
+                                    "timeBasedDrops": [
+                                        {
+                                            "requiredMinutesWatched": 60,
+                                            "self": {
+                                                "dropInstanceID": "drop-claimed",
+                                                "currentMinutesWatched": 60,
+                                                "isClaimed": true
+                                            }
+                                        },
+                                        {
+                                            "requiredMinutesWatched": 120,
+                                            "self": null
+                                        }
+                                    ]
+                                },
+                                {
+                                    "timeBasedDrops": [{
+                                        "requiredMinutesWatched": 30,
+                                        "self": {
+                                            "dropInstanceID": "drop-without-campaign-id",
+                                            "currentMinutesWatched": 30,
+                                            "isClaimed": true
+                                        }
+                                    }]
+                                }
+                            ]
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+
+        let snapshot = inventory_snapshot_from_typed(inventory.data.unwrap()).unwrap();
+        assert_eq!(
+            snapshot.completed_campaign_ids,
+            vec![String::from("campaign-complete")]
+        );
+        assert_eq!(snapshot.drops.len(), 3);
     }
 
     #[test]

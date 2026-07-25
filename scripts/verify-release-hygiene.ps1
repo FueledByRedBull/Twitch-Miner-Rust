@@ -72,6 +72,12 @@ if ($ciWorkflow -notmatch 'cargo-deny@\d+\.\d+\.\d+' -or
     $ciWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+') {
     throw 'CI analysis executables must use explicit versions.'
 }
+if ($ciWorkflow -match 'gitleaks/gitleaks-action' -or
+    $ciWorkflow -notmatch 'GITLEAKS_VERSION:\s*\d+\.\d+\.\d+' -or
+    $ciWorkflow -notmatch 'GITLEAKS_ARCHIVE_SHA256:\s*[0-9a-f]{64}' -or
+    $ciWorkflow -notmatch 'sha256sum --check') {
+    throw 'CI secret scanning must use a checksum-verified native Gitleaks release.'
+}
 
 $deepQualityWorkflow = Get-Content -Raw .github/workflows/deep-quality.yml
 if ($deepQualityWorkflow -notmatch 'nightly-\d{4}-\d{2}-\d{2}' -or

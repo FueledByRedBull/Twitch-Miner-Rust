@@ -113,7 +113,7 @@ $result = [ordered]@{
     }
     resource_sampling = $resourceSummary
     runtime_metrics = 'Run a real session and inspect --status for queue depth, command wait, event throughput, and transport-to-state latency.'
-    go_comparison = 'Run the same fixture/workload with the adjacent Go baseline when Go 1.21+ is available.'
+    language_comparison = 'Use scripts/measure-language-comparison.ps1 with an explicit clean Go baseline checkout.'
 }
 
 $json = $result | ConvertTo-Json -Depth 5

@@ -69,6 +69,67 @@ p95 was 53 microseconds at 17 streamers, 120 microseconds at 100, and 736
 microseconds at 1,000; the 1,000-streamer p99 was 787 microseconds. Those
 measurements do not justify replacing the simple full-state snapshot design.
 
+## Actor queue capacity
+
+The actor uses a bounded queue and awaits capacity instead of dropping transport
+events. Its ignored release-mode sweep is reproducible without exposing a
+production tuning knob:
+
+```powershell
+cargo test -p tm-runtime --release actor_queue_capacity_sweep -- --ignored --nocapture --test-threads=1
+```
+
+Five Windows x64 runs of a 5,000-event burst across 17 channels produced these
+median results:
+
+| Capacity | Throughput | p95 latency |
+| ---: | ---: | ---: |
+| 32 | 656,564 commands/s | 4,151 us |
+| 64 | 652,733 commands/s | 4,219 us |
+| 128 | 657,990 commands/s | 4,288 us |
+
+The differences are noise-scale. Capacity 64 remains the balanced middle: it
+absorbs a larger burst than 32 without the extra queued state of 128, and
+backpressure remains explicit. The mixed replay separately drives the queue to
+its configured limit while exercising prediction, presence, campaign, and
+snapshot work.
+
+## Rust and Go comparison
+
+Use an explicit clean checkout of the pinned Go reference. The script builds
+both stripped release applications on the same host, measures their native help
+startup, and runs the identical production `MOST_VOTED` prediction decision
+with the same sanitized inputs, iteration count, and checksum:
+
+```powershell
+./scripts/measure-language-comparison.ps1 `
+  -GoRoot C:/path/to/pinned-go-checkout `
+  -OutputPath ./target/language-comparison.json
+```
+
+The comparison deliberately reports two categories:
+
+- comparable: stripped binary size, CLI parse/help startup, and the normalized
+  production prediction-decision kernel;
+- not comparable: Rust's single-writer actor, bounded queue, state snapshots,
+  transport supervision, and live campaign/recovery behavior, because the Go
+  baseline has no equivalent workload.
+
+On the initial Windows x64 run against Go revision
+`91f00698314dbbdd6c757d7b525458c82173e622`, the stripped Go executable was
+7,486,464 bytes and the Rust executable was 7,814,656 bytes. Thirty help
+launches had medians of 6.979 ms for Go and 8.115 ms for Rust. The matching
+prediction checksum ran at roughly 55-57 million decisions/s in Go and
+16 million decisions/s in Rust. Prediction decisions occur once per event, so
+both are far beyond runtime demand; this result does not make Go universally
+faster or measure network-bound mining throughput.
+
+The production ARM64 image remains a two-layer `scratch` image. The measured
+Pi baseline was 3,008,991 compressed bytes, with a 6.31 MB uncompressed static
+binary layer and roughly 8 KB of `/data` directory metadata. Removing the
+non-root user, health command, writable-data path, or volume semantics to save
+that metadata is not an acceptable optimization.
+
 To sample resident memory and CPU for an already running local process, pass its
 PID and a workload label (for example, `idle`, `normal`, or `burst`):
 
@@ -83,7 +144,3 @@ data. Record idle, normal mining, and event-burst samples separately; do not
 compare debug builds with release builds. Measure reconnect/recovery time from
 the sanitized health heartbeat and reconnect counters around a controlled
 network interruption.
-
-When Go 1.21+ is available, run the same normalized fixture/workload against
-the adjacent Go baseline and record both revisions. A missing Go toolchain is a
-measurement limitation, not evidence that Rust is faster.

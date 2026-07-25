@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Matches channel-level Drop campaign IDs to typed inventory progress so a fully
+  claimed campaign releases its watch pin instead of suppressing Twitch's spare
+  points slot. New, incomplete, and temporarily unknown campaigns remain
+  eligible.
+- Replaces floating-point bet sizing with exact integer arithmetic, removes
+  broad cast lint suppressions, and preserves integer prediction ordering above
+  `f64` precision. Boundary tests cover extreme balances, percentages, and
+  progress formatting.
+- Adds reproducible Go/Rust and actor queue-capacity measurements. The measured
+  queue differences are noise-scale, so the bounded capacity remains 64; the
+  two-layer `scratch` runtime image is already near-minimal.
+- Removes foreign console/avatar branding and stale internal review dumps while
+  preserving license attribution. GitHub Actions now use Node 24-capable pins,
+  and secret scanning uses a checksum-verified native Gitleaks binary.
 - Mines every eligible live channel through fair 15-minute turns in Twitch's two
   creditable watch slots. This preserves the platform's normal points/bonus rate
   while avoiding permanent priority starvation. An eligible Drop campaign now

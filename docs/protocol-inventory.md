@@ -55,6 +55,14 @@ notifications. Record the source revision, image digest, date, and success or
 failure class in the release notes; never record cookies, account IDs, raw
 payloads, or request headers.
 
+`CLIENT_ID` is the browser identity required consistently by device auth, GQL,
+and EventSub; it cannot be discovered safely at runtime. `Client-Version` is
+not pinned to a compiled fallback: the client extracts the current build ID
+from Twitch's homepage before the first GQL request and refreshes the cached
+value every ten hours. Discovery or rejection failures remain explicit and are
+covered by the canary; the miner does not guess alternate identities or
+credentials.
+
 Offline streak recovery uses the two typed read-only operations above. Archived
 videos require an ID, duration, and optional broadcast identifier; the scheduler
 accepts a VOD only when its broadcast identifier exactly matches the missed live
@@ -129,9 +137,15 @@ success envelope; an explicit non-empty error or an unknown status still fails
 closed. `DropsHighlightService_AvailableDrops` treats a null channel or null
 campaign list as an empty result, matching the Go reference, while every entry
 in a present list still requires a non-empty campaign ID. Its typed result also
-gates `DROPS` watch priority when `farm_drops` is enabled: unknown and empty results are not promoted, a
-broadcast/game change invalidates the previous result, and later configured
-priorities continue filling watcher capacity. The older raw JSON methods remain
+gates `DROPS` watch priority when `farm_drops` is enabled. One typed inventory
+snapshot per selection refresh retains campaign IDs and marks an ID complete
+only when its non-empty drop list is explicitly fully claimed. Per-channel
+available IDs are filtered against that completed set. New, incomplete,
+missing-progress, and transient-failure cases remain eligible; completed
+campaigns release their pin so the spare points slot is not suppressed. Unknown
+and empty available-campaign results are not promoted, a broadcast/game change
+invalidates the previous result, and later configured priorities continue
+filling watcher capacity. The older raw JSON methods remain
 compatibility facades; runtime and
 canary code use the explicit typed variants. Neither path logs or exposes the
 retained payload.

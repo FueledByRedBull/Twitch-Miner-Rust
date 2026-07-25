@@ -498,6 +498,8 @@ pub(crate) struct InventoryState {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct InventoryCampaign {
     #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(rename = "displayName", default)]
     pub(crate) display_name: Option<String>,
@@ -657,6 +659,12 @@ pub struct InventoryDrop {
     pub current_minutes_watched: i64,
     pub required_minutes_watched: i64,
     pub is_claimed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventorySnapshot {
+    pub drops: Vec<InventoryDrop>,
+    pub completed_campaign_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
