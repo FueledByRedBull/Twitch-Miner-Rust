@@ -15,7 +15,8 @@
   two-layer `scratch` runtime image is already near-minimal.
 - Removes foreign console/avatar branding and stale internal review dumps while
   preserving license attribution. GitHub Actions now use Node 24-capable pins,
-  and secret scanning uses a checksum-verified native Gitleaks binary.
+  secret scanning uses a checksum-verified native Gitleaks binary, and
+  multiarch digest collection uses the native authenticated artifact API.
 - Mines every eligible live channel through fair 15-minute turns in Twitch's two
   creditable watch slots. This preserves the platform's normal points/bonus rate
   while avoiding permanent priority starvation. An eligible Drop campaign now
