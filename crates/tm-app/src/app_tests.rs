@@ -24,7 +24,9 @@ mod tests {
         build_minute_watched_event, refresh_watch_selection_metadata, resolve_spade_url,
         send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
     };
-    use crate::observability::{format_resume_gap, streamer_game_name, AppObservability};
+    use crate::observability::{
+        format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
+    };
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
     use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
@@ -414,10 +416,10 @@ mod tests {
         AppObservability::new(
             None,
             DiscordClient::new(Duration::from_secs(1)).unwrap(),
-            false,
-            false,
-            false,
-            true,
+            AppObservabilitySettings {
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         )
     }
 
@@ -610,10 +612,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            false,
-            true,
-            true,
-            true,
+            AppObservabilitySettings {
+                emoji: true,
+                show_claimed_bonus: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
         let streamer = Streamer {
             username: String::from("alice"),
@@ -640,10 +644,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            false,
-            true,
-            true,
-            true,
+            AppObservabilitySettings {
+                emoji: true,
+                show_claimed_bonus: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
         let streamer = Streamer {
             username: String::from("alice"),
@@ -665,10 +671,11 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            false,
-            true,
-            false,
-            true,
+            AppObservabilitySettings {
+                emoji: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
         let streamer = Streamer {
             username: String::from("alice"),
@@ -695,10 +702,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            false,
-            true,
-            true,
-            true,
+            AppObservabilitySettings {
+                emoji: true,
+                show_claimed_bonus: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
         let streamer = Streamer {
             username: String::from("alice"),
@@ -722,10 +731,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            false,
-            true,
-            true,
-            true,
+            AppObservabilitySettings {
+                emoji: true,
+                show_claimed_bonus: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
 
         assert_eq!(
@@ -747,10 +758,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            true,
-            true,
-            true,
-            true,
+            AppObservabilitySettings {
+                anonymize_logs: true,
+                emoji: true,
+                show_claimed_bonus: true,
+                show_game: true,
+            },
         );
         let streamer = Streamer {
             username: String::from("private-user"),
@@ -806,10 +819,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            false,
-            true,
-            true,
-            true,
+            AppObservabilitySettings {
+                emoji: true,
+                show_claimed_bonus: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
         let drop = InventoryDrop {
             drop_instance_id: String::from("drop-1"),
@@ -831,10 +846,12 @@ mod tests {
         let observability = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            true,
-            false,
-            true,
-            true,
+            AppObservabilitySettings {
+                anonymize_logs: true,
+                show_claimed_bonus: true,
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         );
         let drop = InventoryDrop {
             drop_instance_id: String::from("private-id"),
@@ -882,6 +899,42 @@ mod tests {
             pubsub_reconnect_delay(&generic_failure, 0, 1, 6),
             Some(Duration::from_secs(300))
         );
+    }
+
+    #[test]
+    fn pubsub_retry_backoff_is_monotonic_and_capped_across_connection_shapes() {
+        let generic_failure = Ok(Err(tm_pubsub::PubSubError::PongTimeout));
+        for connection_index in 0..=10 {
+            for topic_count in [1, 10, 50] {
+                let mut previous = Duration::ZERO;
+                for attempt in 1..=100 {
+                    let delay = pubsub_reconnect_delay(
+                        &generic_failure,
+                        connection_index,
+                        topic_count,
+                        attempt,
+                    )
+                    .expect("generic failures always retry");
+                    assert!(delay >= previous);
+                    assert!(delay <= Duration::from_secs(300));
+                    previous = delay;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pubsub_join_failures_retry_unless_the_task_was_cancelled() {
+        let cancelled_task = tokio::spawn(std::future::pending::<()>());
+        cancelled_task.abort();
+        let cancelled = Err(cancelled_task.await.unwrap_err());
+        assert_eq!(pubsub_reconnect_delay(&cancelled, 0, 1, 1), None);
+
+        let panicked_task = tokio::spawn(async {
+            panic!("join-error fixture");
+        });
+        let panicked = Err(panicked_task.await.unwrap_err());
+        assert!(pubsub_reconnect_delay(&panicked, 0, 1, 1).is_some());
     }
 
     #[test]
@@ -1222,16 +1275,16 @@ mod tests {
             )
             .await
             .unwrap();
-        crate::runtime_effects::execute_runtime_effects(
-            &runtime,
-            &twitch,
-            "user-1",
-            pubsub_effects,
-            &observability,
+        let effect_context = crate::runtime_effects::RuntimeEffectContext::new(
+            runtime.clone(),
+            twitch.clone(),
+            String::from("user-1"),
+            observability.clone(),
             health.clone(),
-        )
-        .await
-        .unwrap();
+        );
+        crate::runtime_effects::execute_runtime_effects(&effect_context, pubsub_effects)
+            .await
+            .unwrap();
 
         for _ in 0..2 {
             refresh_snapshot_streamers(&runtime, &twitch, "user-1", &observability, &health)

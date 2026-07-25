@@ -14,6 +14,61 @@ package count, and resolved dependency-package count. A dirty report is useful
 for development comparison but is not release evidence; release baselines must
 come from a clean checkout of the recorded revision.
 
+## Sanitized replay
+
+The Twitch-free replay drives the real actor and reducers through point gains,
+deduplication, prediction placement and settlement, presence reconnect storms,
+campaign selection, scheduling, and a full 64-command queue. It contains no
+account data and performs no network requests:
+
+```powershell
+cargo run -p tm-integration-tests --example replay_benchmark --release --locked
+./scripts/measure-replay.ps1 -Iterations 5 -HardwareClass desktop -OutputPath ./replay-performance-report.json
+```
+
+The example aggregates raw latency and snapshot samples across every requested
+repetition. The wrapper retains every process report and then reports
+distributions across all process runs, so `repetitions` never describes
+discarded work. Reports include p50/p95/p99 end-to-end command latency, mean
+actor queue wait, maximum queue depth, throughput, post-burst snapshot
+responsiveness, snapshot-clone latency at 17, 100, and 1,000 streamers,
+whole-process CPU time, and peak resident memory. It deliberately does not
+install an allocator shim: allocation instrumentation is deferred unless
+profiles first show a material snapshot cost. Both direct and wrapped reports
+record the OS, architecture, hardware-class label, and source revision; use
+`-HardwareClass pi-class` for a native Pi measurement.
+
+Manual multiarch builds also export an ARM64 `pi-replay-benchmark` artifact
+built from the exact workflow revision. Download that artifact on the release
+operator host, copy only the binary to the Pi, and run it natively:
+
+```sh
+chmod 0755 ./replay_benchmark
+TM_REPLAY_REPETITIONS=10 \
+TM_REPLAY_HARDWARE_CLASS=pi-class \
+./replay_benchmark > replay-performance-report.json
+```
+
+This keeps compilers and source trees off the production Pi while recording
+measurements from Pi-class hardware. Confirm the report revision matches the
+candidate image revision, archive the sanitized JSON as release evidence, and
+remove the transferred binary after verification.
+
+The deterministic PR replay remains evidence-only. The scheduled/manual Deep
+Quality workflow runs a longer five-process, ten-repetition sample and compares
+only stable 200-streamer latency/throughput, 1,000-streamer snapshot latency,
+and peak RSS against
+`benchmarks/replay-baseline.github-ubuntu-x64.json`. Its 1.75x latency, 0.6x
+throughput, and 1.5x RSS tolerances are deliberately noise-tolerant: they catch
+material regressions without turning shared-runner timing variance into a PR
+gate. Update the baseline only from an archived clean-run report, record the
+source revision, and review the change like production code.
+
+On the initial Windows x64 development run for this hardening branch, snapshot
+p95 was 53 microseconds at 17 streamers, 120 microseconds at 100, and 736
+microseconds at 1,000; the 1,000-streamer p99 was 787 microseconds. Those
+measurements do not justify replacing the simple full-state snapshot design.
+
 To sample resident memory and CPU for an already running local process, pass its
 PID and a workload label (for example, `idle`, `normal`, or `burst`):
 

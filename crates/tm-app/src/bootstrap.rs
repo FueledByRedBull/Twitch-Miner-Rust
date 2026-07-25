@@ -470,5 +470,16 @@ mod tests {
             saved_session_retry_delay(20, Duration::from_secs(5), Duration::from_secs(300)),
             Duration::from_secs(300)
         );
+        let mut previous = Duration::ZERO;
+        for attempt in 1..=100 {
+            let delay = saved_session_retry_delay(
+                attempt,
+                Duration::from_secs(5),
+                Duration::from_secs(300),
+            );
+            assert!(delay >= previous);
+            assert!(delay <= Duration::from_secs(300));
+            previous = delay;
+        }
     }
 }

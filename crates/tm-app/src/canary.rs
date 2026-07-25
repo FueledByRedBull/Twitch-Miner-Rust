@@ -54,12 +54,48 @@ pub(crate) async fn run_read_only_canary(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_read_only_canary_inner(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
 ) -> std::result::Result<(), CanaryCheckError> {
+    let context = prepare_canary(config, work_dir, http_client).await?;
+    let read_checks = run_canary_read_checks(config, &context).await?;
+    run_canary_transport_checks(&context).await?;
+
+    tracing::info!(
+        read_operations = if read_checks.stream_info_checked {
+            15
+        } else {
+            13
+        },
+        stream_info_applicable = read_checks.stream_info_checked,
+        playback_preflight_applicable = read_checks.playback_checked,
+        own_channel_id_present = !context.own_channel_id.is_empty(),
+        "credential-safe Twitch canary passed"
+    );
+    Ok(())
+}
+
+struct CanaryContext {
+    twitch: TwitchClient,
+    own_channel_id: String,
+    target: String,
+    target_channel_id: String,
+    prediction_eventsub_authorized: bool,
+    tracked: Vec<Streamer>,
+}
+
+struct CanaryReadChecks {
+    stream_info_checked: bool,
+    playback_checked: bool,
+}
+
+async fn prepare_canary(
+    config: &ConfigFile,
+    work_dir: &Path,
+    http_client: reqwest::Client,
+) -> std::result::Result<CanaryContext, CanaryCheckError> {
     let session = canary_step(
         "session",
         load_and_validate_existing_session(config, work_dir, http_client.clone()).await,
@@ -82,9 +118,9 @@ async fn run_read_only_canary_inner(
         "own-channel-id",
         twitch.fetch_channel_id(&config.username).await,
     )?;
-    let target = canary_target(config);
+    let target = canary_target(config).to_string();
     let target_channel_id =
-        canary_step("target-channel-id", twitch.fetch_channel_id(target).await)?;
+        canary_step("target-channel-id", twitch.fetch_channel_id(&target).await)?;
     let _ = canary_step(
         "target-login-by-id",
         twitch.fetch_channel_login_by_id(&target_channel_id).await,
@@ -92,89 +128,121 @@ async fn run_read_only_canary_inner(
     let base_settings = tm_config::build_base_streamer_settings(config);
     let override_settings =
         tm_config::build_override_settings(&base_settings, &config.streamer_overrides);
+    let tracked = resolve_canary_streamers(
+        config,
+        &twitch,
+        &target,
+        &target_channel_id,
+        &base_settings,
+        &override_settings,
+    )
+    .await?;
+    Ok(CanaryContext {
+        twitch,
+        own_channel_id,
+        target,
+        target_channel_id,
+        prediction_eventsub_authorized,
+        tracked,
+    })
+}
 
+async fn run_canary_read_checks(
+    config: &ConfigFile,
+    context: &CanaryContext,
+) -> std::result::Result<CanaryReadChecks, CanaryCheckError> {
     let _ = canary_step(
         "followers",
-        twitch
+        context
+            .twitch
             .fetch_followers(1, config.followers_order.as_str())
             .await,
     )?;
     let _ = canary_step(
         "channel-points-context",
-        twitch.fetch_channel_points_context(target).await,
+        context
+            .twitch
+            .fetch_channel_points_context(&context.target)
+            .await,
     )?;
     let _ = canary_step(
         "watch-streak-reward-list",
-        twitch
-            .fetch_watch_streak_achievement(&target_channel_id)
+        context
+            .twitch
+            .fetch_watch_streak_achievement(&context.target_channel_id)
             .await,
     )?;
     let _ = canary_step(
         "archived-videos",
-        twitch.fetch_recent_archived_videos(target).await,
+        context
+            .twitch
+            .fetch_recent_archived_videos(&context.target)
+            .await,
     )?;
-    let _ = canary_step("recent-clips", twitch.fetch_recent_clips(target).await)?;
+    let _ = canary_step(
+        "recent-clips",
+        context.twitch.fetch_recent_clips(&context.target).await,
+    )?;
     let target_is_live = canary_step(
         "stream-live",
-        twitch.is_stream_live(&target_channel_id).await,
+        context
+            .twitch
+            .is_stream_live(&context.target_channel_id)
+            .await,
     )?;
     // The overlay operation validly returns `stream: null` while a channel is
     // offline. Match the runtime path and validate its live-only fields only
     // when Twitch reports that the target is currently live.
     let stream_info_checked = canary_step(
         "stream-info",
-        fetch_stream_info_if_live(&twitch, target, target_is_live).await,
+        fetch_stream_info_if_live(&context.twitch, &context.target, target_is_live).await,
     )?;
     let playback_checked = canary_step(
         "playback-preflight",
-        prime_playback_if_live(&twitch, target, target_is_live).await,
+        prime_playback_if_live(&context.twitch, &context.target, target_is_live).await,
     )?;
-    let _ = canary_step("inventory", twitch.fetch_inventory_typed().await)?;
+    let _ = canary_step("inventory", context.twitch.fetch_inventory_typed().await)?;
     let _ = canary_step(
         "drops-dashboard",
-        twitch.fetch_viewer_drops_dashboard_typed().await,
+        context.twitch.fetch_viewer_drops_dashboard_typed().await,
     )?;
     let _ = canary_step(
         "available-drops",
-        twitch
-            .fetch_available_drop_campaigns_typed(&target_channel_id)
+        context
+            .twitch
+            .fetch_available_drop_campaigns_typed(&context.target_channel_id)
             .await,
     )?;
     let _ = canary_step(
         "points-contribution",
-        twitch.fetch_user_points_contribution_typed(target).await,
+        context
+            .twitch
+            .fetch_user_points_contribution_typed(&context.target)
+            .await,
     )?;
-    let tracked = resolve_canary_streamers(
-        config,
-        &twitch,
-        target,
-        &target_channel_id,
-        &base_settings,
-        &override_settings,
-    )
-    .await?;
+    Ok(CanaryReadChecks {
+        stream_info_checked,
+        playback_checked,
+    })
+}
+
+async fn run_canary_transport_checks(
+    context: &CanaryContext,
+) -> std::result::Result<(), CanaryCheckError> {
     canary_step(
         "eventsub",
         run_eventsub_canary(
-            &twitch,
-            &own_channel_id,
-            prediction_eventsub_authorized,
-            &tracked,
+            &context.twitch,
+            &context.own_channel_id,
+            context.prediction_eventsub_authorized,
+            &context.tracked,
         )
         .await,
     )?;
     canary_step(
         "pubsub",
-        run_pubsub_canary(&twitch, &own_channel_id, &tracked).await,
+        run_pubsub_canary(&context.twitch, &context.own_channel_id, &context.tracked).await,
     )?;
-
-    tracing::info!(
-        read_operations = if stream_info_checked { 15 } else { 13 },
-        stream_info_applicable = stream_info_checked,
-        playback_preflight_applicable = playback_checked,
-        own_channel_id_present = !own_channel_id.is_empty(),
-        "credential-safe Twitch canary passed"
-    );
     Ok(())
 }
 
@@ -389,6 +457,7 @@ async fn run_pubsub_canary(
     }
 }
 
+// Explicit closures keep the two concrete error types visible at this privacy boundary.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn canary_failure_class(error: &anyhow::Error) -> &'static str {
     if let Some(error) = error.downcast_ref::<TwitchClientError>() {

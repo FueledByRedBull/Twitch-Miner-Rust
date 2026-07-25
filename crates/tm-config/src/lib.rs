@@ -99,6 +99,7 @@ pub struct DiscordConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// This is the stable, flat on-disk schema. Grouping flags would change the public config shape.
 #[allow(clippy::struct_excessive_bools)]
 pub struct ConfigFile {
     #[serde(default = "current_schema_version")]
@@ -149,6 +150,9 @@ const fn current_schema_version() -> u64 {
 }
 
 impl Default for ConfigFile {
+    // The built-in JSON value is compiled with this schema and covered by an exact round-trip
+    // test; failure is an internal release defect, never a response to user-provided input.
+    #[allow(clippy::expect_used)]
     fn default() -> Self {
         serde_json::from_value(default_config_value()).expect("default config must deserialize")
     }

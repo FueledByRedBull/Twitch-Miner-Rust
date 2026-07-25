@@ -83,9 +83,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # main
         with:
-          command: check advisories bans licenses sources
+          tool: cargo-deny@0.20.2
+      - name: Check dependency policy
+        run: cargo deny check advisories bans licenses sources
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -114,7 +116,7 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # main
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.8.7
       - name: Measure workspace coverage
         run: cargo llvm-cov --workspace --all-features --locked --fail-under-lines 60 --lcov --output-path lcov.info
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

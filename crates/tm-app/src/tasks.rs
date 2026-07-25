@@ -8,10 +8,12 @@ use crate::bootstrap::normalized_username;
 use crate::chat::spawn_chat_manager_loop;
 use crate::context::{spawn_context_refresh_loop, spawn_pending_claim_loop};
 use crate::drops::spawn_drop_claim_loop;
-use crate::eventsub::{spawn_eventsub_loop, spawn_eventsub_presence_poll_loop};
+use crate::eventsub::{
+    spawn_eventsub_loop, spawn_eventsub_presence_poll_loop, EventSubTaskContext,
+};
 use crate::minute_watcher::spawn_minute_watcher_loop;
 use crate::observability::AppObservability;
-use crate::pubsub::spawn_pubsub_loop;
+use crate::pubsub::{spawn_pubsub_loop, PubSubTaskContext};
 use crate::status::HealthTracker;
 use crate::streak_cache::{spawn_streak_cache_loop, StreakCache};
 use crate::streak_recovery::spawn_streak_recovery_loop;
@@ -208,15 +210,17 @@ fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> T
     let eventsub = params.user_id.map(|user_id| {
         spawn_eventsub_loop(
             params.stop_rx.clone(),
-            params.runtime.clone(),
-            Arc::clone(params.twitch),
-            params.auth_token.to_string(),
-            params.initial_streamers.to_vec(),
-            user_id.clone(),
-            params.prediction_eventsub_authorized,
-            params.observability.clone(),
-            params.health.clone(),
-            fallback_tx,
+            EventSubTaskContext {
+                runtime: params.runtime.clone(),
+                twitch: Arc::clone(params.twitch),
+                auth_token: params.auth_token.to_string(),
+                tracked_streamers: params.initial_streamers.to_vec(),
+                persistent_user_id: user_id.clone(),
+                prediction_eventsub_authorized: params.prediction_eventsub_authorized,
+                observability: params.observability.clone(),
+                health: params.health.clone(),
+                fallback_tx,
+            },
         )
     });
     let presence_poll = params.user_id.map(|_| {
@@ -233,15 +237,17 @@ fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> T
     let pubsub = params.user_id.map(|user_id| {
         spawn_pubsub_loop(
             params.stop_rx.clone(),
-            params.runtime.clone(),
-            Arc::clone(params.twitch),
-            params.auth_token.to_string(),
-            user_id.clone(),
-            username.to_string(),
-            params.initial_streamers.to_vec(),
-            user_id.clone(),
-            params.observability.clone(),
-            params.health.clone(),
+            PubSubTaskContext {
+                runtime: params.runtime.clone(),
+                twitch: Arc::clone(params.twitch),
+                auth_token: params.auth_token.to_string(),
+                user_id: user_id.clone(),
+                username: username.to_string(),
+                tracked_streamers: params.initial_streamers.to_vec(),
+                persistent_user_id: user_id.clone(),
+                observability: params.observability.clone(),
+                health: params.health.clone(),
+            },
         )
     });
     TransportTasks {

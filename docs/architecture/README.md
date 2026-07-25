@@ -25,4 +25,25 @@ The largest crates are decomposed behind stable crate facades:
 - `tm-pubsub` exposes the same public API from `lib.rs` while separating EventSub/legacy WebSocket clients, topic/payload construction, parser code, prediction parsing, error types, and compatibility aliases.
 - `tm-runtime` exposes the same public API from `lib.rs` while separating the actor handle, runtime state/types, effects, prediction settlement helpers, and summary/history formatting.
 
+## Runtime ownership and effects
+
+All mutable mining state remains owned by one `tm-runtime` actor. Transport,
+polling, and watcher tasks submit typed commands and receive snapshots or
+effect decisions; they never retain a second mutable copy. The reducer
+deduplicates external mutation identifiers before returning effects. Network
+mutations are executed once by `tm-app` after the actor decision and are never
+silently replayed.
+
+Application orchestration uses contexts only where values share a lifecycle:
+EventSub, PubSub, runtime-effect execution, minute watching, and offline streak
+recovery. Startup, canary, and CLI paths are split by preparation, decision,
+and execution responsibility. Flat serialized config structures and exhaustive
+state/watch reducers stay explicit because wrapping them solely to satisfy a
+line or boolean count would obscure the contract.
+
+Production workspace code forbids `unsafe`. CI also rejects production
+`unwrap`, `expect`, panic, `todo!`, and `unimplemented!` shortcuts, except for
+narrowly documented compile-time invariants such as fixed regex literals and
+the built-in default-config schema. Test fixtures may still fail loudly.
+
 Quality gates are handled by `.github/workflows/ci.yml`; Docker image validation and publishing remain in the multiarch workflow. Automatic self-update is intentionally absent: releases are source- and digest-pinned.

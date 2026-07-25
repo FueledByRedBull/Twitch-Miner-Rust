@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "environment": "github-actions-ubuntu-latest-x64",
+  "source_revision": "2b9a01f1d4e89a0c5f63e7dbf4ab6958a38cf352",
+  "host": {
+    "hardware_class": "github-actions-hosted",
+    "operating_system": "linux",
+    "architecture": "x86_64"
+  },
+  "measurements": {
+    "workload_200_latency_p95_micros": 10002.0,
+    "workload_200_throughput_commands_per_second": 278269.0985346682,
+    "snapshot_1000_clone_p95_micros": 701.0,
+    "process_peak_working_set_mb": 13.875
+  },
+  "tolerances": {
+    "latency_max_multiplier": 1.75,
+    "throughput_min_multiplier": 0.6,
+    "rss_max_multiplier": 1.5
+  }
+}

@@ -21,7 +21,7 @@ pub struct RuntimeHandle {
     metrics: Arc<RuntimeMetrics>,
 }
 
-const RUNTIME_QUEUE_CAPACITY: u64 = 64;
+const RUNTIME_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Default)]
 pub struct RuntimeMetrics {
@@ -43,10 +43,12 @@ pub struct RuntimeMetricsSnapshot {
 
 impl RuntimeMetrics {
     fn record_enqueued(&self, available_capacity: usize) {
-        let depth = RUNTIME_QUEUE_CAPACITY
-            .saturating_sub(available_capacity as u64)
+        let capacity = u64::try_from(RUNTIME_QUEUE_CAPACITY).unwrap_or(u64::MAX);
+        let available = u64::try_from(available_capacity).unwrap_or(u64::MAX);
+        let depth = capacity
+            .saturating_sub(available)
             .saturating_add(1)
-            .min(RUNTIME_QUEUE_CAPACITY);
+            .min(capacity);
         self.max_queue_depth.fetch_max(depth, Ordering::Relaxed);
     }
 
@@ -155,171 +157,252 @@ enum RuntimeCommand {
     },
 }
 
-#[allow(clippy::too_many_lines)]
-pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
-    let (sender, mut receiver) = mpsc::channel(64);
-    let (state_revision_tx, state_revision_rx) = watch::channel(0_u64);
-    let metrics = Arc::new(RuntimeMetrics::default());
-    let actor_metrics = Arc::clone(&metrics);
-    tokio::spawn(async move {
-        let RuntimeSession { summary, mut state } = session;
-        let mut state_revision = 0_u64;
+struct RuntimeActor {
+    summary: RuntimeSummary,
+    state: RuntimeState,
+    state_revision_tx: watch::Sender<u64>,
+    state_revision: u64,
+    metrics: Arc<RuntimeMetrics>,
+}
+
+impl RuntimeActor {
+    async fn run(mut self, mut receiver: mpsc::Receiver<RuntimeCommand>) {
         while let Some(command) = receiver.recv().await {
-            match command {
-                RuntimeCommand::ApplyEvent {
-                    event,
-                    now,
-                    enqueued_at,
-                    respond_to,
-                } => {
-                    actor_metrics.record_processed(enqueued_at.elapsed());
-                    let application = state.apply_event_with_outcome(&event, now);
-                    if application.changed {
-                        notify_state_change(&state_revision_tx, &mut state_revision);
-                    }
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "ApplyEvent",
-                        respond_to,
-                        application,
-                    ));
+            if !self.handle_command(command) {
+                break;
+            }
+        }
+    }
+
+    fn handle_command(&mut self, command: RuntimeCommand) -> bool {
+        match command {
+            RuntimeCommand::ApplyEvent {
+                event,
+                now,
+                enqueued_at,
+                respond_to,
+            } => self.apply_event(&event, now, enqueued_at, respond_to),
+            RuntimeCommand::SessionSummary {
+                anonymize,
+                now,
+                respond_to,
+            } => Self::reply(
+                "SessionSummary",
+                respond_to,
+                self.state.session_summary(anonymize, now),
+            ),
+            RuntimeCommand::RuntimeSummary { respond_to } => {
+                Self::reply("RuntimeSummary", respond_to, self.summary.clone());
+            }
+            RuntimeCommand::StateSnapshot { respond_to } => {
+                Self::reply("StateSnapshot", respond_to, self.state.clone());
+            }
+            RuntimeCommand::ApplyContext { update, respond_to } => {
+                self.apply_context(&update, respond_to);
+            }
+            RuntimeCommand::ApplyStreamUpdate { update, now } => {
+                self.apply_stream_update(&update, now);
+            }
+            RuntimeCommand::SetDropCampaignEligibility {
+                channel_id,
+                eligible,
+            } => {
+                self.set_drop_campaign_eligibility(&channel_id, eligible);
+            }
+            RuntimeCommand::UpdateStreamerLogin {
+                channel_id,
+                login,
+                respond_to,
+            } => self.update_streamer_login(&channel_id, &login, respond_to),
+            RuntimeCommand::SuspendWatching { channel_id, until } => {
+                if self.state.suspend_watching(&channel_id, until) {
+                    self.notify_state_change();
                 }
-                RuntimeCommand::SessionSummary {
-                    anonymize,
-                    now,
-                    respond_to,
-                } => {
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "SessionSummary",
-                        respond_to,
-                        state.session_summary(anonymize, now),
-                    ));
-                }
-                RuntimeCommand::RuntimeSummary { respond_to } => {
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "RuntimeSummary",
-                        respond_to,
-                        summary.clone(),
-                    ));
-                }
-                RuntimeCommand::StateSnapshot { respond_to } => {
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "StateSnapshot",
-                        respond_to,
-                        state.clone(),
-                    ));
-                }
-                RuntimeCommand::ApplyContext { update, respond_to } => {
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "ApplyContext",
-                        respond_to,
-                        state.apply_context_update(&update),
-                    ));
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::ApplyStreamUpdate { update, now } => {
-                    state.apply_stream_update(&update, now);
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::SetDropCampaignEligibility {
-                    channel_id,
-                    eligible,
-                } => {
-                    state.set_drop_campaign_eligibility(&channel_id, eligible);
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::UpdateStreamerLogin {
-                    channel_id,
-                    login,
-                    respond_to,
-                } => {
-                    let changed = state.update_streamer_login(&channel_id, &login);
-                    if changed {
-                        notify_state_change(&state_revision_tx, &mut state_revision);
-                    }
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "UpdateStreamerLogin",
-                        respond_to,
-                        changed,
-                    ));
-                }
-                RuntimeCommand::SuspendWatching { channel_id, until } => {
-                    if state.suspend_watching(&channel_id, until) {
-                        notify_state_change(&state_revision_tx, &mut state_revision);
-                    }
-                }
-                RuntimeCommand::SetPresence {
-                    channel_id,
-                    online,
-                    now,
-                } => {
-                    state.apply_presence(&channel_id, online, now);
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::SetPresenceChecked {
-                    channel_id,
-                    online,
-                    now,
-                    respond_to,
-                } => {
-                    let changed = state.apply_presence(&channel_id, online, now);
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "SetPresenceChecked",
-                        respond_to,
-                        changed,
-                    ));
-                    if changed {
-                        notify_state_change(&state_revision_tx, &mut state_revision);
-                    }
-                }
-                RuntimeCommand::MarkMinuteWatched { channel_id, now } => {
-                    state.mark_minute_watched(&channel_id, now);
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::MarkWatchStreakRecovered {
-                    channel_id,
+            }
+            RuntimeCommand::SetPresence {
+                channel_id,
+                online,
+                now,
+            } => {
+                self.set_presence(&channel_id, online, now);
+            }
+            RuntimeCommand::SetPresenceChecked {
+                channel_id,
+                online,
+                now,
+                respond_to,
+            } => self.set_presence_checked(&channel_id, online, now, respond_to),
+            RuntimeCommand::MarkMinuteWatched { channel_id, now } => {
+                self.mark_minute_watched(&channel_id, now);
+            }
+            RuntimeCommand::MarkWatchStreakRecovered {
+                channel_id,
+                streak_count,
+                resolved_at,
+                expires_at,
+            } => {
+                self.mark_watch_streak_recovered(
+                    &channel_id,
                     streak_count,
                     resolved_at,
                     expires_at,
-                } => {
-                    if state.mark_watch_streak_recovered(
-                        &channel_id,
-                        streak_count,
-                        resolved_at,
-                        expires_at,
-                    ) {
-                        notify_state_change(&state_revision_tx, &mut state_revision);
-                    }
-                }
-                RuntimeCommand::RecordPredictionPlaced {
-                    event_id,
-                    decision,
-                    deduct_stake,
-                } => {
-                    state.record_prediction_placed(&event_id, &decision, deduct_stake);
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::StopTrackingPrediction {
-                    event_id,
-                    result_type,
-                } => {
-                    state.stop_tracking_prediction(&event_id, &result_type);
-                    notify_state_change(&state_revision_tx, &mut state_revision);
-                }
-                RuntimeCommand::Shutdown {
-                    anonymize,
-                    now,
+                );
+            }
+            RuntimeCommand::RecordPredictionPlaced {
+                event_id,
+                decision,
+                deduct_stake,
+            } => {
+                self.record_prediction_placed(&event_id, &decision, deduct_stake);
+            }
+            RuntimeCommand::StopTrackingPrediction {
+                event_id,
+                result_type,
+            } => {
+                self.stop_tracking_prediction(&event_id, &result_type);
+            }
+            RuntimeCommand::Shutdown {
+                anonymize,
+                now,
+                respond_to,
+            } => {
+                Self::reply(
+                    "Shutdown",
                     respond_to,
-                } => {
-                    log_dropped_runtime_reply(&send_runtime_reply(
-                        "Shutdown",
-                        respond_to,
-                        state.session_summary(anonymize, now),
-                    ));
-                    break;
-                }
+                    self.state.session_summary(anonymize, now),
+                );
+                return false;
             }
         }
-    });
+        true
+    }
+
+    fn apply_event(
+        &mut self,
+        event: &MinerEvent,
+        now: OffsetDateTime,
+        enqueued_at: Instant,
+        respond_to: oneshot::Sender<EventApplication>,
+    ) {
+        self.metrics.record_processed(enqueued_at.elapsed());
+        let application = self.state.apply_event_with_outcome(event, now);
+        if application.changed {
+            self.notify_state_change();
+        }
+        Self::reply("ApplyEvent", respond_to, application);
+    }
+
+    fn update_streamer_login(
+        &mut self,
+        channel_id: &str,
+        login: &str,
+        respond_to: oneshot::Sender<bool>,
+    ) {
+        let changed = self.state.update_streamer_login(channel_id, login);
+        if changed {
+            self.notify_state_change();
+        }
+        Self::reply("UpdateStreamerLogin", respond_to, changed);
+    }
+
+    fn set_presence_checked(
+        &mut self,
+        channel_id: &str,
+        online: bool,
+        now: OffsetDateTime,
+        respond_to: oneshot::Sender<bool>,
+    ) {
+        let changed = self.state.apply_presence(channel_id, online, now);
+        Self::reply("SetPresenceChecked", respond_to, changed);
+        if changed {
+            self.notify_state_change();
+        }
+    }
+
+    fn apply_context(
+        &mut self,
+        update: &ContextUpdate,
+        respond_to: oneshot::Sender<Vec<RuntimeEffect>>,
+    ) {
+        let effects = self.state.apply_context_update(update);
+        Self::reply("ApplyContext", respond_to, effects);
+        self.notify_state_change();
+    }
+
+    fn apply_stream_update(&mut self, update: &StreamUpdate, now: OffsetDateTime) {
+        self.state.apply_stream_update(update, now);
+        self.notify_state_change();
+    }
+
+    fn set_drop_campaign_eligibility(&mut self, channel_id: &str, eligible: bool) {
+        self.state
+            .set_drop_campaign_eligibility(channel_id, eligible);
+        self.notify_state_change();
+    }
+
+    fn set_presence(&mut self, channel_id: &str, online: bool, now: OffsetDateTime) {
+        self.state.apply_presence(channel_id, online, now);
+        self.notify_state_change();
+    }
+
+    fn mark_minute_watched(&mut self, channel_id: &str, now: OffsetDateTime) {
+        self.state.mark_minute_watched(channel_id, now);
+        self.notify_state_change();
+    }
+
+    fn mark_watch_streak_recovered(
+        &mut self,
+        channel_id: &str,
+        streak_count: Option<u32>,
+        resolved_at: OffsetDateTime,
+        expires_at: Option<OffsetDateTime>,
+    ) {
+        if self
+            .state
+            .mark_watch_streak_recovered(channel_id, streak_count, resolved_at, expires_at)
+        {
+            self.notify_state_change();
+        }
+    }
+
+    fn record_prediction_placed(
+        &mut self,
+        event_id: &str,
+        decision: &PredictionDecision,
+        deduct_stake: bool,
+    ) {
+        self.state
+            .record_prediction_placed(event_id, decision, deduct_stake);
+        self.notify_state_change();
+    }
+
+    fn stop_tracking_prediction(&mut self, event_id: &str, result_type: &str) {
+        self.state.stop_tracking_prediction(event_id, result_type);
+        self.notify_state_change();
+    }
+
+    fn notify_state_change(&mut self) {
+        notify_state_change(&self.state_revision_tx, &mut self.state_revision);
+    }
+
+    fn reply<T>(command: &'static str, respond_to: oneshot::Sender<T>, value: T) {
+        log_dropped_runtime_reply(&send_runtime_reply(command, respond_to, value));
+    }
+}
+
+pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
+    let (sender, receiver) = mpsc::channel(RUNTIME_QUEUE_CAPACITY);
+    let (state_revision_tx, state_revision_rx) = watch::channel(0_u64);
+    let metrics = Arc::new(RuntimeMetrics::default());
+    let RuntimeSession { summary, state } = session;
+    let actor = RuntimeActor {
+        summary,
+        state,
+        state_revision_tx,
+        state_revision: 0,
+        metrics: Arc::clone(&metrics),
+    };
+    tokio::spawn(actor.run(receiver));
     RuntimeHandle {
         sender,
         state_revision: state_revision_rx,

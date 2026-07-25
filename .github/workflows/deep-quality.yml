@@ -1,0 +1,182 @@
+name: Deep Quality
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  critical-branch-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # main
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Measure critical-crate branch coverage
+        run: >-
+          cargo +nightly-2026-07-01 llvm-cov
+          --branch
+          --package tm-domain
+          --package tm-pubsub
+          --package tm-runtime
+          --all-features
+          --locked
+          --json
+          --output-path critical-branch-coverage.json
+      - name: Enforce critical-crate branch coverage
+        shell: pwsh
+        run: >-
+          ./scripts/verify-branch-coverage.ps1
+          -ReportPath critical-branch-coverage.json
+          -MinimumPercent 60
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: critical-branch-coverage
+          path: critical-branch-coverage.json
+          if-no-files-found: error
+
+  replay-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Measure aggregated replay
+        shell: pwsh
+        run: >-
+          ./scripts/measure-replay.ps1
+          -Iterations 5
+          -WorkloadRepetitions 10
+          -HardwareClass github-actions-hosted
+          -OutputPath replay-performance-report.json
+      - name: Compare stable replay metrics
+        shell: pwsh
+        run: >-
+          ./scripts/compare-replay-baseline.ps1
+          -ReportPath replay-performance-report.json
+          -BaselinePath benchmarks/replay-baseline.github-ubuntu-x64.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: replay-performance-report
+          path: replay-performance-report.json
+          if-no-files-found: error
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz transport parsers
+        run: cargo +nightly-2026-07-01 fuzz run transport_parsers -- -max_total_time=120 -max_len=65536
+      - name: Fuzz structured input parsers
+        run: cargo +nightly-2026-07-01 fuzz run structured_input -- -max_total_time=120 -max_len=65536
+
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runtime-reducers
+            package: tm-runtime
+            file: ''
+            filter: ' in (apply_pubsub_gain|update_history|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id)$'
+            # Equality still assigns the same boundary value, so these three mutants are equivalent.
+            exclude: '(summary\.rs:(17:20: replace < with <=|20:35: replace < with (==|<=))| in RuntimeState::from_targets$)'
+          - name: app-pubsub-retry
+            package: tm-app
+            file: crates/tm-app/src/pubsub.rs
+            filter: ' in pubsub_reconnect_delay$'
+            exclude: 'a^'
+          - name: app-eventsub-retry
+            package: tm-app
+            file: crates/tm-app/src/eventsub.rs
+            filter: ' in eventsub_reconnect_delay$'
+            exclude: 'a^'
+          - name: app-session-retry
+            package: tm-app
+            file: crates/tm-app/src/bootstrap.rs
+            filter: ' in saved_session_retry_delay$'
+            exclude: 'a^'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - name: Install pinned cargo-mutants
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: List selected mutants
+        shell: bash
+        run: |
+          args=(
+            --package "$MUTANT_PACKAGE"
+            --list
+            --re "$MUTANT_FILTER"
+            --exclude-re "$MUTANT_EXCLUDE"
+          )
+          if [[ -n "$MUTANT_FILE" ]]; then
+            args+=(--file "$MUTANT_FILE")
+          fi
+          cargo mutants "${args[@]}" | tee selected-mutants.txt
+          if [[ ! -s selected-mutants.txt ]]; then
+            echo "No mutants selected; refusing to pass an empty mutation shard." >&2
+            exit 1
+          fi
+        env:
+          MUTANT_PACKAGE: ${{ matrix.package }}
+          MUTANT_FILE: ${{ matrix.file }}
+          MUTANT_FILTER: ${{ matrix.filter }}
+          MUTANT_EXCLUDE: ${{ matrix.exclude }}
+      - name: Mutate critical reducers and retry policy
+        shell: bash
+        run: |
+          args=(
+            --package "$MUTANT_PACKAGE"
+            --timeout 60
+            --jobs 2
+            --re "$MUTANT_FILTER"
+            --exclude-re "$MUTANT_EXCLUDE"
+          )
+          if [[ -n "$MUTANT_FILE" ]]; then
+            args+=(--file "$MUTANT_FILE")
+          fi
+          cargo mutants "${args[@]}"
+        env:
+          MUTANT_PACKAGE: ${{ matrix.package }}
+          MUTANT_FILE: ${{ matrix.file }}
+          MUTANT_FILTER: ${{ matrix.filter }}
+          MUTANT_EXCLUDE: ${{ matrix.exclude }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: bounded-mutation-report-${{ matrix.name }}
+          path: |
+            mutants.out
+            selected-mutants.txt
+          if-no-files-found: warn

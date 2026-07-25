@@ -6,7 +6,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use tm_config::resolve_app_paths_from_env;
+use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
 use tm_twitch::TwitchClient;
 
@@ -55,6 +55,8 @@ const MINUTE_WATCHER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
+// These booleans are the stable, mutually constrained flat CLI surface consumed
+// by health checks and deployment scripts, not independent runtime policy.
 #[allow(clippy::struct_excessive_bools)]
 #[command(version = build_info::VERSION_BANNER)]
 struct Cli {
@@ -77,62 +79,93 @@ struct Cli {
 }
 
 #[tokio::main]
-#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    run_cli(cli).await
+}
+
+async fn run_cli(cli: Cli) -> Result<()> {
     let has_override = has_override(&cli);
-    let requested_paths = resolve_app_paths_from_env(cli.config, cli.data_dir)?;
-    if cli.health {
-        return status::check_health(&requested_paths.work_dir);
-    }
-    if cli.status {
-        return status::print_status(&requested_paths.work_dir);
-    }
-    if cli.check_config {
-        let result = tm_config::preview_config(&requested_paths.config_path).and_then(|preview| {
-            tm_config::validate_config(&preview.config)?;
-            Ok(preview)
-        });
-        let preview = match result {
-            Ok(preview) => preview,
-            Err(error) if cli.json => {
-                println!(
-                    "{}",
-                    serde_json::json!({"valid": false, "error": error.to_string()})
-                );
-                return Err(error.into());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if cli.json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "valid": true,
-                    "schema_version": preview.config.config_schema_version,
-                    "migration_required": preview.migration_required
-                })
-            );
-        } else {
-            println!(
-                "config valid; schema_version={}; migration_required={}",
-                preview.config.config_schema_version, preview.migration_required
-            );
-        }
-        return Ok(());
-    }
-    if let Some(destination) = cli.support_bundle.as_deref() {
-        status::write_support_bundle(&requested_paths.work_dir, destination)?;
-        println!("support bundle written to {}", destination.display());
-        return Ok(());
+    let requested_paths = resolve_app_paths_from_env(cli.config.clone(), cli.data_dir.clone())?;
+    if let Some(result) = run_immediate_command(&cli, &requested_paths) {
+        return result;
     }
     set_console_title(DEFAULT_CONSOLE_TITLE);
     clear_console();
 
-    let loaded_config = if cli.canary {
-        preview_config_with_fallback(&requested_paths, has_override)?
+    let loaded_config = load_active_config(&cli, &requested_paths, has_override)?;
+    if cli.canary {
+        let http_client = build_http_client(loaded_config.config.disable_ssl_cert_verification)?;
+        return canary::run_read_only_canary(
+            &loaded_config.config,
+            &loaded_config.active_paths.work_dir,
+            http_client,
+        )
+        .await;
+    }
+    run_prepared_miner(prepare_miner(loaded_config).await?, requested_paths).await
+}
+
+fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
+    if cli.health {
+        return Some(status::check_health(&paths.work_dir));
+    }
+    if cli.status {
+        return Some(status::print_status(&paths.work_dir));
+    }
+    if cli.check_config {
+        return Some(check_config(&paths.config_path, cli.json));
+    }
+    cli.support_bundle.as_deref().map(|destination| {
+        status::write_support_bundle(&paths.work_dir, destination)?;
+        println!("support bundle written to {}", destination.display());
+        Ok(())
+    })
+}
+
+fn check_config(path: &std::path::Path, json: bool) -> Result<()> {
+    let result = tm_config::preview_config(path).and_then(|preview| {
+        tm_config::validate_config(&preview.config)?;
+        Ok(preview)
+    });
+    let preview = match result {
+        Ok(preview) => preview,
+        Err(error) if json => {
+            println!(
+                "{}",
+                serde_json::json!({"valid": false, "error": error.to_string()})
+            );
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "valid": true,
+                "schema_version": preview.config.config_schema_version,
+                "migration_required": preview.migration_required
+            })
+        );
     } else {
-        load_config_with_fallback(&requested_paths, has_override)?
+        println!(
+            "config valid; schema_version={}; migration_required={}",
+            preview.config.config_schema_version, preview.migration_required
+        );
+    }
+    Ok(())
+}
+
+fn load_active_config(
+    cli: &Cli,
+    requested_paths: &AppPaths,
+    has_override: bool,
+) -> Result<LoadedConfig> {
+    let loaded_config = if cli.canary {
+        preview_config_with_fallback(requested_paths, has_override)?
+    } else {
+        load_config_with_fallback(requested_paths, has_override)?
     };
     let LoadedConfig {
         config,
@@ -156,12 +189,30 @@ async fn main() -> Result<()> {
         timezone: config.timezone.clone(),
     })?;
     log_timezone_validation(timezone_validation.as_ref());
+    Ok(LoadedConfig {
+        config,
+        active_paths,
+    })
+}
 
-    if cli.canary {
-        let http_client = build_http_client(config.disable_ssl_cert_verification)?;
-        return canary::run_read_only_canary(&config, &active_paths.work_dir, http_client).await;
-    }
+struct PreparedMiner {
+    config: ConfigFile,
+    active_paths: AppPaths,
+    observability: observability::AppObservability,
+    session_id: String,
+    auth_token: String,
+    user_id: Option<String>,
+    prediction_eventsub_authorized: bool,
+    twitch: Arc<TwitchClient>,
+    streak_cache: StreakCache,
+    state: tm_runtime::RuntimeState,
+}
 
+async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
+    let LoadedConfig {
+        config,
+        active_paths,
+    } = loaded_config;
     let observability = build_observability(&config)?;
     tracing::info!(
         operation = "run",
@@ -232,6 +283,33 @@ async fn main() -> Result<()> {
         "{}",
         observability.loaded_streamers_message(state.streamers.len(), bootstrap_started.elapsed())
     );
+    Ok(PreparedMiner {
+        config,
+        active_paths,
+        observability,
+        session_id,
+        auth_token,
+        user_id,
+        prediction_eventsub_authorized,
+        twitch,
+        streak_cache,
+        state,
+    })
+}
+
+async fn run_prepared_miner(prepared: PreparedMiner, requested_paths: AppPaths) -> Result<()> {
+    let PreparedMiner {
+        config,
+        active_paths,
+        observability,
+        session_id,
+        auth_token,
+        user_id,
+        prediction_eventsub_authorized,
+        twitch,
+        streak_cache,
+        state,
+    } = prepared;
     let runtime = tm_runtime::spawn_runtime_state(state);
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);

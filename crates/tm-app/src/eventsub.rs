@@ -5,7 +5,7 @@ use tm_pubsub::{EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
 use tm_twitch::{TwitchClient, TwitchFailureClass};
 
 use crate::observability::AppObservability;
-use crate::runtime_effects::execute_runtime_effects;
+use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
@@ -14,151 +14,188 @@ const EVENTSUB_RECONNECT_MAX_SECONDS: u64 = 5 * 60;
 const PRESENCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const PRESENCE_POLL_CONCURRENCY: usize = 4;
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) struct EventSubTaskContext {
+    pub(crate) runtime: tm_runtime::RuntimeHandle,
+    pub(crate) twitch: Arc<TwitchClient>,
+    pub(crate) auth_token: String,
+    pub(crate) tracked_streamers: Vec<tm_domain::Streamer>,
+    pub(crate) persistent_user_id: String,
+    pub(crate) prediction_eventsub_authorized: bool,
+    pub(crate) observability: AppObservability,
+    pub(crate) health: HealthTracker,
+    pub(crate) fallback_tx: tokio::sync::watch::Sender<Vec<usize>>,
+}
+
+impl EventSubTaskContext {
+    fn runtime_effect_context(&self) -> RuntimeEffectContext {
+        RuntimeEffectContext::new(
+            self.runtime.clone(),
+            Arc::clone(&self.twitch),
+            self.persistent_user_id.clone(),
+            self.observability.clone(),
+            self.health.clone(),
+        )
+    }
+}
+
 pub(crate) fn spawn_eventsub_loop(
     stop: tokio::sync::watch::Receiver<bool>,
-    runtime: tm_runtime::RuntimeHandle,
-    twitch: Arc<TwitchClient>,
-    auth_token: String,
-    tracked_streamers: Vec<tm_domain::Streamer>,
-    persistent_user_id: String,
-    prediction_eventsub_authorized: bool,
-    observability: AppObservability,
-    health: HealthTracker,
-    fallback_tx: tokio::sync::watch::Sender<Vec<usize>>,
+    context: EventSubTaskContext,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut stop = stop;
-        let mut failure_attempt = 0_u32;
-        loop {
-            if *stop.borrow() {
-                break;
-            }
-            let _ = fallback_tx.send((0..tracked_streamers.len()).collect());
+    tokio::spawn(run_eventsub_loop(stop, context))
+}
 
-            let client = EventSubClient::new(EventSubClientSettings {
-                client_id: tm_twitch::CLIENT_ID.to_string(),
-                auth_token: auth_token.clone(),
-                websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
-                subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
-                allow_prediction_scope_fallback: true,
-                source_policy: tm_pubsub::TransportSourcePolicy::viewer_compatibility(),
-                authorized_prediction_broadcaster_id: prediction_eventsub_authorized
-                    .then(|| persistent_user_id.clone()),
-                verify_subscriptions: false,
-                http_client: reqwest::Client::new(),
-            });
-            let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
-            let connect = tokio::spawn({
-                let tracked_streamers = tracked_streamers.clone();
-                async move { client.connect_and_listen(&tracked_streamers, sender).await }
-            });
-            tokio::pin!(connect);
-            let connection_result = loop {
-                tokio::select! {
-                    changed = stop.changed() => {
-                        if changed.is_err() || *stop.borrow() {
-                            connect.as_mut().abort();
-                            let _ = connect.as_mut().await;
-                            return;
-                        }
-                    }
-                    message = receiver.recv() => {
-                        let Some(message) = message else {
-                            continue;
-                        };
-                        if matches!(&message, EventSubConnectionEvent::Heartbeat) {
-                            failure_attempt = 0;
-                        }
-                        update_presence_fallback(&fallback_tx, &message);
-                        if handle_eventsub_message(
-                            &runtime,
-                            &twitch,
-                            &persistent_user_id,
-                            &observability,
-                            &health,
-                            message,
-                        ).await {
-                            connect.as_mut().abort();
-                            let _ = connect.await;
-                            return;
-                        }
-                    }
-                    result = &mut connect => {
-                        break result;
-                    }
-                }
-            };
-            while let Ok(message) = receiver.try_recv() {
-                update_presence_fallback(&fallback_tx, &message);
-                if handle_eventsub_message(
-                    &runtime,
-                    &twitch,
-                    &persistent_user_id,
-                    &observability,
-                    &health,
-                    message,
-                )
-                .await
-                {
-                    return;
-                }
-            }
-            match connection_result {
-                Ok(Ok(())) => {
-                    failure_attempt = failure_attempt.saturating_add(1);
-                    health.failure("eventsub", "connection-closed");
-                    tracing::warn!(
-                        task = "eventsub",
-                        error_class = "connection-closed",
-                        failure_attempt,
-                        "EventSub connection closed; reconnecting"
-                    );
-                }
-                Ok(Err(EventSubError::Revoked { .. })) => {
-                    failure_attempt = failure_attempt.saturating_add(1);
-                    health.failure("eventsub", "revoked");
-                    tracing::error!(
-                        task = "eventsub",
-                        error_class = "revoked",
-                        "EventSub subscription revoked; retrying after backoff"
-                    );
-                }
-                Ok(Err(error)) => {
-                    failure_attempt = failure_attempt.saturating_add(1);
-                    health.failure("eventsub", classify_eventsub_error(&error));
-                    tracing::warn!(
-                        task = "eventsub",
-                        error_class = classify_eventsub_error(&error),
-                        failure_attempt,
-                        "EventSub connection failed; reconnecting"
-                    );
-                }
-                Err(error) if error.is_cancelled() => return,
-                Err(error) => {
-                    failure_attempt = failure_attempt.saturating_add(1);
-                    health.failure("eventsub", "connection-task");
-                    tracing::error!(
-                        task = "eventsub",
-                        error_class = "connection-task",
-                        failure_attempt,
-                        %error,
-                        "EventSub task failed; reconnecting"
-                    );
-                }
-            }
-
-            let delay = eventsub_reconnect_delay(failure_attempt);
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        break;
-                    }
-                }
-                () = tokio::time::sleep(delay) => {}
-            }
+async fn run_eventsub_loop(
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    context: EventSubTaskContext,
+) {
+    let mut failure_attempt = 0_u32;
+    loop {
+        if *stop.borrow() {
+            break;
         }
+        let _ = context
+            .fallback_tx
+            .send((0..context.tracked_streamers.len()).collect());
+        let Some(connection_result) = listen_once(&mut stop, &context, &mut failure_attempt).await
+        else {
+            break;
+        };
+        if !record_connection_result(connection_result, &context.health, &mut failure_attempt) {
+            break;
+        }
+        if wait_to_reconnect(&mut stop, failure_attempt).await {
+            break;
+        }
+    }
+}
+
+async fn listen_once(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    context: &EventSubTaskContext,
+    failure_attempt: &mut u32,
+) -> Option<Result<Result<(), EventSubError>, tokio::task::JoinError>> {
+    let client = build_eventsub_client(context);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+    let connect = tokio::spawn({
+        let tracked_streamers = context.tracked_streamers.clone();
+        async move { client.connect_and_listen(&tracked_streamers, sender).await }
+    });
+    tokio::pin!(connect);
+    let connection_result = loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    connect.as_mut().abort();
+                    let _ = connect.as_mut().await;
+                    return None;
+                }
+            }
+            message = receiver.recv() => {
+                let Some(message) = message else {
+                    continue;
+                };
+                if matches!(&message, EventSubConnectionEvent::Heartbeat) {
+                    *failure_attempt = 0;
+                }
+                if process_eventsub_message(context, message).await {
+                    connect.as_mut().abort();
+                    let _ = connect.await;
+                    return None;
+                }
+            }
+            result = &mut connect => break result,
+        }
+    };
+    while let Ok(message) = receiver.try_recv() {
+        if process_eventsub_message(context, message).await {
+            return None;
+        }
+    }
+    Some(connection_result)
+}
+
+fn build_eventsub_client(context: &EventSubTaskContext) -> EventSubClient {
+    EventSubClient::new(EventSubClientSettings {
+        client_id: tm_twitch::CLIENT_ID.to_string(),
+        auth_token: context.auth_token.clone(),
+        websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
+        subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
+        allow_prediction_scope_fallback: true,
+        source_policy: tm_pubsub::TransportSourcePolicy::viewer_compatibility(),
+        authorized_prediction_broadcaster_id: context
+            .prediction_eventsub_authorized
+            .then(|| context.persistent_user_id.clone()),
+        verify_subscriptions: false,
+        http_client: reqwest::Client::new(),
     })
+}
+
+async fn process_eventsub_message(
+    context: &EventSubTaskContext,
+    message: EventSubConnectionEvent,
+) -> bool {
+    update_presence_fallback(&context.fallback_tx, &message);
+    handle_eventsub_message(context, message).await
+}
+
+fn record_connection_result(
+    connection_result: Result<Result<(), EventSubError>, tokio::task::JoinError>,
+    health: &HealthTracker,
+    failure_attempt: &mut u32,
+) -> bool {
+    *failure_attempt = failure_attempt.saturating_add(1);
+    match connection_result {
+        Ok(Ok(())) => {
+            health.failure("eventsub", "connection-closed");
+            tracing::warn!(
+                task = "eventsub",
+                error_class = "connection-closed",
+                failure_attempt = *failure_attempt,
+                "EventSub connection closed; reconnecting"
+            );
+        }
+        Ok(Err(EventSubError::Revoked { .. })) => {
+            health.failure("eventsub", "revoked");
+            tracing::error!(
+                task = "eventsub",
+                error_class = "revoked",
+                "EventSub subscription revoked; retrying after backoff"
+            );
+        }
+        Ok(Err(error)) => {
+            health.failure("eventsub", classify_eventsub_error(&error));
+            tracing::warn!(
+                task = "eventsub",
+                error_class = classify_eventsub_error(&error),
+                failure_attempt = *failure_attempt,
+                "EventSub connection failed; reconnecting"
+            );
+        }
+        Err(error) if error.is_cancelled() => return false,
+        Err(error) => {
+            health.failure("eventsub", "connection-task");
+            tracing::error!(
+                task = "eventsub",
+                error_class = "connection-task",
+                failure_attempt = *failure_attempt,
+                %error,
+                "EventSub task failed; reconnecting"
+            );
+        }
+    }
+    true
+}
+
+async fn wait_to_reconnect(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    failure_attempt: u32,
+) -> bool {
+    let delay = eventsub_reconnect_delay(failure_attempt);
+    tokio::select! {
+        changed = stop.changed() => changed.is_err() || *stop.borrow(),
+        () = tokio::time::sleep(delay) => false,
+    }
 }
 
 pub(crate) fn spawn_eventsub_presence_poll_loop(
@@ -332,32 +369,36 @@ fn classify_presence_poll_error(error: TwitchFailureClass) -> &'static str {
 }
 
 async fn handle_eventsub_message(
-    runtime: &tm_runtime::RuntimeHandle,
-    twitch: &Arc<TwitchClient>,
-    persistent_user_id: &str,
-    observability: &AppObservability,
-    health: &HealthTracker,
+    context: &EventSubTaskContext,
     message: EventSubConnectionEvent,
 ) -> bool {
     match message {
         EventSubConnectionEvent::Setup(report) => {
-            health.record_eventsub_setup(*report);
-            health.success("eventsub");
+            context.health.record_eventsub_setup(*report);
+            context.health.success("eventsub");
         }
-        EventSubConnectionEvent::Heartbeat => health.success("eventsub"),
+        EventSubConnectionEvent::Heartbeat => context.health.success("eventsub"),
         EventSubConnectionEvent::Event(event) => {
             let log_event = (*event).clone();
             let received_at = Instant::now();
-            match runtime.apply_event_with_outcome(*event, time_now()).await {
+            match context
+                .runtime
+                .apply_event_with_outcome(*event, time_now())
+                .await
+            {
                 Ok(application) => {
-                    runtime
+                    context
+                        .runtime
                         .metrics_handle()
                         .record_transport_latency(received_at.elapsed());
-                    health.success("eventsub");
+                    context.health.success("eventsub");
                     if application.changed {
-                        if let Err(error) =
-                            crate::pubsub::log_pubsub_event(runtime, observability, &log_event)
-                                .await
+                        if let Err(error) = crate::pubsub::log_pubsub_event(
+                            &context.runtime,
+                            &context.observability,
+                            &log_event,
+                        )
+                        .await
                         {
                             tracing::warn!(
                                 task = "eventsub",
@@ -367,15 +408,9 @@ async fn handle_eventsub_message(
                             );
                         }
                     }
-                    if let Err(error) = execute_runtime_effects(
-                        runtime,
-                        twitch,
-                        persistent_user_id,
-                        application.effects,
-                        observability,
-                        health.clone(),
-                    )
-                    .await
+                    let effect_context = context.runtime_effect_context();
+                    if let Err(error) =
+                        execute_runtime_effects(&effect_context, application.effects).await
                     {
                         tracing::warn!(
                             task = "eventsub",
@@ -386,7 +421,7 @@ async fn handle_eventsub_message(
                     }
                 }
                 Err(error) => {
-                    health.failure("eventsub", "event-application");
+                    context.health.failure("eventsub", "event-application");
                     tracing::warn!(
                         task = "eventsub",
                         error_class = "event-application",
@@ -447,17 +482,17 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use crate::observability::AppObservability;
+    use crate::observability::{AppObservability, AppObservabilitySettings};
     use crate::status::HealthTracker;
 
     fn test_observability() -> anyhow::Result<AppObservability> {
         Ok(AppObservability::new(
             None,
             DiscordClient::new(Duration::from_secs(1))?,
-            false,
-            false,
-            false,
-            true,
+            AppObservabilitySettings {
+                show_game: true,
+                ..AppObservabilitySettings::default()
+            },
         ))
     }
 
@@ -491,6 +526,17 @@ mod tests {
     fn reconnect_backoff_is_bounded() {
         assert_eq!(eventsub_reconnect_delay(1).as_secs(), 5);
         assert_eq!(eventsub_reconnect_delay(20).as_secs(), 300);
+    }
+
+    #[test]
+    fn reconnect_backoff_is_monotonic_and_capped_for_all_attempts() {
+        let mut previous = Duration::ZERO;
+        for attempt in 1..=100 {
+            let delay = eventsub_reconnect_delay(attempt);
+            assert!(delay >= previous);
+            assert!(delay <= Duration::from_secs(300));
+            previous = delay;
+        }
     }
 
     #[test]

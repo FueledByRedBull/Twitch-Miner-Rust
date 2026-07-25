@@ -72,7 +72,6 @@ pub(crate) async fn load_targets(
         .context("load followers")
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn bootstrap_streamer(
     streamer: &mut Streamer,
     twitch: &TwitchClient,
@@ -80,6 +79,16 @@ pub(crate) async fn bootstrap_streamer(
     started_at: tm_runtime::RuntimeTime,
     observability: &AppObservability,
     streak_cache: &mut StreakCache,
+) -> Result<()> {
+    bootstrap_channel_context(streamer, twitch, user_id, observability).await?;
+    bootstrap_presence(streamer, twitch, started_at, observability, streak_cache).await
+}
+
+async fn bootstrap_channel_context(
+    streamer: &mut Streamer,
+    twitch: &TwitchClient,
+    user_id: Option<&str>,
+    observability: &AppObservability,
 ) -> Result<()> {
     streamer.channel_id = twitch
         .fetch_channel_id(&streamer.username)
@@ -117,6 +126,16 @@ pub(crate) async fn bootstrap_streamer(
         apply_context_to_streamer(streamer, &context);
     }
 
+    Ok(())
+}
+
+async fn bootstrap_presence(
+    streamer: &mut Streamer,
+    twitch: &TwitchClient,
+    started_at: tm_runtime::RuntimeTime,
+    observability: &AppObservability,
+    streak_cache: &mut StreakCache,
+) -> Result<()> {
     let is_live = twitch
         .is_stream_live(&streamer.channel_id)
         .await
@@ -124,77 +143,7 @@ pub(crate) async fn bootstrap_streamer(
     streamer.presence_known = true;
     streamer.is_online = is_live;
     if is_live {
-        streamer.online_at = Some(started_at);
-        streamer.offline_at = None;
-        let info = twitch
-            .fetch_stream_info(&streamer.username)
-            .await
-            .with_context(|| format!("load stream info for {}", streamer.username))?;
-        let stream = streamer
-            .stream
-            .get_or_insert_with(tm_domain::Stream::default);
-        stream.stream_up_at = Some(started_at);
-        stream.update(
-            &info.id,
-            &info.title,
-            Game::from_name(&info.game_name),
-            &info.tags,
-            info.viewers_count,
-            tm_twitch::DROP_ID,
-            started_at,
-        );
-        if streamer.settings.watch_streak {
-            match twitch
-                .fetch_watch_streak_milestone(&streamer.channel_id)
-                .await
-            {
-                Ok(Some(milestone)) => {
-                    streak_cache.record_milestone(
-                        &streamer.channel_id,
-                        milestone.value,
-                        milestone.achievement_timestamp,
-                        milestone.expires_at,
-                        started_at,
-                    );
-                    stream.watch_streak_count = milestone.value;
-                    stream.watch_streak_resolved_at = Some(milestone.achievement_timestamp);
-                    stream.watch_streak_expires_at = milestone.expires_at;
-                    if info.created_at.is_some_and(|created_at| {
-                        milestone.achievement_timestamp >= created_at
-                            && milestone
-                                .expires_at
-                                .is_none_or(|expires_at| expires_at > started_at)
-                    }) {
-                        stream.watch_streak_missing = false;
-                    }
-                }
-                Ok(None) => {
-                    streak_cache.apply_to_stream(
-                        &streamer.channel_id,
-                        stream,
-                        info.created_at,
-                        started_at,
-                    );
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        failure_class = ?error.failure_class(),
-                        "watch streak startup reconciliation unavailable"
-                    );
-                    streak_cache.apply_to_stream(
-                        &streamer.channel_id,
-                        stream,
-                        info.created_at,
-                        started_at,
-                    );
-                }
-            }
-        }
-        tracing::info!(
-            operation = "set_online",
-            "{}",
-            observability.online_message(streamer)
-        );
+        bootstrap_online_stream(streamer, twitch, started_at, observability, streak_cache).await?;
     } else {
         streamer.online_at = None;
         streamer.offline_at = Some(started_at);
@@ -206,4 +155,91 @@ pub(crate) async fn bootstrap_streamer(
     }
 
     Ok(())
+}
+
+async fn bootstrap_online_stream(
+    streamer: &mut Streamer,
+    twitch: &TwitchClient,
+    started_at: tm_runtime::RuntimeTime,
+    observability: &AppObservability,
+    streak_cache: &mut StreakCache,
+) -> Result<()> {
+    streamer.online_at = Some(started_at);
+    streamer.offline_at = None;
+    let info = twitch
+        .fetch_stream_info(&streamer.username)
+        .await
+        .with_context(|| format!("load stream info for {}", streamer.username))?;
+    let stream = streamer
+        .stream
+        .get_or_insert_with(tm_domain::Stream::default);
+    stream.stream_up_at = Some(started_at);
+    stream.update(
+        &info.id,
+        &info.title,
+        Game::from_name(&info.game_name),
+        &info.tags,
+        info.viewers_count,
+        tm_twitch::DROP_ID,
+        started_at,
+    );
+    if streamer.settings.watch_streak {
+        reconcile_startup_watch_streak(
+            twitch,
+            &streamer.channel_id,
+            stream,
+            info.created_at,
+            started_at,
+            streak_cache,
+        )
+        .await;
+    }
+    tracing::info!(
+        operation = "set_online",
+        "{}",
+        observability.online_message(streamer)
+    );
+    Ok(())
+}
+
+async fn reconcile_startup_watch_streak(
+    twitch: &TwitchClient,
+    channel_id: &str,
+    stream: &mut tm_domain::Stream,
+    broadcast_created_at: Option<tm_runtime::RuntimeTime>,
+    started_at: tm_runtime::RuntimeTime,
+    streak_cache: &mut StreakCache,
+) {
+    match twitch.fetch_watch_streak_milestone(channel_id).await {
+        Ok(Some(milestone)) => {
+            streak_cache.record_milestone(
+                channel_id,
+                milestone.value,
+                milestone.achievement_timestamp,
+                milestone.expires_at,
+                started_at,
+            );
+            stream.watch_streak_count = milestone.value;
+            stream.watch_streak_resolved_at = Some(milestone.achievement_timestamp);
+            stream.watch_streak_expires_at = milestone.expires_at;
+            if broadcast_created_at.is_some_and(|created_at| {
+                milestone.achievement_timestamp >= created_at
+                    && milestone
+                        .expires_at
+                        .is_none_or(|expires_at| expires_at > started_at)
+            }) {
+                stream.watch_streak_missing = false;
+            }
+        }
+        Ok(None) => {
+            streak_cache.apply_to_stream(channel_id, stream, broadcast_created_at, started_at);
+        }
+        Err(error) => {
+            tracing::debug!(
+                failure_class = ?error.failure_class(),
+                "watch streak startup reconciliation unavailable"
+            );
+            streak_cache.apply_to_stream(channel_id, stream, broadcast_created_at, started_at);
+        }
+    }
 }

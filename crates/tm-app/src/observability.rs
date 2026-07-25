@@ -22,24 +22,31 @@ pub(crate) struct AppObservability {
     show_game: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+// These independent presentation/privacy flags mirror config fields. Named fields avoid
+// positional-boolean mistakes without inventing enums for simple on/off policy.
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct AppObservabilitySettings {
+    pub(crate) anonymize_logs: bool,
+    pub(crate) emoji: bool,
+    pub(crate) show_claimed_bonus: bool,
+    pub(crate) show_game: bool,
+}
+
 impl AppObservability {
-    #[allow(clippy::fn_params_excessive_bools)]
     pub(crate) fn new(
         discord: Option<tm_observability::DiscordWebhook>,
         discord_client: DiscordClient,
-        anonymize_logs: bool,
-        emoji: bool,
-        show_claimed_bonus: bool,
-        show_game: bool,
+        settings: AppObservabilitySettings,
     ) -> Self {
         Self {
             discord,
             discord_client,
-            anonymizer: Arc::new(Mutex::new(Anonymizer::new(anonymize_logs))),
+            anonymizer: Arc::new(Mutex::new(Anonymizer::new(settings.anonymize_logs))),
             pending_tasks: Arc::new(Mutex::new(Vec::new())),
-            emoji,
-            show_claimed_bonus,
-            show_game,
+            emoji: settings.emoji,
+            show_claimed_bonus: settings.show_claimed_bonus,
+            show_game: settings.show_game,
         }
     }
 
@@ -402,10 +409,12 @@ pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservabilit
     Ok(AppObservability::new(
         discord,
         discord_client,
-        config.privacy.anonymize_logs,
-        config.emojis,
-        config.show_claimed_bonus_msg,
-        config.show_game,
+        AppObservabilitySettings {
+            anonymize_logs: config.privacy.anonymize_logs,
+            emoji: config.emojis,
+            show_claimed_bonus: config.show_claimed_bonus_msg,
+            show_game: config.show_game,
+        },
     ))
 }
 
@@ -641,7 +650,7 @@ mod tests {
 
     use super::{
         await_observability_task, privacy_safe_chat_message, privacy_safe_log_path,
-        AppObservability, TracingChatLogger,
+        AppObservability, AppObservabilitySettings, TracingChatLogger,
     };
     use tm_irc::{ChatEventKind, ChatLogger};
     use tm_observability::DiscordClient;
@@ -650,10 +659,10 @@ mod tests {
         Ok(AppObservability::new(
             None,
             DiscordClient::new(Duration::from_secs(1))?,
-            anonymized,
-            false,
-            false,
-            false,
+            AppObservabilitySettings {
+                anonymize_logs: anonymized,
+                ..AppObservabilitySettings::default()
+            },
         ))
     }
 

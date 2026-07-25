@@ -490,14 +490,13 @@ impl TwitchClient {
         loop {
             let mut operation = operations::channel_follows(limit, order);
             if let Some(cursor) = cursor.as_ref() {
-                operation
-                    .variables
-                    .as_object_mut()
-                    .expect("channel follows variables must be an object")
-                    .insert(
-                        "cursor".to_string(),
-                        serde_json::Value::String(cursor.clone()),
-                    );
+                let Some(variables) = operation.variables.as_object_mut() else {
+                    return Err(TwitchClientError::InvalidField("channel follows variables"));
+                };
+                variables.insert(
+                    "cursor".to_string(),
+                    serde_json::Value::String(cursor.clone()),
+                );
             }
 
             let response: FollowersData = self.post_gql_typed(&operation).await?;

@@ -49,6 +49,9 @@ foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.rpi.yml', 'd
 }
 
 $dockerfile = Get-Content -Raw Dockerfile
+if ($dockerfile -notmatch '(?m)^# syntax=docker/dockerfile:[^@\s]+@sha256:[0-9a-f]{64}$') {
+    throw 'Dockerfile frontend must be pinned by immutable digest.'
+}
 if ($dockerfile -notmatch 'HEALTHCHECK') {
     throw 'Dockerfile has no health check.'
 }
@@ -57,6 +60,60 @@ if ($dockerfile -notmatch '(?m)^\s*FROM\s+rust:[^\s@]+@sha256:[0-9a-f]{64}\s+AS\
 }
 if ($dockerfile -notmatch 'cargo install cargo-chef --version \d+\.\d+\.\d+ --locked') {
     throw 'Dockerfile cargo-chef install must use an explicit locked version.'
+}
+if ($dockerfile -notmatch 'snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z' -or
+    $dockerfile -notmatch 'musl-tools=\d+\.\d+\.\d+-\d+' -or
+    $dockerfile -notmatch 'cargo chef cook --locked') {
+    throw 'Dockerfile system and Cargo Chef inputs must be immutable and locked.'
+}
+
+$ciWorkflow = Get-Content -Raw .github/workflows/ci.yml
+if ($ciWorkflow -notmatch 'cargo-deny@\d+\.\d+\.\d+' -or
+    $ciWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+') {
+    throw 'CI analysis executables must use explicit versions.'
+}
+
+$deepQualityWorkflow = Get-Content -Raw .github/workflows/deep-quality.yml
+if ($deepQualityWorkflow -notmatch 'nightly-\d{4}-\d{2}-\d{2}' -or
+    $deepQualityWorkflow -notmatch 'cargo-fuzz --version \d+\.\d+\.\d+ --locked' -or
+    $deepQualityWorkflow -notmatch 'cargo-mutants --version \d+\.\d+\.\d+ --locked' -or
+    $deepQualityWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+' -or
+    $deepQualityWorkflow -notmatch '--branch' -or
+    $deepQualityWorkflow -notmatch 'verify-branch-coverage\.ps1' -or
+    $deepQualityWorkflow -notmatch 'compare-replay-baseline\.ps1') {
+    throw 'Deep quality tools, nightly, coverage, and replay comparison must be explicitly pinned.'
+}
+if (-not (Test-Path -LiteralPath 'fuzz/Cargo.lock' -PathType Leaf) -or
+    -not (Test-Path -LiteralPath 'fuzz/Cargo.toml' -PathType Leaf)) {
+    throw 'The isolated fuzz workspace must retain its own manifest and lockfile.'
+}
+
+$sentinelPath = Join-Path (Resolve-Path -LiteralPath '.').Path "offline-bundle-validate-only-sentinel-$PID.txt"
+$sentinelContent = 'must-not-be-overwritten'
+try {
+    Set-Content -LiteralPath $sentinelPath -Value $sentinelContent -NoNewline
+    $rejected = $false
+    try {
+        & "$PSScriptRoot/create-offline-source-bundle.ps1" `
+            -Revision HEAD `
+            -OutputPath $sentinelPath `
+            -ValidateOnly
+    } catch {
+        if ($_.Exception.Message -notmatch 'ValidateOnly output must remain under target/') {
+            throw
+        }
+        $rejected = $true
+    }
+    if (-not $rejected) {
+        throw 'ValidateOnly accepted an output path outside target/.'
+    }
+    if ((Get-Content -LiteralPath $sentinelPath -Raw) -ne $sentinelContent) {
+        throw 'ValidateOnly modified an output path before rejecting it.'
+    }
+} finally {
+    if (Test-Path -LiteralPath $sentinelPath) {
+        Remove-Item -LiteralPath $sentinelPath -Force
+    }
 }
 
 $releaseProcess = Get-Content -Raw docs/release-process.md

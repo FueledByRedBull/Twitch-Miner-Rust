@@ -9,7 +9,7 @@ pub fn apply_pubsub_gain(streamer: &mut Streamer, earned: i64, reason: &str, bal
     // suppressing a legitimate later equal gain after a prediction stake or other balance move.
     streamer.processed_point_event_keys.clear();
     let previous = streamer.channel_points;
-    let expected = previous + earned;
+    let expected = previous.saturating_add(earned);
     let mut new_balance = expected;
     if earned == 0 && balance != 0 {
         new_balance = balance;
@@ -39,8 +39,8 @@ pub fn update_history(streamer: &mut Streamer, reason: &str, amount: i64) {
         return;
     }
     let entry = streamer.history.entry(reason.to_string()).or_default();
-    entry.count += 1;
-    entry.amount += amount;
+    entry.count = entry.count.saturating_add(1);
+    entry.amount = entry.amount.saturating_add(amount);
     if reason == "WATCH_STREAK" {
         if let Some(stream) = streamer.stream.as_mut() {
             stream.watch_streak_missing = false;

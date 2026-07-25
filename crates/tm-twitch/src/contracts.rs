@@ -4,16 +4,21 @@ use regex::Regex;
 
 use crate::types::TwitchContractError;
 
+// These fixed literals are compiled once and covered by extraction tests. A compile failure is a
+// source defect, not an error reachable from Twitch or user input.
+#[allow(clippy::expect_used)]
 static BUILD_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"window\.__twilightBuildID\s*=\s*"([0-9a-fA-F\-]{36})""#)
         .expect("build id regex must compile")
 });
+#[allow(clippy::expect_used)]
 static SETTINGS_SCRIPT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(https://static\.twitchcdn\.net/config/settings.*?\.js|https://assets\.twitch\.tv/config/settings.*?\.js)",
     )
     .expect("settings script regex must compile")
 });
+#[allow(clippy::expect_used)]
 static SPADE_URL_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""spade_url":"(.*?)""#).expect("spade url regex must compile"));
 
