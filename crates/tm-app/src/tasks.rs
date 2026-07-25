@@ -14,6 +14,7 @@ use crate::eventsub::{
 use crate::minute_watcher::spawn_minute_watcher_loop;
 use crate::observability::AppObservability;
 use crate::pubsub::{spawn_pubsub_loop, PubSubTaskContext};
+use crate::runtime_effects::RuntimeEffectContext;
 use crate::status::HealthTracker;
 use crate::streak_cache::{spawn_streak_cache_loop, StreakCache};
 use crate::streak_recovery::spawn_streak_recovery_loop;
@@ -211,14 +212,16 @@ fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> T
         spawn_eventsub_loop(
             params.stop_rx.clone(),
             EventSubTaskContext {
-                runtime: params.runtime.clone(),
-                twitch: Arc::clone(params.twitch),
+                effects: RuntimeEffectContext::new(
+                    params.runtime.clone(),
+                    Arc::clone(params.twitch),
+                    user_id.clone(),
+                    params.observability.clone(),
+                    params.health.clone(),
+                ),
                 auth_token: params.auth_token.to_string(),
                 tracked_streamers: params.initial_streamers.to_vec(),
-                persistent_user_id: user_id.clone(),
                 prediction_eventsub_authorized: params.prediction_eventsub_authorized,
-                observability: params.observability.clone(),
-                health: params.health.clone(),
                 fallback_tx,
             },
         )
@@ -238,15 +241,17 @@ fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> T
         spawn_pubsub_loop(
             params.stop_rx.clone(),
             PubSubTaskContext {
-                runtime: params.runtime.clone(),
-                twitch: Arc::clone(params.twitch),
+                effects: RuntimeEffectContext::new(
+                    params.runtime.clone(),
+                    Arc::clone(params.twitch),
+                    user_id.clone(),
+                    params.observability.clone(),
+                    params.health.clone(),
+                ),
                 auth_token: params.auth_token.to_string(),
                 user_id: user_id.clone(),
                 username: username.to_string(),
                 tracked_streamers: params.initial_streamers.to_vec(),
-                persistent_user_id: user_id.clone(),
-                observability: params.observability.clone(),
-                health: params.health.clone(),
             },
         )
     });

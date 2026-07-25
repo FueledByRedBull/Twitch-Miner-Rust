@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,7 +9,6 @@ use tm_observability::{event_from_gain_reason, Event as DiscordEvent};
 use tm_pubsub::{
     build_topic_batches_with_policy, PubSubClient, PubSubConnectionEvent, TransportSourcePolicy,
 };
-use tm_twitch::TwitchClient;
 
 use crate::observability::AppObservability;
 use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
@@ -27,15 +25,11 @@ enum SupervisedPubSubEvent {
 }
 
 pub(crate) struct PubSubTaskContext {
-    pub(crate) runtime: tm_runtime::RuntimeHandle,
-    pub(crate) twitch: Arc<TwitchClient>,
+    pub(crate) effects: RuntimeEffectContext,
     pub(crate) auth_token: String,
     pub(crate) user_id: String,
     pub(crate) username: String,
     pub(crate) tracked_streamers: Vec<Streamer>,
-    pub(crate) persistent_user_id: String,
-    pub(crate) observability: AppObservability,
-    pub(crate) health: HealthTracker,
 }
 
 pub(crate) fn spawn_pubsub_loop(
@@ -52,8 +46,12 @@ pub(crate) fn spawn_pubsub_loop(
         ) {
             Ok(batches) => batches,
             Err(error) => {
-                context.health.failure("pubsub", pubsub_error_class(&error));
                 context
+                    .effects
+                    .health
+                    .failure("pubsub", pubsub_error_class(&error));
+                context
+                    .effects
                     .health
                     .record_pubsub_setup(failed_pubsub_setup_report(&error));
                 tracing::warn!(
@@ -65,23 +63,17 @@ pub(crate) fn spawn_pubsub_loop(
             }
         };
         context
+            .effects
             .health
             .record_pubsub_setup(tm_pubsub::pubsub_setup_report(&topic_batches));
-        let effect_task = spawn_pubsub_effect_task(
-            context.runtime.clone(),
-            Arc::clone(&context.twitch),
-            context.persistent_user_id.clone(),
-            context.observability.clone(),
-            effect_receiver,
-            context.health.clone(),
-        );
+        let effect_task = spawn_pubsub_effect_task(context.effects.clone(), effect_receiver);
         let event_task = spawn_pubsub_event_task(
             stop.clone(),
-            context.runtime.clone(),
-            context.observability.clone(),
+            context.effects.runtime.clone(),
+            context.effects.observability.clone(),
             receiver,
             effect_sender.clone(),
-            context.health.clone(),
+            context.effects.health.clone(),
         );
 
         let mut connections = Vec::with_capacity(topic_batches.len());
@@ -109,15 +101,9 @@ pub(crate) fn spawn_pubsub_loop(
 }
 
 fn spawn_pubsub_effect_task(
-    runtime: tm_runtime::RuntimeHandle,
-    twitch: Arc<TwitchClient>,
-    persistent_user_id: String,
-    observability: AppObservability,
+    context: RuntimeEffectContext,
     mut receiver: tokio::sync::mpsc::Receiver<Vec<tm_runtime::RuntimeEffect>>,
-    health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
-    let context =
-        RuntimeEffectContext::new(runtime, twitch, persistent_user_id, observability, health);
     tokio::spawn(async move {
         while let Some(effects) = receiver.recv().await {
             if let Err(error) = execute_runtime_effects(&context, effects).await {

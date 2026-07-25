@@ -1,3 +1,9 @@
+//! Authentication and private session persistence.
+//!
+//! Cookie and OAuth material is treated as secret data: callers receive typed
+//! session results, while logs and errors must never contain credentials or raw
+//! Twitch responses.
+
 pub mod client;
 pub mod cookies;
 pub mod device_flow;

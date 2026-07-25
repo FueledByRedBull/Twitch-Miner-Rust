@@ -1,3 +1,8 @@
+//! Twitch IRC framing and chat-presence transport.
+//!
+//! IRC reports transport-neutral presence/chat observations and does not own
+//! mining state, reward accounting, or Twitch mutation policy.
+
 use std::fmt;
 use std::io;
 

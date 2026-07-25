@@ -2,7 +2,7 @@
 
 ## Executive summary
 
-**Baseline:** `d2430b5e767e237c3b1462ad33385cfa80de1b11`
+**Baseline:** `4b3de95122c1b20919f8fec4b184bbcc36aa1a60`
 
 | Severity | Count |
 | --- | ---: |
@@ -12,144 +12,170 @@
 | Low | 0 |
 
 **Overall risk:** Low after verification
-**Recommendation:** Approve after the required Linux CI, image, and live Pi
-acceptance gates pass.
+**Recommendation:** Approve after the required Linux CI, immutable-image, and
+live Pi acceptance gates pass.
 
-The review found no security regression in the campaign, prediction arithmetic,
-Twitch client metadata, actor queue, observability, workflow, or benchmark
-changes. All 35 changed/new/deleted paths were reviewed; the high-risk external
-input and value-decision paths have focused tests and low caller counts.
+This change reduces concentrated module and orchestration complexity without
+changing public APIs or mining behavior. The security-sensitive EventSub
+parser, prediction validation, bounded deduplication, Twitch response
+normalization, config composition, and single-writer runtime behavior were
+moved behind existing facades rather than redesigned. No validation, retry
+restriction, privacy boundary, or mutation guard was removed.
 
 ## What changed
 
-The working change is approximately 971 additions and 972 deletions. Most
-deletions are four obsolete dated review reports; one maintained review remains
-here.
+The staged change contains 38 paths and approximately 6,591 additions and 6,325
+deletions. Most of that volume is code and tests moved out of oversized files.
 
 | Area | Risk | Result |
 | --- | --- | --- |
-| Campaign completion and watch selection | High | Fully claimed inventory campaign IDs release stale watch pins; incomplete, missing, and unknown states fail safe. |
-| Prediction amount and outcome ordering | High | Floating-point value decisions are now exact integer operations with boundary coverage. |
-| Twitch client metadata | High | The unused compiled client-version fallback is removed; TLS-fetched build discovery remains mandatory. |
-| Runtime queue measurement | Medium | Production capacity and backpressure behavior are unchanged; measurement uses an isolated test-only constructor. |
-| GitHub Actions and secret scanning | High | Updated actions are immutable Node 24-capable commits; native Gitleaks is version- and checksum-pinned. |
-| Branding, docs, and performance harness | Low | Foreign presentation assets and stale internal reports are removed without removing legal attribution. |
+| EventSub | High | Capacity planning and protocol normalization moved into private responsibility modules; connection lifecycle and the public facade are unchanged. |
+| Twitch HTTP | High | Typed response validation and normalization moved out of request execution; endpoint, retry, and mutation behavior are unchanged. |
+| Configuration | Medium | Typed base/override composition moved out of persistence and migration code with the serialized schema unchanged. |
+| `tm-app` orchestration | Medium | EventSub and PubSub now embed one crate-private runtime-effect context instead of duplicating five handles. |
+| Test placement | Low | Large private unit suites moved under each crate's `tests/unit/` tree through `cfg(test)` path modules; no public test hooks were added. |
+| Architecture policy | Low | A dependency-free PowerShell gate records the existing internal Cargo graph, domain isolation, and test-placement boundary. |
+| Public documentation | Low | Crate responsibilities, invariants, checks, and release commands now describe the implemented architecture. |
 
 ## High-risk path analysis
 
-### Campaign completion
+### EventSub input and prediction validation
 
-**Entry and trust boundary:** Twitch GQL inventory enters
-`inventory_snapshot_from_typed` in `crates/tm-twitch/src/client.rs`; available
-campaign IDs enter the minute watcher separately.
-
-**Invariants:**
-
-- A campaign is complete only when it has an ID, at least one drop, and every
-  drop explicitly reports `isClaimed=true`.
-- Missing campaign IDs, missing progress, partial progress, empty campaigns,
-  and transient inventory failures cannot classify a campaign as complete.
-- Completion changes only local watch selection; it does not perform a claim or
-  other mutation.
-
-**Blast radius:** The new snapshot method has one production caller plus the
-existing inventory compatibility facade. The completion predicate has one
-production caller. This is a low caller-count, high-value behavior change.
-
-**Adversarial scenario:** A malformed inventory response omits a drop's
-`self` state or campaign ID in an attempt to release a campaign pin. The parser
-does not add that campaign ID to the completed set, so the available campaign
-remains eligible. A response can release a pin only by coming from the
-authenticated TLS Twitch endpoint and explicitly marking every non-empty drop
-claimed; that is the intended completion signal.
-
-**Coverage:** Typed fixtures cover complete, incomplete, missing-progress, and
-missing-ID campaigns. Watch-selection tests prove completed campaigns release
-the pin while a new campaign remains eligible.
-
-### Prediction value decisions
-
-**Entry and trust boundary:** Point balances and prediction totals originate in
-authenticated Twitch responses and are evaluated by
-`PredictionEvent::decide`.
+**Entry and trust boundary:** Untrusted WebSocket text enters
+`parse_eventsub_message` in
+`crates/tm-pubsub/src/eventsub/protocol.rs`. Notification bodies are decoded
+into transport-neutral runtime events only after message-type, subscription,
+condition, identifier, timestamp, and prediction-field validation.
 
 **Invariants:**
 
-- Negative balances become zero.
-- Percentage multiplication occurs in `i128`, then saturates only when
-  narrowing to `i64`.
-- The final amount remains bounded by configured maximum points and the
-  non-negative current balance.
-- Integer strategies compare integer counters without `f64` precision loss.
+- malformed or incomplete prediction payloads cannot become runtime events;
+- broadcaster and user identifiers remain tied to the subscription condition;
+- duplicate message IDs remain bounded by both capacity and age;
+- deterministic subscription-cost planning cannot exceed Twitch's reported
+  capacity;
+- parsing and planning remain behind the existing `tm-pubsub` facade.
 
-**Blast radius:** `decide` has the runtime prediction path and tests as callers;
-the new arithmetic helper is private. `select_outcome` remains the same public
-interface.
+The parser, `validate_prediction_wire`, and `MessageDeduper` are direct moves
+from the baseline module. The EventSub client still owns connection setup,
+keepalive, reconnect, and subscription creation. All 41 `tm-pubsub` tests pass,
+including the relocated protocol, deduplication, prediction, and planning
+cases.
 
-**Adversarial scenario:** An extreme balance or percentage attempts to overflow
-the bet calculation or produce an amount above the account balance. The wide
-calculation cannot overflow for `i64 * u32`; narrowing saturates and the
-subsequent balance cap prevents overspend. Boundary tests include negative,
-zero, `2^53+1`, `i64::MAX`, `101%`, and `u32::MAX` inputs.
+**Adversarial scenarios:** A malformed prediction omitting an outcome ID, an
+oversized reconnect payload, repeated message IDs, and a subscription set whose
+cost exceeds capacity follow the same reject, deduplicate, or planning paths as
+the baseline. The extraction adds no alternate parser, fallback, or unchecked
+deserialization path.
 
-### Twitch client identity and workflow supply chain
+### Twitch response normalization and mutation safety
 
-`CLIENT_ID` remains the single browser identity required across OAuth, GQL, and
-EventSub. `Client-Version` continues to be extracted from Twitch over TLS before
-the first GQL request and cached for ten hours; deleting the never-used compiled
-default does not introduce a fallback or alternate credential path.
+**Entry and trust boundary:** Authenticated Twitch HTTP/GQL responses are
+decoded and validated in `crates/tm-twitch/src/responses.rs`; request execution,
+classified read retry, and non-replayed mutations remain in
+`crates/tm-twitch/src/client.rs`.
 
-The secret-scanning workflow downloads one named Gitleaks archive and verifies
-its fixed SHA-256 before execution. Updated third-party actions are pinned to
-full commits, and their action manifests declare the Node 24 runtime.
+Moving response types and normalization does not broaden their visibility
+outside the crate or weaken typed checks. Inventory campaign completion still
+fails safe when IDs or progress are missing. Prediction and claim mutations
+still cannot be retried after an uncertain response. All 41 `tm-twitch` tests
+pass, including malformed-response and campaign inventory fixtures.
+
+### Runtime ownership and orchestration
+
+`EventSubTaskContext` and `PubSubTaskContext` now embed one
+`RuntimeEffectContext`. The shared object contains the same runtime handle,
+Twitch client, persistent user ID, observability handle, and health tracker that
+were previously copied into both transport contexts.
+
+The fields are exposed only within the `tm-app` crate. Transport credentials,
+tracked-streamer state, subscription authorization, and fallback channels stay
+in the narrower transport contexts. Event application still enters the bounded
+single-writer actor, and only actor-approved effects reach the Twitch client.
+All 88 `tm-app` tests pass.
+
+**Adversarial scenario:** Simultaneous EventSub and PubSub observations still
+serialize through the same runtime actor. Consolidating cloned handles does not
+create shared mutable state, bypass the actor, or add a second effect executor.
+
+### Architecture enforcement
+
+`scripts/verify-architecture.ps1` obtains the workspace graph from locked Cargo
+metadata and compares every internal crate against the current allowlist. It
+also rejects async, HTTP, transport, tracing, or application dependencies in
+`tm-domain`, and prevents substantial named test files from returning under
+production `src` trees.
+
+The check uses existing PowerShell and Cargo tooling, runs in CI, and adds no
+dependency or production surface. A legitimate future dependency-boundary
+change must deliberately update the checked policy rather than drifting
+silently.
+
+## Blast radius
+
+- Public crate facades and serialized configuration remain unchanged.
+- EventSub parser and planner callers remain inside `tm-pubsub`.
+- Twitch response helpers remain crate-private and are called by the same
+  request methods.
+- Runtime-effect context access expands only from its defining module to its
+  containing crate so the two transport contexts can embed it.
+- Production behavior is exercised by the unchanged workspace, integration,
+  contract, replay, and release-hygiene suites.
+
+No new network call, external process, credential source, persistence format,
+unsafe block, telemetry path, runtime dependency, or public API was introduced.
 
 ## Historical context
 
-Git pickaxe and blame traced the original floating-point prediction arithmetic
-to `f8fc4cf` and the typed inventory parser and client-version cache to
-`8341456`/`92db087`. No removed line originated in a security, CVE, authorization,
-retry, mutation-idempotency, or credential-hardening fix. No previously removed
-unsafe behavior is reintroduced.
+Git pickaxe and blame trace EventSub subscription planning and prediction wire
+validation to `7b22ffe`, campaign inventory normalization to `22b8314`, and the
+runtime-effect context to `db90940`. The reviewed change preserves those
+hardening decisions. No removed line originated in a CVE fix, authorization
+check, mutation-idempotency restriction, credential guard, or privacy fix.
 
-The campaign change extends the campaign pinning introduced by `9845ec7`,
-`a907254`, and `2d0e380`: the pinning rule is preserved while its missing
-completion signal is supplied from typed inventory.
+Recent releases `#42`, `#48`, `#49`, and `#50` were also inspected for
+architectural intent. The refactor follows their stable facades and transport
+ownership instead of restoring an older implementation.
 
 ## Test and quality evidence
 
-Local evidence for the working diff:
+Local evidence for the staged diff:
 
-- formatting, strict workspace/all-target/all-feature Clippy, production
-  panic-shortcut Clippy, rustdoc warnings, and the full workspace suite pass;
-- 354 tests pass and the manual queue profile is intentionally ignored;
-- campaign completion, integer-boundary, precision-ordering, formatting
-  overflow, webhook, and queue metric behavior have focused tests;
-- release-mode queue sweeps show noise-scale differences at capacities 32, 64,
-  and 128, so production remains at 64;
-- the Rust/Go normalized prediction workload produces the same checksum;
-- `cargo audit`, full-history native Gitleaks, documentation links, PowerShell
-  parsing, release hygiene, and the pinned Go baseline/parity suite pass.
+- `cargo fmt --all -- --check`;
+- strict workspace/all-target/all-feature Clippy with warnings denied;
+- stricter production Clippy denying panic shortcuts;
+- full workspace/all-target/all-feature tests;
+- rustdoc with warnings denied;
+- locked release build;
+- documentation, architecture, release-hygiene, and Compose validation;
+- five release-mode deterministic replay processes with 20 repetitions each.
 
-Windows cannot link the pinned libFuzzer coverage symbols, including with the
-sanitizer disabled. This is a host-toolchain limitation, not a fuzz finding.
-The repository's scheduled/manual Linux workflow remains the authoritative
-ASan fuzz gate for both targets.
+All completed checks pass. The replay checksum and trace remain stable. The
+dedicated build-integrity check and committed Linux CI/deep-quality jobs remain
+release gates rather than being inferred from the working tree.
 
 ## Remaining release gates
 
-- Run the Linux CI dependency policy, coverage, fuzz, mutation, and
-  reproducibility jobs on the committed revision.
+- Run build integrity on the final committed tree.
+- Pass Linux CI, dependency policy, coverage, fuzz, mutation, documentation,
+  and reproducibility checks on the pushed revision.
 - Build and attest the exact multi-architecture image from the merged revision.
 - Canary and deploy that immutable ARM64 digest to the Pi.
-- Re-establish non-backdated health, reward-rate, campaign, and timed-soak
-  evidence before pruning rollback material.
+- Establish a fresh non-backdated strict-health baseline and pass the complete
+  24-hour and 72-hour live acceptance audits.
+- Delete rebuildable local, CI, registry, and Pi build artifacts only after the
+  72-hour gate; preserve required rollback evidence until then.
 
-## Methodology
+## Methodology and limitations
 
-The repository has 91 Rust/Go source files, so this used a focused review:
-all changed paths were inspected, all high-risk functions received baseline
-history, one-hop caller/blast-radius, invariant, adversarial-input, and focused
-test analysis, while documentation-only changes received a surface review.
-External crate source was not audited beyond RustSec, Cargo policy, pinned
-workflow provenance, and checksum verification. Confidence is high for the
-changed code and medium until the live Twitch/Pi acceptance gates complete.
+This was a focused security differential review of the baseline through the
+staged tree. Every changed production path was inspected; high-risk input and
+effect paths received history, caller/blast-radius, invariant, adversarial, and
+test analysis. Relocated tests were compiled and executed in their new
+locations. Documentation-only changes received a surface and consistency
+review.
+
+External dependency source was not re-audited because manifests and the lockfile
+did not change. Confidence is high for source-equivalence and local behavior,
+and remains medium for deployment behavior until the exact image completes the
+fresh live soaks.

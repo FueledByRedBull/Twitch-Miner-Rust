@@ -15,11 +15,11 @@ use crate::utilities::time_now;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeEffectContext {
-    runtime: tm_runtime::RuntimeHandle,
-    twitch: Arc<TwitchClient>,
-    persistent_user_id: String,
-    observability: AppObservability,
-    health: HealthTracker,
+    pub(crate) runtime: tm_runtime::RuntimeHandle,
+    pub(crate) twitch: Arc<TwitchClient>,
+    pub(crate) persistent_user_id: String,
+    pub(crate) observability: AppObservability,
+    pub(crate) health: HealthTracker,
 }
 
 impl RuntimeEffectContext {

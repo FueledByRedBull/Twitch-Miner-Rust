@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Decomposes EventSub connection handling, deterministic subscription planning,
+  and protocol normalization; separates Twitch typed-response validation from
+  HTTP execution and config setting composition from persistence/migration.
+  Large private unit suites now live outside production source trees without
+  exposing test hooks.
+- Documents crate and public-interface invariants, shares one cohesive runtime
+  effect context between EventSub and PubSub orchestration, and adds a
+  dependency-free CI architecture gate for crate directions, transport-free
+  domain logic, and production/test source separation. Consolidates duplicate
+  container deployment guidance into the maintained operator and container
+  guides.
 - Matches channel-level Drop campaign IDs to typed inventory progress so a fully
   claimed campaign releases its watch pin instead of suppressing Twitch's spare
   points slot. New, incomplete, and temporarily unknown campaigns remain

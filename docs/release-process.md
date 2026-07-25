@@ -40,7 +40,8 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
 1. Update `CHANGELOG.md` with behavior, configuration, migration, and known
    compatibility changes. Review and attach the candidate's differential-review
    artifact to the release evidence.
-2. Run the local QA commands in `CONTRIBUTING.md`, run
+2. Run the local QA commands in `CONTRIBUTING.md`, including the architecture
+   boundary check, run
    `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and require
    a clean-revision `scripts/measure-language-comparison.ps1` report when shared
    prediction/selection behavior or performance changed. Also require
