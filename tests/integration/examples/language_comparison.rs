@@ -7,6 +7,9 @@ use tm_domain::{
     Streamer, StreamerSettings,
 };
 
+const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+const FNV_PRIME: u64 = 1_099_511_628_211;
+
 fn benchmark_event() -> PredictionEvent {
     let mut event = PredictionEvent {
         streamer: Streamer {
@@ -81,18 +84,22 @@ fn operation_checksum(decision: &PredictionDecision) -> i64 {
         .wrapping_add(i64::try_from(decision.outcome_id.len()).unwrap_or_default())
 }
 
-fn semantic_checksum(decision: &PredictionDecision) -> String {
-    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
-    const FNV_PRIME: u64 = 1_099_511_628_211;
-
+fn update_semantic_checksum(hash: u64, decision: &PredictionDecision) -> u64 {
     let choice = decision.choice.map_or(u64::MAX, |value| value as u64);
     let bytes = choice
         .to_le_bytes()
         .into_iter()
         .chain(decision.amount.to_le_bytes())
         .chain(decision.outcome_id.bytes());
-    let hash = bytes.fold(FNV_OFFSET, |hash, byte| {
+    bytes.fold(hash, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+fn semantic_sequence_checksum(event: &mut PredictionEvent, iterations: u32) -> String {
+    let hash = (0..iterations).fold(FNV_OFFSET, |hash, index| {
+        let decision = event.decide(benchmark_balance(index));
+        update_semantic_checksum(hash, &decision)
     });
     format!("{hash:016x}")
 }
@@ -128,11 +135,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         throughput.push(f64::from(iterations) / started.elapsed().as_secs_f64());
     }
+    let semantic_checksum = semantic_sequence_checksum(&mut event, iterations);
 
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": 2,
+            "schema": 3,
             "implementation": "rust",
             "revision": option_env!("BUILD_REVISION").unwrap_or("development"),
             "workload": "complete-production-prediction-decision",
@@ -143,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "p95": percentile(&throughput, 95),
             },
             "checksum": checksum,
-            "semantic_checksum": semantic_checksum(&last_decision),
+            "semantic_checksum": semantic_checksum,
             "decision_output": {
                 "choice": last_decision.choice,
                 "outcome_id": last_decision.outcome_id,
@@ -154,8 +162,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "percentage_math": "exact-i128-integer",
                 "outcome_id": "owned-string",
                 "output_consumption": "complete-decision-black-box",
+                "semantic_verification": "all-decisions-separate-pass",
             },
         }))?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{update_semantic_checksum, FNV_OFFSET};
+    use tm_domain::PredictionDecision;
+
+    #[test]
+    fn semantic_sequence_distinguishes_equal_length_intermediate_outcome_ids() {
+        let final_decision = PredictionDecision {
+            choice: Some(0),
+            outcome_id: String::from("final"),
+            amount: 100,
+        };
+        let first_sequence = update_semantic_checksum(
+            update_semantic_checksum(
+                FNV_OFFSET,
+                &PredictionDecision {
+                    choice: Some(1),
+                    outcome_id: String::from("alpha"),
+                    amount: 50,
+                },
+            ),
+            &final_decision,
+        );
+        let second_sequence = update_semantic_checksum(
+            update_semantic_checksum(
+                FNV_OFFSET,
+                &PredictionDecision {
+                    choice: Some(1),
+                    outcome_id: String::from("bravo"),
+                    amount: 50,
+                },
+            ),
+            &final_decision,
+        );
+
+        assert_ne!(first_sequence, second_sequence);
+    }
 }

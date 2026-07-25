@@ -71,8 +71,9 @@ decision plus two checksums:
 
 - an operation checksum consumes choice, outcome-ID length, and amount on every
   iteration;
-- a stable FNV checksum consumes the final choice, amount, and outcome-ID
-  bytes;
+- a stable FNV checksum consumes every choice, amount, and outcome-ID byte in a
+  separate deterministic verification pass, keeping validation overhead out of
+  the timed production decision;
 - the report compares choice, outcome ID, amount, schema, workload, run count,
   and iteration count before it can pass.
 
@@ -88,7 +89,9 @@ measurement-integrity bug where a combined Cargo invocation containing
 
 **Adversarial check:** A harness cannot pass with a different decision,
 constant-only fixture, stale miner executable, mismatched run shape, or
-amount-only checksum. The script uses only sanitized fixtures and removes its
+amount-only checksum. Equal-length intermediate outcome IDs cannot converge to
+a passing final decision because every decision contributes its bytes to the
+semantic checksum. The script uses only sanitized fixtures and removes its
 temporary Go source copy in `finally`.
 
 ## Historical context

@@ -98,10 +98,8 @@ func operationChecksum(decision classes.PredictionDecision) int64 {
 	return int64(decision.Amount) + int64(decision.Choice) + int64(len(decision.OutcomeID))
 }
 
-func semanticChecksum(decision classes.PredictionDecision) string {
-	const offset uint64 = 14695981039346656037
+func updateSemanticChecksum(hash uint64, decision classes.PredictionDecision) uint64 {
 	const prime uint64 = 1099511628211
-	hash := offset
 	mix := func(value byte) {
 		hash ^= uint64(value)
 		hash *= prime
@@ -116,6 +114,15 @@ func semanticChecksum(decision classes.PredictionDecision) string {
 	}
 	for index := 0; index < len(decision.OutcomeID); index++ {
 		mix(decision.OutcomeID[index])
+	}
+	return hash
+}
+
+func semanticSequenceChecksum(event *classes.PredictionEvent, iterations int) string {
+	const offset uint64 = 14695981039346656037
+	hash := uint64(offset)
+	for index := 0; index < iterations; index++ {
+		hash = updateSemanticChecksum(hash, event.Decide(benchmarkBalance(index)))
 	}
 	return fmt.Sprintf("%016x", hash)
 }
@@ -144,9 +151,10 @@ func main() {
 		}
 		throughput = append(throughput, float64(iterations)/time.Since(started).Seconds())
 	}
+	semanticChecksum := semanticSequenceChecksum(event, iterations)
 	runtime.KeepAlive(event)
 	report := map[string]interface{}{
-		"schema":             2,
+		"schema":             3,
 		"implementation":     "go",
 		"revision":           revision,
 		"workload":           "complete-production-prediction-decision",
@@ -157,17 +165,18 @@ func main() {
 			"p95":    percentile(throughput, 95),
 		},
 		"checksum":          checksum,
-		"semantic_checksum": semanticChecksum(lastDecision),
+		"semantic_checksum": semanticChecksum,
 		"decision_output": map[string]interface{}{
 			"choice":     lastDecision.Choice,
 			"outcome_id": lastDecision.OutcomeID,
 			"amount":     lastDecision.Amount,
 		},
 		"measurement": map[string]interface{}{
-			"build_profile":      "go-default-optimizer-stripped",
-			"percentage_math":    "float64-truncating",
-			"outcome_id":         "shallow-string-header",
-			"output_consumption": "complete-decision-runtime-keepalive",
+			"build_profile":         "go-default-optimizer-stripped",
+			"percentage_math":       "float64-truncating",
+			"outcome_id":            "shallow-string-header",
+			"output_consumption":    "complete-decision-runtime-keepalive",
+			"semantic_verification": "all-decisions-separate-pass",
 		},
 	}
 	encoded, err := json.MarshalIndent(report, "", "  ")
