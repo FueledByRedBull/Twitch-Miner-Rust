@@ -115,13 +115,14 @@ The comparison deliberately reports two categories:
   transport supervision, and live campaign/recovery behavior, because the Go
   baseline has no equivalent workload.
 
-On the initial Windows x64 run against Go revision
+On the clean 2026-07-25 Windows x64 run of Rust revision
+`f88ea54381444cb7183e71dc64361df957fb0603` against Go revision
 `91f00698314dbbdd6c757d7b525458c82173e622`, the stripped Go executable was
 7,486,464 bytes and the Rust executable was 7,814,656 bytes. Thirty help
-launches had medians of 6.979 ms for Go and 8.115 ms for Rust. The matching
-prediction checksum ran at roughly 55-57 million decisions/s in Go and
-16 million decisions/s in Rust. Prediction decisions occur once per event, so
-both are far beyond runtime demand; this result does not make Go universally
+launches had medians of 6.820 ms for Go and 7.693 ms for Rust. The matching
+86,410,000,000 checksum ran at medians of 57.81 million decisions/s in Go and
+17.18 million decisions/s in Rust. Prediction decisions occur once per event,
+so both are far beyond runtime demand; this result does not make Go universally
 faster or measure network-bound mining throughput.
 
 The production ARM64 image remains a two-layer `scratch` image. The measured
