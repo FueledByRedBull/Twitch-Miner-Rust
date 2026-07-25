@@ -79,6 +79,15 @@ if ($ciWorkflow -match 'gitleaks/gitleaks-action' -or
     throw 'CI secret scanning must use a checksum-verified native Gitleaks release.'
 }
 
+$multiarchWorkflow = Get-Content -Raw .github/workflows/multiarch-build.yml
+if ($multiarchWorkflow -match 'actions/download-artifact' -or
+    $multiarchWorkflow -notmatch '(?m)^\s+actions:\s+read\s*$' -or
+    $multiarchWorkflow -notmatch 'Invoke-RestMethod' -or
+    $multiarchWorkflow -notmatch 'Invoke-WebRequest' -or
+    $multiarchWorkflow -notmatch 'Expected exactly three image digest artifacts') {
+    throw 'Multiarch digest collection must use the native authenticated artifact API.'
+}
+
 $deepQualityWorkflow = Get-Content -Raw .github/workflows/deep-quality.yml
 if ($deepQualityWorkflow -notmatch 'nightly-\d{4}-\d{2}-\d{2}' -or
     $deepQualityWorkflow -notmatch 'cargo-fuzz --version \d+\.\d+\.\d+ --locked' -or
