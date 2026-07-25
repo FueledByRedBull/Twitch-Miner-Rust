@@ -84,10 +84,15 @@ struct Cli {
     canary: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
-    run_cli(cli).await
+    build_runtime()?.block_on(run_cli(cli))
+}
+
+fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
 }
 
 async fn run_cli(cli: Cli) -> Result<()> {

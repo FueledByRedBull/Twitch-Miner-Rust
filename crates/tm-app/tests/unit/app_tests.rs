@@ -33,7 +33,7 @@ mod tests {
     use crate::status::HealthTracker;
     use crate::utilities::new_session_id;
     use crate::watching::{minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry};
-    use crate::Cli;
+    use crate::{build_runtime, Cli};
     use clap::Parser;
     use reqwest::StatusCode;
     use tm_auth::{AuthEndpoints, AuthSession, CookieStore, TwitchAuthClient};
@@ -80,6 +80,15 @@ mod tests {
 
         assert!(Cli::try_parse_from(["tm-app", "--json"]).is_err());
         assert!(Cli::try_parse_from(["tm-app", "--status", "--check-config"]).is_err());
+    }
+
+    #[test]
+    fn runtime_builder_preserves_the_multithread_scheduler() {
+        let runtime = build_runtime().unwrap();
+        assert_eq!(
+            runtime.handle().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        );
     }
 
     #[test]
