@@ -46,7 +46,7 @@ use utilities::{clear_console, new_session_id, set_console_title, time_now};
 mod build_info;
 mod status;
 
-const DEFAULT_CONSOLE_TITLE: &str = "Klaro's Twitch Miner";
+const DEFAULT_CONSOLE_TITLE: &str = build_info::DISPLAY_NAME;
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
 const WATCH_SELECTION_REFRESH_CONCURRENCY: usize = 4;
 const PENDING_CLAIMS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);

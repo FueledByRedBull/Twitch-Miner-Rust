@@ -1,14 +1,19 @@
 use std::time::Duration;
 
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
 pub fn format_channel_points(points: i64) -> String {
-    let value = points.abs();
+    let value = points.unsigned_abs();
     match value {
-        1_000_000.. => format_points_with_suffix(value as f64, 1_000_000.0, "M"),
-        1_000.. => format_points_with_suffix(value as f64, 1_000.0, "k"),
+        1_000_000.. => format_points_with_suffix(u64_as_f64(value), 1_000_000.0, "M"),
+        1_000.. => format_points_with_suffix(u64_as_f64(value), 1_000.0, "k"),
         _ => value.to_string(),
     }
+}
+
+fn u64_as_f64(value: u64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let converted = value as f64;
+    converted
 }
 
 #[must_use]
@@ -31,7 +36,8 @@ pub fn progress_percent(current: i64, required: i64) -> i64 {
     if required <= 0 {
         return if current > 0 { 100 } else { 0 };
     }
-    ((current * 100) / required).max(0)
+    let percent = (i128::from(current) * 100) / i128::from(required);
+    i64::try_from(percent.max(0)).unwrap_or(i64::MAX)
 }
 
 #[must_use]
@@ -75,6 +81,7 @@ mod tests {
         assert_eq!(format_channel_points(999), "999");
         assert_eq!(format_channel_points(1_500), "1.5k");
         assert_eq!(format_channel_points(1_500_000), "1.5M");
+        assert_eq!(format_channel_points(i64::MIN), "9223372036854.78M");
         assert_eq!(
             format_points_with_suffix(1_250_000.0, 1_000_000.0, "M"),
             "1.25M"
@@ -88,6 +95,7 @@ mod tests {
         assert_eq!(progress_percent(5, 10), 50);
         assert_eq!(progress_percent(1, 0), 100);
         assert_eq!(progress_percent(0, 0), 0);
+        assert_eq!(progress_percent(i64::MAX, 1), i64::MAX);
     }
 
     #[test]

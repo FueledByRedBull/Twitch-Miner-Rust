@@ -42,6 +42,8 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
    artifact to the release evidence.
 2. Run the local QA commands in `CONTRIBUTING.md`, run
    `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and require
+   a clean-revision `scripts/measure-language-comparison.ps1` report when shared
+   prediction/selection behavior or performance changed. Also require
    a successful Deep Quality run for the exact revision. Deep Quality must pass
    bounded parser fuzzing and mutation, the ratcheted critical-crate branch
    coverage floor, and the noise-tolerant replay comparison. Then push the

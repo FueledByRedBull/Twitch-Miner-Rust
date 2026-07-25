@@ -1,6 +1,6 @@
 // Watch selection is one deterministic ranking pass whose ordering rules must remain visible
 // together; bounded count-to-f64 conversions are required for platform watch cadence.
-#![allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+#![allow(clippy::too_many_lines)]
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -122,7 +122,8 @@ pub fn watch_interval(count: usize) -> Duration {
     if count == 0 {
         return Duration::from_secs(20);
     }
-    Duration::from_secs_f64(20.0 / count as f64).max(Duration::from_secs(5))
+    let count = u32::try_from(count).unwrap_or(u32::MAX);
+    Duration::from_secs_f64(20.0 / f64::from(count)).max(Duration::from_secs(5))
 }
 
 #[must_use]

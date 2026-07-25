@@ -1,14 +1,12 @@
 param(
-    [string]$GoRoot
+    [Parameter(Mandatory = $true)]
+    [string]$GoRoot,
+    [string]$GoExecutable = 'go'
 )
 
 $ErrorActionPreference = 'Stop'
 
 $rustRoot = Split-Path -Parent $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($GoRoot)) {
-    $GoRoot = Join-Path (Split-Path -Parent $rustRoot) 'Twitch-Channel-Points-Miner'
-}
-
 $goRoot = (Resolve-Path -LiteralPath $GoRoot).Path
 $goConstants = Join-Path $goRoot 'TwitchChannelPointsMiner/constants/constants.go'
 $rustOperations = Join-Path $rustRoot 'crates/tm-twitch/src/operations.rs'
@@ -19,8 +17,9 @@ if (-not (Test-Path -LiteralPath $rustOperations -PathType Leaf)) {
     throw "Rust operation source not found: $rustOperations"
 }
 
-if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    throw 'Go is required for the baseline test gate. Install Go 1.21+ or run this script on the prepared Pi/CI environment.'
+$goCommand = Get-Command $GoExecutable -ErrorAction SilentlyContinue
+if (-not $goCommand) {
+    throw 'Go 1.21 or newer is required for the pinned baseline test gate.'
 }
 
 Push-Location $goRoot
@@ -28,7 +27,7 @@ try {
     # The pinned Go test seeds exactly two minutes, but the implementation resets
     # when execution overhead makes the elapsed duration greater than two minutes.
     # A deterministic replacement is injected with the parity harness below.
-    go test ./... -skip '^TestStreamWatchProgress$'
+    & $goCommand.Source test ./... -skip '^TestStreamWatchProgress$'
     if ($LASTEXITCODE -ne 0) {
         throw "Go baseline tests failed with exit code $LASTEXITCODE."
     }
@@ -70,7 +69,7 @@ try {
     $env:TM_PARITY_VECTOR = $parityVector
     Push-Location $goRoot
     try {
-        go test ./... -run '^TestParity' -count=1
+        & $goCommand.Source test ./... -run '^TestParity' -count=1
         if ($LASTEXITCODE -ne 0) {
             throw "Go/Rust normalized parity fixtures failed with exit code $LASTEXITCODE."
         }

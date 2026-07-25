@@ -23,8 +23,6 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
 pub const DISCORD_USERNAME: &str = "Twitch Channel Points Miner";
-pub const DISCORD_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/0x8fv/Twitch-Channel-Points-Miner/main/assets/gopher.png";
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_LOG_ARCHIVES: usize = 5;
 const MAX_LOG_ARCHIVE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -300,7 +298,6 @@ pub fn build_discord_request(
         body: form_url_encode(&[
             ("content", clean_message.as_str()),
             ("username", DISCORD_USERNAME),
-            ("avatar_url", DISCORD_AVATAR_URL),
         ]),
     })
 }
@@ -1043,7 +1040,7 @@ mod tests {
         assert!(request
             .body
             .contains("username=Twitch+Channel+Points+Miner"));
-        assert!(request.body.contains("avatar_url="));
+        assert!(!request.body.contains("avatar_url="));
     }
 
     #[test]

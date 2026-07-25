@@ -1,6 +1,6 @@
 # Behavior Parity And Release Limits
 
-This is a behavior-level comparison against the adjacent Go implementation at
+This is a behavior-level comparison against an explicit clean Go checkout at
 `91f00698314d`, not a claim that Twitch's undocumented contracts never change.
 Rust fixture, integration, and deterministic parser-regression tests run in
 CI. The dedicated-account `--canary` closes the remaining live read-contract
@@ -11,7 +11,7 @@ gap before each release.
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
 | Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context and `RewardList` fixtures, a private bounded warm cache for null-milestone restarts, deterministic longest/expiring streak priorities, resolved/unresolved short-restart carryover, a fixed 15-minute live budget, channel-rename recovery by stable ID, and opt-in single-worker VOD/clip recovery with live preemption. Playback acceptance is distinct from typed recovery confirmation. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
-| Drops and moments | Improved | Inventory, campaign, claim-status, and PubSub fixtures. Drop progress and claim mutations have independent global/per-streamer controls; a verified campaign can limit the watch set to one deterministic streamer so Twitch progress is not split. Legacy `claim_drops` configurations migrate without changing their prior effective behavior. |
+| Drops and moments | Improved | Inventory, campaign, claim-status, and PubSub fixtures. Drop progress and claim mutations have independent global/per-streamer controls; a verified campaign can limit the watch set to one deterministic streamer so Twitch progress is not split. Inventory and per-channel campaign IDs are matched so a fully claimed campaign releases its pin, while new/incomplete/unknown campaigns remain eligible. Legacy `claim_drops` configurations migrate without changing their prior effective behavior. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
 | EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and IRC tests. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
@@ -31,7 +31,7 @@ working Rust implementation:
 | --- | --- |
 | Username, streamers, follower/game/watch selection | Preserved. |
 | Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
-| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved. Drop farming is independently configurable with `farm_drops`. The highest-ranked eligible campaign preempts immediately and stays pinned until completion or ineligibility. `watch_one_stream_when_drops_active=true` retains Twitch's strict one-channel Drop mode; when false, the other watch slot rotates fairly through non-campaign channels, and both slots resume 15-minute fair rotation when no campaign is active. Both settings support per-streamer overrides. |
+| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved. Drop farming is independently configurable with `farm_drops`. The highest-ranked eligible campaign preempts immediately and stays pinned until its typed inventory is fully claimed, it becomes ineligible, or it goes offline. Completed inventory IDs cannot retain a stale pin. `watch_one_stream_when_drops_active=true` retains Twitch's strict one-channel Drop mode; when false, the other watch slot rotates fairly through non-campaign channels, and both slots resume 15-minute fair rotation when no campaign is active. Both settings support per-streamer overrides. |
 | Raid observation and auto-join | Preserved with compatibility risk | EventSub observes the raid lifecycle; PubSub compatibility supplies the legacy raid ID required by the typed single-attempt `JoinRaid` mutation. Repeated raid IDs are ignored. Live acceptance is still required before release. |
 | Prediction and per-streamer override settings | Preserved. |
 | `password` | Rejected when non-empty; device login does not need it. |

@@ -21,8 +21,8 @@ mod tests {
     use crate::context::{refresh_snapshot_streamers, spawn_pending_claim_loop};
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
-        build_minute_watched_event, refresh_watch_selection_metadata, resolve_spade_url,
-        send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
+        build_minute_watched_event, has_unfinished_campaign, refresh_watch_selection_metadata,
+        resolve_spade_url, send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -1439,6 +1439,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_watch_selection_metadata_updates_candidate_choice() {
         let (endpoints, requests, server) = spawn_json_response_server(vec![
+            fixture_json("twitch.inventory.json"),
             fixture_json("twitch.stream_info.json"),
             fixture_json("twitch.available_drop_campaigns.json"),
         ]);
@@ -1574,6 +1575,9 @@ mod tests {
                 .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
         assert!(requests
             .iter()
+            .any(|request| request.contains(r#""operationName":"Inventory""#)));
+        assert!(requests
+            .iter()
             .any(|request| request
                 .contains(r#""operationName":"DropsHighlightService_AvailableDrops""#)));
     }
@@ -1581,6 +1585,7 @@ mod tests {
     #[tokio::test]
     async fn campaign_refresh_failure_preserves_still_applicable_known_result() {
         let (endpoints, _requests, server) = spawn_json_response_server(vec![
+            fixture_json("twitch.inventory.json"),
             fixture_json("twitch.stream_info.json"),
             String::from(r#"{"errors":[{"message":"temporary"}]}"#),
         ]);
@@ -1650,6 +1655,23 @@ mod tests {
             snapshot.watch_target_logins(now),
             vec![String::from("alice")]
         );
+    }
+
+    #[test]
+    fn completed_campaigns_do_not_pin_but_unknown_campaigns_remain_eligible() {
+        let completed = std::collections::HashSet::from([String::from("campaign-complete")]);
+
+        assert!(!has_unfinished_campaign(
+            &[String::from("campaign-complete")],
+            &completed
+        ));
+        assert!(has_unfinished_campaign(
+            &[
+                String::from("campaign-complete"),
+                String::from("campaign-new")
+            ],
+            &completed
+        ));
     }
 
     #[tokio::test]

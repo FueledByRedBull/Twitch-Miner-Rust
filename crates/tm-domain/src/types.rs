@@ -1,6 +1,6 @@
 // Domain settings mirror the stable config/wire shape, and display/progress ratios intentionally
 // convert bounded counters to f64. Keep these schema/formatting exceptions at the module boundary.
-#![allow(clippy::cast_precision_loss, clippy::struct_excessive_bools)]
+#![allow(clippy::struct_excessive_bools)]
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -280,7 +280,7 @@ impl Stream {
     pub fn update_minute_watched(&mut self, now: OffsetDateTime) {
         if let Some(last_minute_update) = self.last_minute_update {
             let elapsed = now - last_minute_update;
-            self.minute_watched += elapsed.whole_milliseconds() as f64 / 60_000.0;
+            self.minute_watched += elapsed.as_seconds_f64() / 60.0;
         }
         self.last_minute_update = Some(now);
     }

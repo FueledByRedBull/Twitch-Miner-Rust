@@ -1,10 +1,3 @@
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss
-)]
-
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -18,8 +11,18 @@ fn safe_duration_from_seconds(seconds: f64) -> std::time::Duration {
     if !seconds.is_finite() || seconds <= 0.0 {
         return std::time::Duration::ZERO;
     }
-    let milliseconds = (seconds * 1_000.0).min(u64::MAX as f64) as u64;
-    std::time::Duration::from_millis(milliseconds)
+    std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX)
+}
+
+fn i64_as_f64(value: i64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let converted = value as f64;
+    converted
+}
+
+fn percentage_of_balance(balance: i64, percentage: u32) -> i64 {
+    let amount = i128::from(balance.max(0)) * i128::from(percentage) / 100;
+    i64::try_from(amount).unwrap_or(i64::MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -74,21 +77,21 @@ impl PredictionEvent {
             .outcomes
             .iter()
             .map(|outcome| outcome.total_users)
-            .sum();
+            .fold(0_i64, i64::saturating_add);
         let total_points: i64 = self
             .outcomes
             .iter()
             .map(|outcome| outcome.total_points)
-            .sum();
+            .fold(0_i64, i64::saturating_add);
 
         for outcome in &mut self.outcomes {
             outcome.percentage_users = if total_users > 0 {
-                outcome.total_users as f64 * 100.0 / total_users as f64
+                i64_as_f64(outcome.total_users) * 100.0 / i64_as_f64(total_users)
             } else {
                 0.0
             };
             outcome.odds = if outcome.total_points > 0 {
-                total_points as f64 / outcome.total_points as f64
+                i64_as_f64(total_points) / i64_as_f64(outcome.total_points)
             } else {
                 0.0
             };
@@ -102,7 +105,7 @@ impl PredictionEvent {
 
     #[must_use]
     pub fn closing_after(&self, now: OffsetDateTime) -> std::time::Duration {
-        let elapsed = (now - self.created_at).whole_milliseconds() as f64 / 1_000.0;
+        let elapsed = (now - self.created_at).as_seconds_f64();
         safe_duration_from_seconds(self.window_seconds - elapsed)
     }
 
@@ -112,9 +115,9 @@ impl PredictionEvent {
             return self.decision.clone();
         };
 
+        let balance = balance.max(0);
         let settings = &self.streamer.settings.bet;
-        let percentage = f64::from(settings.percentage.unwrap_or(5)) / 100.0;
-        let mut amount = ((balance as f64) * percentage) as i64;
+        let mut amount = percentage_of_balance(balance, settings.percentage.unwrap_or(5));
 
         if let Some(max_points) = settings.max_points {
             amount = amount.min(i64::from(max_points));
@@ -136,12 +139,13 @@ impl PredictionEvent {
             };
         }
 
-        self.decision = PredictionDecision {
+        let decision = PredictionDecision {
             choice: Some(choice),
             outcome_id: self.outcomes[choice].id.clone(),
             amount,
         };
-        self.decision.clone()
+        self.decision.clone_from(&decision);
+        decision
     }
 
     #[must_use]
@@ -168,21 +172,24 @@ impl PredictionEvent {
             OutcomeKey::TotalUsers => self
                 .outcomes
                 .iter()
-                .map(|outcome| outcome.total_users as f64)
+                .map(|outcome| i64_as_f64(outcome.total_users))
                 .sum(),
             OutcomeKey::TotalPoints => self
                 .outcomes
                 .iter()
-                .map(|outcome| outcome.total_points as f64)
+                .map(|outcome| i64_as_f64(outcome.total_points))
                 .sum(),
-            OutcomeKey::DecisionUsers => match by_choice(|outcome| outcome.total_users as f64) {
+            OutcomeKey::DecisionUsers => match by_choice(|outcome| i64_as_f64(outcome.total_users))
+            {
                 Ok(value) => value,
                 Err(reason) => return (true, 0.0, reason),
             },
-            OutcomeKey::DecisionPoints => match by_choice(|outcome| outcome.total_points as f64) {
-                Ok(value) => value,
-                Err(reason) => return (true, 0.0, reason),
-            },
+            OutcomeKey::DecisionPoints => {
+                match by_choice(|outcome| i64_as_f64(outcome.total_points)) {
+                    Ok(value) => value,
+                    Err(reason) => return (true, 0.0, reason),
+                }
+            }
             OutcomeKey::PercentageUsers => match by_choice(|outcome| outcome.percentage_users) {
                 Ok(value) => value,
                 Err(reason) => return (true, 0.0, reason),
@@ -195,7 +202,7 @@ impl PredictionEvent {
                 Ok(value) => value,
                 Err(reason) => return (true, 0.0, reason),
             },
-            OutcomeKey::TopPoints => match by_choice(|outcome| outcome.top_points as f64) {
+            OutcomeKey::TopPoints => match by_choice(|outcome| i64_as_f64(outcome.top_points)) {
                 Ok(value) => value,
                 Err(reason) => return (true, 0.0, reason),
             },
@@ -334,10 +341,10 @@ pub fn select_outcome(outcomes: &[PredictionOutcome], settings: &BetSettings) ->
     };
 
     match settings.strategy {
-        Strategy::MostVoted => max_index(outcomes, |outcome| outcome.total_users as f64),
+        Strategy::MostVoted => max_index_by_key(outcomes, |outcome| outcome.total_users),
         Strategy::HighOdds => max_index(outcomes, |outcome| outcome.odds),
         Strategy::Percentage => max_index(outcomes, |outcome| outcome.odds_percentage),
-        Strategy::SmartMoney => max_index(outcomes, |outcome| outcome.top_points as f64),
+        Strategy::SmartMoney => max_index_by_key(outcomes, |outcome| outcome.top_points),
         Strategy::Number1 => Some(0),
         Strategy::Number2 => number_choice(1),
         Strategy::Number3 => number_choice(2),
@@ -360,7 +367,7 @@ pub fn select_outcome(outcomes: &[PredictionOutcome], settings: &BetSettings) ->
             {
                 max_index(outcomes, |outcome| outcome.odds)
             } else {
-                max_index(outcomes, |outcome| outcome.total_users as f64)
+                max_index_by_key(outcomes, |outcome| outcome.total_users)
             }
         }
     }
@@ -381,6 +388,17 @@ fn max_index(
         .map(|(index, _)| index)
 }
 
+fn max_index_by_key<T: Ord>(
+    outcomes: &[PredictionOutcome],
+    key: impl Fn(&PredictionOutcome) -> T,
+) -> Option<usize> {
+    outcomes
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, outcome)| key(outcome))
+        .map(|(index, _)| index)
+}
+
 fn format_float(value: f64) -> String {
     trim_trailing_zeros(&format!("{value:.2}"))
 }
@@ -391,7 +409,7 @@ fn choice_label(choice: usize) -> String {
             .unwrap_or('#')
             .to_string();
     }
-    format!("#{}", choice + 1)
+    format!("#{}", choice.saturating_add(1))
 }
 
 #[cfg(test)]
@@ -403,6 +421,44 @@ mod tests {
 
     fn assert_f64_eq(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn percentage_amount_is_exact_across_integer_boundaries() {
+        for balance in [-1, 0, 1, 10, 9_007_199_254_740_993, i64::MAX] {
+            for percentage in [0, 1, 5, 33, 100, 101, u32::MAX] {
+                let expected = i128::from(balance.max(0)) * i128::from(percentage) / 100;
+                let expected = i64::try_from(expected).unwrap_or(i64::MAX);
+                assert_eq!(
+                    percentage_of_balance(balance, percentage),
+                    expected,
+                    "balance={balance}, percentage={percentage}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integer_strategies_distinguish_values_above_f64_precision() {
+        let outcomes = vec![
+            PredictionOutcome {
+                total_users: 9_007_199_254_740_993,
+                top_points: 9_007_199_254_740_993,
+                ..PredictionOutcome::default()
+            },
+            PredictionOutcome {
+                total_users: 9_007_199_254_740_992,
+                top_points: 9_007_199_254_740_992,
+                ..PredictionOutcome::default()
+            },
+        ];
+        let mut settings = BetSettings {
+            strategy: Strategy::MostVoted,
+            ..BetSettings::default()
+        };
+        assert_eq!(select_outcome(&outcomes, &settings), Some(0));
+        settings.strategy = Strategy::SmartMoney;
+        assert_eq!(select_outcome(&outcomes, &settings), Some(0));
     }
 
     #[test]

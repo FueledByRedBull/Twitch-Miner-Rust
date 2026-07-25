@@ -26,6 +26,14 @@ replay. Timing is review evidence, not a wall-clock pass/fail gate:
 ./scripts/measure-replay.ps1 -Iterations 5
 ```
 
+Changes shared with the Go reference should use an explicit clean Go checkout
+and retain the generated report only as review/release evidence:
+
+```powershell
+./scripts/measure-language-comparison.ps1 `
+  -GoRoot C:/path/to/pinned-go-checkout
+```
+
 The manually dispatched/weekly `Deep Quality` workflow pins its nightly and
 analysis executables. It measures critical-crate branch coverage, runs bounded
 pure-parser fuzzing from the isolated `fuzz/` workspace, and mutates only the

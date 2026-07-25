@@ -4,6 +4,7 @@
       "inventory": {
         "dropCampaignsInProgress": [
           {
+            "id": "campaign-1",
             "name": "Campaign",
             "timeBasedDrops": [
               {

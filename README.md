@@ -117,7 +117,9 @@ Notes:
   streamer while an eligible campaign is active, matching Twitch's
   single-stream drop progress behavior. When it is `false`, the highest-ranked
   eligible campaign immediately pins one watch slot until the campaign finishes
-  or its channel becomes ineligible; other campaign channels wait their turn so
+  or its channel becomes ineligible. Inventory campaign IDs are matched to
+  channel campaign IDs, so a fully claimed campaign releases the pin instead of
+  suppressing a points slot; other campaign channels wait their turn so
   Drop progress is not split, while the second slot continues fair 15-minute
   rotation through non-campaign channels. With no eligible campaign, both of
   Twitch's creditable slots rotate through the complete prioritized set. Each

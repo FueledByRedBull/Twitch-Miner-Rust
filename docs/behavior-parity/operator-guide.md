@@ -27,6 +27,8 @@ If you want to watch logs in the foreground, run the command directly in the ter
   one slot while the other slot rotates fairly through non-campaign channels.
   Competing campaign channels wait until the pinned campaign completes or goes
   offline, preventing Twitch's single-channel Drop progress from being split.
+  Completion is determined by matching the channel's campaign IDs to typed
+  inventory progress; a fully claimed campaign releases its pin.
   With no active campaign, both creditable slots rotate every 15 minutes through
   the full eligible set.
 - `watch_streak_vod_recovery` is an opt-in global/per-streamer setting. It uses
