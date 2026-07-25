@@ -170,7 +170,6 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - operator guide: [docs/behavior-parity/operator-guide.md](docs/behavior-parity/operator-guide.md)
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
-- container deployment notes: [docs/architecture/container-deployment.md](docs/architecture/container-deployment.md)
 - behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
 - release and rollback: [docs/release-process.md](docs/release-process.md)
@@ -187,6 +186,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --workspace --release --locked
+./scripts/verify-architecture.ps1
 ./scripts/verify-build-integrity.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```

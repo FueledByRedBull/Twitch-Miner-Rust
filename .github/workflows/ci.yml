@@ -52,6 +52,9 @@ jobs:
       - name: Validate release hygiene
         shell: pwsh
         run: ./scripts/verify-release-hygiene.ps1
+      - name: Validate architecture boundaries
+        shell: pwsh
+        run: ./scripts/verify-architecture.ps1
       - name: Validate Compose examples
         env:
           TWITCH_MINER_IMAGE: ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:0000000000000000000000000000000000000000000000000000000000000000

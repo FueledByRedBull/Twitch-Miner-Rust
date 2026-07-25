@@ -14,6 +14,10 @@ use crate::types::{
     StreamUpdate,
 };
 
+/// Cloneable command handle for the sole mutable [`RuntimeState`] owner.
+///
+/// Every operation awaits bounded queue capacity. Dropping a caller never
+/// transfers state ownership or permits later producers to bypass ordering.
 #[derive(Debug, Clone)]
 pub struct RuntimeHandle {
     sender: mpsc::Sender<RuntimeCommand>,
@@ -27,6 +31,9 @@ pub struct RuntimeHandle {
 // increasing tail latency or memory relative to smaller/larger candidates.
 const RUNTIME_QUEUE_CAPACITY: usize = 64;
 
+/// Lock-free measurements for the actor boundary.
+///
+/// Metrics are observational only and never participate in state decisions.
 #[derive(Debug, Default)]
 pub struct RuntimeMetrics {
     processed_events: AtomicU64,

@@ -69,8 +69,9 @@ if ($dockerfile -notmatch 'snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z' -o
 
 $ciWorkflow = Get-Content -Raw .github/workflows/ci.yml
 if ($ciWorkflow -notmatch 'cargo-deny@\d+\.\d+\.\d+' -or
-    $ciWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+') {
-    throw 'CI analysis executables must use explicit versions.'
+    $ciWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+' -or
+    $ciWorkflow -notmatch 'verify-architecture\.ps1') {
+    throw 'CI analysis tools must be pinned and the architecture gate must run.'
 }
 if ($ciWorkflow -match 'gitleaks/gitleaks-action' -or
     $ciWorkflow -notmatch 'GITLEAKS_VERSION:\s*\d+\.\d+\.\d+' -or

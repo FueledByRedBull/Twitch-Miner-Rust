@@ -15,6 +15,7 @@ cargo doc --workspace --all-features --locked --no-deps
 cargo check --manifest-path fuzz/Cargo.toml --locked --all-targets
 cargo build --workspace --release --locked
 ./scripts/verify-build-integrity.ps1
+./scripts/verify-architecture.ps1
 ./scripts/verify-release-hygiene.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
@@ -45,6 +46,13 @@ update. Run `tests/contract/tests/parser_robustness.rs` as part of the normal
 suite; it is the bounded arbitrary-input regression check for protocol
 parsers. Release changes need `CHANGELOG.md`, the protocol inventory,
 container/release docs, and image-smoke updates.
+
+Crate dependency directions are intentional. Run
+`scripts/verify-architecture.ps1` after changing a workspace manifest or moving
+responsibilities between crates. Update the allowlist only when the architecture
+itself is deliberately changing; do not weaken it to make an accidental
+dependency pass. Substantial unit-test source belongs under the owning crate's
+`tests/unit/` directory and is included privately with `cfg(test)`.
 
 Pull requests use `.github/pull_request_template.md`. Never create fixtures
 from real cookies, account IDs, webhooks, logs, or request payloads. Produce

@@ -1,4 +1,10 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+//! Process composition for the miner.
+//!
+//! This crate owns CLI/bootstrap, task supervision, network-effect execution,
+//! health publication, and graceful shutdown. Domain state remains owned by
+//! `tm-runtime`; application tasks must not create a second mutable state owner
+//! or silently retry a points-changing Twitch mutation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -375,4 +381,5 @@ async fn run_prepared_miner(prepared: PreparedMiner, requested_paths: AppPaths) 
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/app_tests.rs"]
 mod app_tests;

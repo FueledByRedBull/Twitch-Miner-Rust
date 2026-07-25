@@ -1,3 +1,9 @@
+//! Pure mining-domain types and decision logic.
+//!
+//! This crate has no transport, runtime, filesystem, or application dependency.
+//! Its prediction, watch-selection, formatting, and settlement functions are
+//! deterministic for the same validated inputs.
+
 pub mod formatting;
 pub mod prediction;
 pub mod types;

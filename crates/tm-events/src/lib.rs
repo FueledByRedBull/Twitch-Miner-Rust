@@ -1,3 +1,9 @@
+//! Transport-neutral events accepted by the single-writer runtime.
+//!
+//! Event variants describe observations, never network clients or retry policy.
+//! External mutation identifiers remain available to the runtime so duplicate
+//! delivery cannot produce duplicate state effects.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tm_domain::{CommunityGoal, PredictionEvent};

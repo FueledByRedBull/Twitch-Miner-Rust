@@ -15,26 +15,16 @@ const PRESENCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const PRESENCE_POLL_CONCURRENCY: usize = 4;
 
 pub(crate) struct EventSubTaskContext {
-    pub(crate) runtime: tm_runtime::RuntimeHandle,
-    pub(crate) twitch: Arc<TwitchClient>,
+    pub(crate) effects: RuntimeEffectContext,
     pub(crate) auth_token: String,
     pub(crate) tracked_streamers: Vec<tm_domain::Streamer>,
-    pub(crate) persistent_user_id: String,
     pub(crate) prediction_eventsub_authorized: bool,
-    pub(crate) observability: AppObservability,
-    pub(crate) health: HealthTracker,
     pub(crate) fallback_tx: tokio::sync::watch::Sender<Vec<usize>>,
 }
 
 impl EventSubTaskContext {
     fn runtime_effect_context(&self) -> RuntimeEffectContext {
-        RuntimeEffectContext::new(
-            self.runtime.clone(),
-            Arc::clone(&self.twitch),
-            self.persistent_user_id.clone(),
-            self.observability.clone(),
-            self.health.clone(),
-        )
+        self.effects.clone()
     }
 }
 
@@ -61,7 +51,11 @@ async fn run_eventsub_loop(
         else {
             break;
         };
-        if !record_connection_result(connection_result, &context.health, &mut failure_attempt) {
+        if !record_connection_result(
+            connection_result,
+            &context.effects.health,
+            &mut failure_attempt,
+        ) {
             break;
         }
         if wait_to_reconnect(&mut stop, failure_attempt).await {
@@ -125,7 +119,7 @@ fn build_eventsub_client(context: &EventSubTaskContext) -> EventSubClient {
         source_policy: tm_pubsub::TransportSourcePolicy::viewer_compatibility(),
         authorized_prediction_broadcaster_id: context
             .prediction_eventsub_authorized
-            .then(|| context.persistent_user_id.clone()),
+            .then(|| context.effects.persistent_user_id.clone()),
         verify_subscriptions: false,
         http_client: reqwest::Client::new(),
     })
@@ -374,28 +368,30 @@ async fn handle_eventsub_message(
 ) -> bool {
     match message {
         EventSubConnectionEvent::Setup(report) => {
-            context.health.record_eventsub_setup(*report);
-            context.health.success("eventsub");
+            context.effects.health.record_eventsub_setup(*report);
+            context.effects.health.success("eventsub");
         }
-        EventSubConnectionEvent::Heartbeat => context.health.success("eventsub"),
+        EventSubConnectionEvent::Heartbeat => context.effects.health.success("eventsub"),
         EventSubConnectionEvent::Event(event) => {
             let log_event = (*event).clone();
             let received_at = Instant::now();
             match context
+                .effects
                 .runtime
                 .apply_event_with_outcome(*event, time_now())
                 .await
             {
                 Ok(application) => {
                     context
+                        .effects
                         .runtime
                         .metrics_handle()
                         .record_transport_latency(received_at.elapsed());
-                    context.health.success("eventsub");
+                    context.effects.health.success("eventsub");
                     if application.changed {
                         if let Err(error) = crate::pubsub::log_pubsub_event(
-                            &context.runtime,
-                            &context.observability,
+                            &context.effects.runtime,
+                            &context.effects.observability,
                             &log_event,
                         )
                         .await
@@ -421,7 +417,10 @@ async fn handle_eventsub_message(
                     }
                 }
                 Err(error) => {
-                    context.health.failure("eventsub", "event-application");
+                    context
+                        .effects
+                        .health
+                        .failure("eventsub", "event-application");
                     tracing::warn!(
                         task = "eventsub",
                         error_class = "event-application",
