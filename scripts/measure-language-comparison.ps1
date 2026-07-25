@@ -133,8 +133,8 @@ try {
     }
     $rustDecision = $rustBenchmark.decision_output | ConvertTo-Json -Compress
     $goDecision = $goBenchmark.decision_output | ConvertTo-Json -Compress
-    if ($rustBenchmark.schema -ne 2 -or
-        $goBenchmark.schema -ne 2 -or
+    if ($rustBenchmark.schema -ne 3 -or
+        $goBenchmark.schema -ne 3 -or
         $rustBenchmark.workload -ne $goBenchmark.workload -or
         $rustBenchmark.iterations_per_run -ne $goBenchmark.iterations_per_run -or
         $rustBenchmark.runs -ne $goBenchmark.runs -or
@@ -145,7 +145,7 @@ try {
     }
 
     $report = [ordered]@{
-        schema = 2
+        schema = 3
         measured_at_utc = [DateTime]::UtcNow.ToString('o')
         host = [ordered]@{
             os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
@@ -175,7 +175,7 @@ try {
                 'stripped release binary size',
                 'CLI parse-and-help process startup',
                 'complete production MOST_VOTED decision with identical varying sanitized inputs',
-                'full choice, outcome ID, amount, operation checksum, and semantic checksum'
+                'full choice, outcome ID, amount, operation checksum, and all-decision semantic checksum'
             )
             not_equivalent = @(
                 'Rust is compiled with the production size-oriented opt-level=z/LTO profile; Go uses its default speed optimizer and stripped symbols',

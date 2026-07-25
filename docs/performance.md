@@ -107,11 +107,15 @@ with the same varying sanitized balances and iteration count:
   -OutputPath ./target/language-comparison.json
 ```
 
-Schema 2 consumes the complete returned decision in both harnesses on every
+Schema 3 consumes the complete returned decision in both harnesses on every
 iteration. It verifies choice, outcome ID, amount, an operation checksum, and a
-stable semantic checksum before accepting a report. Balances cycle from 123,456
-through 123,463 so the timed loop is not one constant result. The report also
-records the important remaining work differences:
+stable semantic checksum over every decision in a separate deterministic pass
+before accepting a report. The separate pass keeps byte-by-byte validation out
+of the timed production decision while ensuring that an equal-length
+intermediate outcome-ID mismatch cannot converge to a passing final result.
+Balances cycle from 123,456 through 123,463 so the timed loop is not one
+constant result. The report also records the important remaining work
+differences:
 
 - Rust uses the shipped size-oriented `opt-level = "z"` plus LTO profile; Go
   uses its default speed optimizer and stripped symbols.
