@@ -49,7 +49,7 @@ foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.rpi.yml', 'd
 }
 
 $dockerfile = Get-Content -Raw Dockerfile
-if ($dockerfile -notmatch '(?m)^# syntax=docker/dockerfile:[^@\s]+@sha256:[0-9a-f]{64}$') {
+if ($dockerfile -notmatch '(?m)^# syntax=docker/dockerfile:[^@\s]+@sha256:[0-9a-f]{64}\r?$') {
     throw 'Dockerfile frontend must be pinned by immutable digest.'
 }
 if ($dockerfile -notmatch 'HEALTHCHECK') {
