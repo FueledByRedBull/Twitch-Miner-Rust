@@ -154,7 +154,7 @@ $oldImage = $env:TWITCH_MINER_IMAGE
 $oldDataDir = $env:TWITCH_MINER_DATA_DIR
 $oldUid = $env:UID
 $oldGid = $env:GID
-$candidateDeploymentStarted = $false
+$rollbackRecoveryRequired = $false
 
 function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
     & docker @Arguments
@@ -255,27 +255,53 @@ function Assert-RunningRollbackImage {
     }
 }
 
+function Stop-RollbackForExclusiveCanary {
+    Invoke-Docker @(
+        'compose', '-f', $resolvedCompose, 'stop', '--timeout', '30', $Service
+    ) 'Rollback service did not stop cleanly for the exclusive canary'
+
+    $containerId = (& docker compose -f $resolvedCompose ps -a -q $Service 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($containerId)) {
+        throw 'Stopped rollback service could not be resolved.'
+    }
+    $state = (& docker inspect --format '{{.State.Status}}|{{.State.ExitCode}}' $containerId.Trim() 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $state.Trim() -ne 'exited|0') {
+        throw 'Rollback service did not complete a normal SIGTERM stop.'
+    }
+}
+
+function Restore-RollbackService {
+    Set-ComposeImage $RollbackImage
+    Invoke-Docker @('compose', '-f', $resolvedCompose, 'pull', $Service) 'Rollback pull failed'
+    Invoke-Docker @(
+        'compose', '-f', $resolvedCompose, 'up', '-d', '--force-recreate', $Service
+    ) 'Rollback deployment failed'
+    Test-DeployedService $RollbackRevision 'Rollback'
+}
+
 try {
     Test-ImageConfig $CandidateImage $true
     Test-ImageConfig $RollbackImage $false
     Test-ImageRevision $CandidateImage $CandidateRevision
     Test-ImageRevision $RollbackImage $RollbackRevision
     Assert-RunningRollbackImage
-    Test-ImageCanary $CandidateImage
-    Set-ComposeImage $CandidateImage
-    Invoke-Docker @('compose', '-f', $resolvedCompose, 'config', '--quiet') 'Compose validation failed'
 
     $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
     $backup = "$resolvedCompose.pre-${timestamp}.bak"
-    if ($PSCmdlet.ShouldProcess($resolvedCompose, "Back up Compose to $backup")) {
-        Copy-Item -LiteralPath $resolvedCompose -Destination $backup -ErrorAction Stop
-    }
-    if (-not $PSCmdlet.ShouldProcess($Service, "Deploy candidate $CandidateImage")) {
+    if (-not $PSCmdlet.ShouldProcess(
+            $Service,
+            "Back up Compose, stop rollback normally, run the exclusive canary, deploy $CandidateImage, and restore rollback on failure"
+        )) {
         return
     }
+    Copy-Item -LiteralPath $resolvedCompose -Destination $backup -ErrorAction Stop
+    $rollbackRecoveryRequired = $true
+    Stop-RollbackForExclusiveCanary
+    Test-ImageCanary $CandidateImage
 
+    Set-ComposeImage $CandidateImage
+    Invoke-Docker @('compose', '-f', $resolvedCompose, 'config', '--quiet') 'Compose validation failed'
     Invoke-Docker @('compose', '-f', $resolvedCompose, 'pull', $Service) 'Candidate pull failed'
-    $candidateDeploymentStarted = $true
     Invoke-Docker @(
         'compose', '-f', $resolvedCompose, 'up', '-d', '--force-recreate', $Service
     ) 'Candidate deployment failed'
@@ -284,20 +310,13 @@ try {
     Write-Output "candidate-deployment-ok: revision=$CandidateRevision backup=$backup"
 } catch {
     $candidateFailure = $_
-    if (-not $candidateDeploymentStarted) {
+    if (-not $rollbackRecoveryRequired) {
         throw "Candidate preflight failed; the running service was unchanged. $($candidateFailure.Exception.Message)"
     }
-    if ($PSCmdlet.ShouldProcess($Service, "Restore rollback image $RollbackImage")) {
-        Set-ComposeImage $RollbackImage
-        try {
-            Invoke-Docker @('compose', '-f', $resolvedCompose, 'pull', $Service) 'Rollback pull failed'
-            Invoke-Docker @(
-                'compose', '-f', $resolvedCompose, 'up', '-d', '--force-recreate', $Service
-            ) 'Rollback deployment failed'
-            Test-DeployedService $RollbackRevision 'Rollback'
-        } catch {
-            throw "Candidate failed and rollback health verification also failed. Candidate failure: $($candidateFailure.Exception.Message)"
-        }
+    try {
+        Restore-RollbackService
+    } catch {
+        throw "Candidate failed and rollback health verification also failed. Candidate failure: $($candidateFailure.Exception.Message)"
     }
     throw "Candidate verification failed; rollback was requested. $($candidateFailure.Exception.Message)"
 } finally {

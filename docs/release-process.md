@@ -153,10 +153,13 @@ references and both 40-character revisions. It preflights candidate and
 rollback config compatibility and revision identity, requiring structured
 `--json` validation from the candidate while using the plain check supported by
 older rollback images. It verifies that the supplied
-rollback reference is the image used by the running service, runs the candidate
-read-only canary, and backs up Compose. After replacement it waits through the
-bounded startup window for the expected revision and healthy state; any failed
-gate restores and verifies the rollback image:
+rollback reference is the image used by the running service and backs up
+Compose. Because an active miner can consume Twitch's complete EventSub cost
+budget, the helper then stops the rollback service with normal `SIGTERM` before
+running the candidate read-only canary exclusively. After replacement it waits
+through the bounded startup window for the expected revision and healthy state;
+any failed canary or deployment gate restores and verifies the rollback image.
+This guarded path therefore includes a short, intentional mining interruption:
 
 ```powershell
 ./scripts/deploy-with-rollback.ps1 `
