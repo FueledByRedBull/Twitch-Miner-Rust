@@ -34,9 +34,22 @@ jobs:
         with:
           go-version: '1.21'
           cache-dependency-path: Twitch-Channel-Points-Miner/go.sum
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
       - name: Run Go baseline and Rust contract comparison
         shell: pwsh
         run: ./scripts/verify-go-baseline.ps1 -GoRoot Twitch-Channel-Points-Miner
+      - name: Validate complete language comparison
+        shell: pwsh
+        run: >
+          ./scripts/measure-language-comparison.ps1
+          -GoRoot Twitch-Channel-Points-Miner
+          -Iterations 100000
+          -Runs 3
+          -StartupRuns 5
+          -OutputPath ./language-comparison-smoke.json
 
   docs:
     runs-on: ubuntu-latest

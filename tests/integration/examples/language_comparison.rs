@@ -70,28 +70,61 @@ fn percentile(samples: &[f64], percent: usize) -> f64 {
     ordered.get(index).copied().unwrap_or_default()
 }
 
+fn benchmark_balance(index: u32) -> i64 {
+    123_456_i64 + i64::from(index & 7)
+}
+
+fn operation_checksum(decision: &PredictionDecision) -> i64 {
+    decision
+        .amount
+        .wrapping_add(i64::try_from(decision.choice.unwrap_or_default()).unwrap_or_default())
+        .wrapping_add(i64::try_from(decision.outcome_id.len()).unwrap_or_default())
+}
+
+fn semantic_checksum(decision: &PredictionDecision) -> String {
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+
+    let choice = decision.choice.map_or(u64::MAX, |value| value as u64);
+    let bytes = choice
+        .to_le_bytes()
+        .into_iter()
+        .chain(decision.amount.to_le_bytes())
+        .chain(decision.outcome_id.bytes());
+    let hash = bytes.fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    });
+    format!("{hash:016x}")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let iterations = std::env::var("TM_LANGUAGE_BENCHMARK_ITERATIONS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(2_000_000)
-        .clamp(10_000, 100_000_000);
+        .clamp(100_000, 100_000_000);
     let runs = std::env::var("TM_LANGUAGE_BENCHMARK_RUNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(5)
         .clamp(3, 25);
     let mut event = benchmark_event();
-    for _ in 0..10_000 {
-        black_box(event.decide(123_456));
+    let mut last_decision = PredictionDecision::default();
+    for index in 0..10_000 {
+        let decision = event.decide(benchmark_balance(index));
+        black_box(&decision);
+        last_decision = decision;
     }
 
     let mut throughput = Vec::with_capacity(runs);
     let mut checksum = 0_i64;
     for _ in 0..runs {
         let started = Instant::now();
-        for _ in 0..iterations {
-            checksum = checksum.wrapping_add(black_box(event.decide(123_456).amount));
+        for index in 0..iterations {
+            let decision = event.decide(benchmark_balance(index));
+            checksum = checksum.wrapping_add(operation_checksum(&decision));
+            black_box(&decision);
+            last_decision = decision;
         }
         throughput.push(f64::from(iterations) / started.elapsed().as_secs_f64());
     }
@@ -99,10 +132,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": 1,
+            "schema": 2,
             "implementation": "rust",
             "revision": option_env!("BUILD_REVISION").unwrap_or("development"),
-            "workload": "production-prediction-decision",
+            "workload": "complete-production-prediction-decision",
             "iterations_per_run": iterations,
             "runs": runs,
             "operations_per_second": {
@@ -110,6 +143,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "p95": percentile(&throughput, 95),
             },
             "checksum": checksum,
+            "semantic_checksum": semantic_checksum(&last_decision),
+            "decision_output": {
+                "choice": last_decision.choice,
+                "outcome_id": last_decision.outcome_id,
+                "amount": last_decision.amount,
+            },
+            "measurement": {
+                "build_profile": "cargo-release-opt-z-lto",
+                "percentage_math": "exact-i128-integer",
+                "outcome_id": "owned-string",
+                "output_consumption": "complete-decision-black-box",
+            },
         }))?
     );
     Ok(())

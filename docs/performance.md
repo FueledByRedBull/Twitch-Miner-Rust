@@ -98,8 +98,8 @@ snapshot work.
 
 Use an explicit clean checkout of the pinned Go reference. The script builds
 both stripped release applications on the same host, measures their native help
-startup, and runs the identical production `MOST_VOTED` prediction decision
-with the same sanitized inputs, iteration count, and checksum:
+startup, and runs the complete production `MOST_VOTED` prediction decision
+with the same varying sanitized balances and iteration count:
 
 ```powershell
 ./scripts/measure-language-comparison.ps1 `
@@ -107,23 +107,59 @@ with the same sanitized inputs, iteration count, and checksum:
   -OutputPath ./target/language-comparison.json
 ```
 
-The comparison deliberately reports two categories:
+Schema 2 consumes the complete returned decision in both harnesses on every
+iteration. It verifies choice, outcome ID, amount, an operation checksum, and a
+stable semantic checksum before accepting a report. Balances cycle from 123,456
+through 123,463 so the timed loop is not one constant result. The report also
+records the important remaining work differences:
 
-- comparable: stripped binary size, CLI parse/help startup, and the normalized
-  production prediction-decision kernel;
-- not comparable: Rust's single-writer actor, bounded queue, state snapshots,
-  transport supervision, and live campaign/recovery behavior, because the Go
-  baseline has no equivalent workload.
+- Rust uses the shipped size-oriented `opt-level = "z"` plus LTO profile; Go
+  uses its default speed optimizer and stripped symbols.
+- Rust computes the percentage with exact overflow-safe `i128` arithmetic; Go
+  multiplies through `float64` and truncates.
+- Rust materializes owned outcome-ID strings; Go copies immutable string
+  headers.
 
-On the clean 2026-07-25 Windows x64 run of Rust revision
-`f88ea54381444cb7183e71dc64361df957fb0603` against Go revision
-`91f00698314dbbdd6c757d7b525458c82173e622`, the stripped Go executable was
-7,486,464 bytes and the Rust executable was 7,814,656 bytes. Thirty help
-launches had medians of 6.820 ms for Go and 7.693 ms for Rust. The matching
-86,410,000,000 checksum ran at medians of 57.81 million decisions/s in Go and
-17.18 million decisions/s in Rust. Prediction decisions occur once per event,
-so both are far beyond runtime demand; this result does not make Go universally
-faster or measure network-bound mining throughput.
+There is intentionally no synthetic "allocation-free kernel" score. The Go
+selector is private; duplicating it in a benchmark or adding a production test
+hook would stop measuring the shipped implementations. Rust's actor, bounded
+queue, snapshots, transport supervision, and live campaign/recovery behavior
+also have no equivalent Go workload.
+
+The clean pre-change 2026-07-25 Windows x64 baseline used Rust revision
+`3e2a715286b2ddb8ada1bd73767870f66770fc6c` and Go revision
+`940c98409e5821900752815cd9550ae5b750b597`. The stripped executables were
+7,815,168 Rust bytes (7.45 MiB) and 7,433,216 Go bytes. Thirty help launches had
+medians of 7.704 ms for Rust and 6.812 ms for Go. The old amount-only workload
+reported 16.47 million Rust decisions/s and 56.26 million Go decisions/s.
+
+The comparison script now builds the miner binary and benchmark example in
+separate checked Cargo commands. Passing `--example` in the previous combined
+command could leave an existing miner executable stale, making its startup and
+size fields unreliable after source changes.
+
+A same-host, alternating 100-pair experiment tested moving Clap parsing ahead
+of Tokio runtime construction using independently built old and new binaries.
+Both executables used the same filename and full revision metadata; their
+normalized version and help output matched. The untouched binary measured
+7.980 ms median and 9.225 ms p95; the deferred-runtime binary measured
+7.326 ms median and 8.573 ms p95. The retained change improves the median by
+8.2% and p95 by 7.1%, preserves the multi-thread runtime and all drivers, and
+reduced this isolated executable by 1,536 bytes.
+
+The corrected working comparison measured 16.06 million complete Rust
+decisions/s and 55.38 million complete Go decisions/s with identical outputs.
+A separate investigative Rust build with `opt-level = "3"` reached 17.43
+million decisions/s. That small change does not explain or close the Go gap and
+does not justify inflating the shipped binary. These development experiments
+are design evidence, not clean release baselines.
+
+Prediction decisions occur once per event, so either implementation remains
+millions of times beyond runtime demand. A 40-50 million decisions/s headline
+is not a product requirement and must not drive ownership, API, arithmetic, or
+binary-profile changes. The comparison measures this narrow operation; it does
+not make either language universally faster or measure network-bound mining
+throughput.
 
 The production ARM64 image remains a two-layer `scratch` image. The measured
 Pi baseline was 3,008,991 compressed bytes, with a 6.31 MB uncompressed static

@@ -13,7 +13,6 @@ import (
 )
 
 var revision = "development"
-var checksum int
 
 func integerSetting(value int) *int {
 	return &value
@@ -91,39 +90,85 @@ func percentile(samples []float64, percent int) float64 {
 	return ordered[index]
 }
 
+func benchmarkBalance(index int) int {
+	return 123456 + (index & 7)
+}
+
+func operationChecksum(decision classes.PredictionDecision) int64 {
+	return int64(decision.Amount) + int64(decision.Choice) + int64(len(decision.OutcomeID))
+}
+
+func semanticChecksum(decision classes.PredictionDecision) string {
+	const offset uint64 = 14695981039346656037
+	const prime uint64 = 1099511628211
+	hash := offset
+	mix := func(value byte) {
+		hash ^= uint64(value)
+		hash *= prime
+	}
+	choice := uint64(decision.Choice)
+	for shift := 0; shift < 64; shift += 8 {
+		mix(byte(choice >> shift))
+	}
+	amount := uint64(int64(decision.Amount))
+	for shift := 0; shift < 64; shift += 8 {
+		mix(byte(amount >> shift))
+	}
+	for index := 0; index < len(decision.OutcomeID); index++ {
+		mix(decision.OutcomeID[index])
+	}
+	return fmt.Sprintf("%016x", hash)
+}
+
 func main() {
-	iterations := boundedEnv("TM_LANGUAGE_BENCHMARK_ITERATIONS", 2000000, 10000, 100000000)
+	iterations := boundedEnv("TM_LANGUAGE_BENCHMARK_ITERATIONS", 2000000, 100000, 100000000)
 	runs := boundedEnv("TM_LANGUAGE_BENCHMARK_RUNS", 5, 3, 25)
 	event := benchmarkEvent()
 	if event == nil {
 		panic("prediction fixture was rejected")
 	}
+	lastDecision := classes.PredictionDecision{}
 	for index := 0; index < 10000; index++ {
-		checksum += event.Decide(123456).Amount
+		lastDecision = event.Decide(benchmarkBalance(index))
+		runtime.KeepAlive(lastDecision)
 	}
 
 	throughput := make([]float64, 0, runs)
-	checksum = 0
+	var checksum int64
 	for run := 0; run < runs; run++ {
 		started := time.Now()
 		for index := 0; index < iterations; index++ {
-			checksum += event.Decide(123456).Amount
+			lastDecision = event.Decide(benchmarkBalance(index))
+			checksum += operationChecksum(lastDecision)
+			runtime.KeepAlive(lastDecision)
 		}
 		throughput = append(throughput, float64(iterations)/time.Since(started).Seconds())
 	}
 	runtime.KeepAlive(event)
 	report := map[string]interface{}{
-		"schema":             1,
+		"schema":             2,
 		"implementation":     "go",
 		"revision":           revision,
-		"workload":           "production-prediction-decision",
+		"workload":           "complete-production-prediction-decision",
 		"iterations_per_run": iterations,
 		"runs":               runs,
 		"operations_per_second": map[string]float64{
 			"median": percentile(throughput, 50),
 			"p95":    percentile(throughput, 95),
 		},
-		"checksum": checksum,
+		"checksum":          checksum,
+		"semantic_checksum": semanticChecksum(lastDecision),
+		"decision_output": map[string]interface{}{
+			"choice":     lastDecision.Choice,
+			"outcome_id": lastDecision.OutcomeID,
+			"amount":     lastDecision.Amount,
+		},
+		"measurement": map[string]interface{}{
+			"build_profile":      "go-default-optimizer-stripped",
+			"percentage_math":    "float64-truncating",
+			"outcome_id":         "shallow-string-header",
+			"output_consumption": "complete-decision-runtime-keepalive",
+		},
 	}
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

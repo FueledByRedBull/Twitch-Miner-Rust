@@ -9,8 +9,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($Iterations -lt 10000 -or $Iterations -gt 100000000) {
-    throw 'Iterations must be between 10,000 and 100,000,000.'
+if ($Iterations -lt 100000 -or $Iterations -gt 100000000) {
+    throw 'Iterations must be between 100,000 and 100,000,000.'
 }
 if ($Runs -lt 3 -or $Runs -gt 25) {
     throw 'Runs must be between 3 and 25.'
@@ -91,9 +91,13 @@ try {
     $env:BUILD_REVISION = $rustRevision
     Push-Location $rustRoot
     try {
-        cargo build -p tm-app -p tm-integration-tests --example language_comparison --release --locked
+        cargo build -p tm-app --release --locked
         if ($LASTEXITCODE -ne 0) {
-            throw "Rust release build failed with exit code $LASTEXITCODE."
+            throw "Rust miner release build failed with exit code $LASTEXITCODE."
+        }
+        cargo build -p tm-integration-tests --example language_comparison --release --locked
+        if ($LASTEXITCODE -ne 0) {
+            throw "Rust comparison release build failed with exit code $LASTEXITCODE."
         }
     } finally {
         Pop-Location
@@ -127,13 +131,21 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Go comparison failed with exit code $LASTEXITCODE."
     }
-    if ($rustBenchmark.workload -ne $goBenchmark.workload -or
-        $rustBenchmark.checksum -ne $goBenchmark.checksum) {
+    $rustDecision = $rustBenchmark.decision_output | ConvertTo-Json -Compress
+    $goDecision = $goBenchmark.decision_output | ConvertTo-Json -Compress
+    if ($rustBenchmark.schema -ne 2 -or
+        $goBenchmark.schema -ne 2 -or
+        $rustBenchmark.workload -ne $goBenchmark.workload -or
+        $rustBenchmark.iterations_per_run -ne $goBenchmark.iterations_per_run -or
+        $rustBenchmark.runs -ne $goBenchmark.runs -or
+        $rustBenchmark.checksum -ne $goBenchmark.checksum -or
+        $rustBenchmark.semantic_checksum -ne $goBenchmark.semantic_checksum -or
+        $rustDecision -ne $goDecision) {
         throw 'The Rust and Go comparison workloads produced different results.'
     }
 
     $report = [ordered]@{
-        schema = 1
+        schema = 2
         measured_at_utc = [DateTime]::UtcNow.ToString('o')
         host = [ordered]@{
             os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
@@ -162,9 +174,14 @@ try {
             equivalent = @(
                 'stripped release binary size',
                 'CLI parse-and-help process startup',
-                'production MOST_VOTED prediction decision with identical sanitized inputs and checksum'
+                'complete production MOST_VOTED decision with identical varying sanitized inputs',
+                'full choice, outcome ID, amount, operation checksum, and semantic checksum'
             )
             not_equivalent = @(
+                'Rust is compiled with the production size-oriented opt-level=z/LTO profile; Go uses its default speed optimizer and stripped symbols',
+                'Rust uses exact i128 percentage arithmetic; Go uses float64 multiplication and truncation',
+                'Rust materializes owned outcome-ID strings; Go copies shallow immutable string headers',
+                'No allocation-free kernel is reported because the Go selector is private and exposing or duplicating it would distort production interfaces',
                 'Rust actor replay: the Go baseline has no equivalent single-writer actor, bounded queue, or snapshot API',
                 'live Twitch mining: concurrent account sessions would interfere and are not a safe benchmark'
             )
