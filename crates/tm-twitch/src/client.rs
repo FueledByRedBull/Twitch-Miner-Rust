@@ -261,7 +261,14 @@ impl TwitchClient {
                 context: "fetch settings script",
             });
         }
-        Ok(extract_spade_url(&response.text().await?)?)
+        let spade_url = extract_spade_url(&response.text().await?)?;
+        // The settings script is fetched over TLS from a pinned Twitch host, but
+        // the spade value inside it is unconstrained text and the payload we post
+        // to it carries account identifiers. Hold it to the same bar as playback.
+        let parsed = reqwest::Url::parse(&spade_url)
+            .map_err(|_| TwitchClientError::InvalidField("spade_url"))?;
+        validate_remote_endpoint(&parsed, "spade_url")?;
+        Ok(spade_url)
     }
 
     pub async fn fetch_channel_id(&self, login: &str) -> Result<String, TwitchClientError> {
@@ -376,7 +383,7 @@ impl TwitchClient {
             .query_pairs_mut()
             .append_pair("sig", &token.signature)
             .append_pair("token", &token.value);
-        validate_playback_url(&master_url, "playback_url")?;
+        validate_remote_endpoint(&master_url, "playback_url")?;
 
         let master = self
             .client
@@ -397,7 +404,7 @@ impl TwitchClient {
             .await
             .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
         let variant_url = last_playlist_url(&master_url, &master_body, "master playlist")?;
-        validate_playback_url(&variant_url, "master playlist")?;
+        validate_remote_endpoint(&variant_url, "master playlist")?;
 
         let variant = self
             .client
@@ -418,7 +425,7 @@ impl TwitchClient {
             .await
             .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
         let segment_url = last_playlist_url(&variant_url, &variant_body, "media playlist")?;
-        validate_playback_url(&segment_url, "media playlist")?;
+        validate_remote_endpoint(&segment_url, "media playlist")?;
 
         let segment = self
             .client
@@ -893,14 +900,22 @@ pub(crate) fn last_playlist_url(
         .map_err(|_| TwitchClientError::InvalidField(field))
 }
 
-fn validate_playback_url(url: &reqwest::Url, field: &'static str) -> Result<(), TwitchClientError> {
+/// Guards every request target that Twitch hands us inside a document rather
+/// than one we compile in: playback playlists/segments and the spade endpoint.
+/// Loopback HTTP stays allowed so tests can serve these locally.
+pub(crate) fn validate_remote_endpoint(
+    url: &reqwest::Url,
+    field: &'static str,
+) -> Result<(), TwitchClientError> {
     let host = url
         .host_str()
         .ok_or(TwitchClientError::InvalidField(field))?;
-    let is_loopback = host
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(|address| address.is_loopback());
-    let is_public_domain = host.parse::<std::net::IpAddr>().is_err()
+    let address = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>();
+    let is_loopback = address.as_ref().is_ok_and(std::net::IpAddr::is_loopback);
+    let is_public_domain = address.is_err()
         && !host.eq_ignore_ascii_case("localhost")
         && !host.to_ascii_lowercase().ends_with(".local");
     if (url.scheme() == "https" && is_public_domain) || (url.scheme() == "http" && is_loopback) {

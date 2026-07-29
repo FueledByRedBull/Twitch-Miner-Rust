@@ -163,20 +163,40 @@ pub fn parse_eventsub_message(
                     "notification subscription type is empty",
                 ));
             }
-            // Reject unsupported or malformed payloads at the transport boundary.
-            let _ = event_from_notification(
+            // A subscription type this build does not model is an envelope-level
+            // unknown, not corrupt data: ignore it rather than dropping the
+            // socket. A payload for a type we do act on still fails closed here.
+            if !is_supported_subscription_type(&payload.subscription.subscription_type) {
+                return Ok(EventSubMessage::Unsupported);
+            }
+            let event = event_from_notification(
                 &payload.subscription.subscription_type,
                 &payload.event,
                 tracked_streamers,
             )?;
             Ok(EventSubMessage::Notification {
                 message_id: raw.metadata.message_id,
-                subscription_type: payload.subscription.subscription_type,
-                event: payload.event,
+                event: Box::new(event),
             })
         }
-        _ => Err(EventSubError::Protocol("unknown message type")),
+        // Twitch reserves the right to add message types and expects clients to
+        // ignore the ones they do not recognise.
+        _ => Ok(EventSubMessage::Unsupported),
     }
+}
+
+#[must_use]
+pub(super) fn is_supported_subscription_type(subscription_type: &str) -> bool {
+    matches!(
+        subscription_type,
+        "stream.online"
+            | "stream.offline"
+            | "channel.raid"
+            | "channel.prediction.begin"
+            | "channel.prediction.progress"
+            | "channel.prediction.lock"
+            | "channel.prediction.end"
+    )
 }
 
 pub(super) fn event_from_notification(

@@ -136,6 +136,31 @@ fn accepted_subscription_response(request: &serde_json::Value, id: usize) -> Str
     .to_string()
 }
 
+fn inherited_list_response(session_id: &str, count: usize) -> String {
+    let data = (1..=count)
+        .map(|id| {
+            json!({
+                "id": format!("subscription-{id}"),
+                "status": "enabled",
+                "type": "stream.online",
+                "version": "1",
+                "cost": 1,
+                "condition": {"broadcaster_user_id": "100"},
+                "transport": {"method": "websocket", "session_id": session_id},
+                "created_at": "2026-07-13T10:00:00Z"
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "data": data,
+        "total": count,
+        "total_cost": count,
+        "max_total_cost": 10,
+        "pagination": {}
+    })
+    .to_string()
+}
+
 fn capacity_response(total_cost: u32, max_total_cost: u32) -> String {
     json!({
         "data": [],
@@ -375,22 +400,61 @@ fn stream_offline_2026_fixture_accepts_additive_stream_id() {
         &tracked,
     )
     .unwrap();
-    let EventSubMessage::Notification {
-        subscription_type,
-        event,
-        ..
-    } = message
-    else {
+    let EventSubMessage::Notification { event, .. } = message else {
         panic!("expected notification");
     };
 
     assert_eq!(
-        event_from_notification(&subscription_type, &event, &tracked).unwrap(),
+        *event,
         MinerEvent::Playback {
             channel_id: String::from("100"),
             kind: crate::PlaybackType::StreamDown,
         }
     );
+}
+
+#[test]
+fn unmodelled_message_and_subscription_types_are_ignored_not_fatal() {
+    let tracked = [streamer()];
+
+    let unknown_message_type = parse_eventsub_message(
+        &json!({
+            "metadata": {"message_id":"future-1","message_type":"session_future_thing"},
+            "payload": {"anything": true}
+        })
+        .to_string(),
+        &tracked,
+    )
+    .unwrap();
+    assert!(matches!(unknown_message_type, EventSubMessage::Unsupported));
+
+    let unknown_subscription = parse_eventsub_message(
+        &json!({
+            "metadata": {"message_id":"future-2","message_type":"notification"},
+            "payload": {
+                "subscription": {"type":"channel.future.thing"},
+                "event": {"unmodelled": true}
+            }
+        })
+        .to_string(),
+        &tracked,
+    )
+    .unwrap();
+    assert!(matches!(unknown_subscription, EventSubMessage::Unsupported));
+
+    // A payload for a type the miner does act on must still fail closed.
+    assert!(parse_eventsub_message(
+        &json!({
+            "metadata": {"message_id":"bad-1","message_type":"notification"},
+            "payload": {
+                "subscription": {"type":"stream.online"},
+                "event": {"wrong_field": "100"}
+            }
+        })
+        .to_string(),
+        &tracked,
+    )
+    .is_err());
 }
 
 #[test]
@@ -671,6 +735,16 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
             write_json_response(&mut stream, "202 Accepted", &body).await;
             subscription_count_for_server.fetch_add(1, Ordering::SeqCst);
         }
+        // The reconnected session re-derives its active count from Twitch
+        // instead of reporting the previous session's numbers.
+        let (mut stream, _) = subscriptions_listener.accept().await.unwrap();
+        assert!(read_http_json(&mut stream).await.is_null());
+        write_json_response(
+            &mut stream,
+            "200 OK",
+            &inherited_list_response("session-2", 6),
+        )
+        .await;
     });
 
     let websocket_server = tokio::spawn(async move {
@@ -756,6 +830,20 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
             .count(),
         2
     );
+
+    // The inherited session reports a count verified against Twitch rather than
+    // the pre-reconnect number.
+    let setups = messages
+        .iter()
+        .filter_map(|message| match message {
+            super::EventSubConnectionEvent::Setup(report) => Some(report.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(setups.len(), 2);
+    assert!(!setups[0].verified);
+    assert!(setups[1].verified);
+    assert_eq!(setups[1].active_subscriptions, 6);
     assert!(messages.iter().any(|message| {
             matches!(
                 message,
