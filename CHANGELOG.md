@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Holds the spade endpoint to the same origin rules as playback. The URL is
+  extracted from an unconstrained field inside Twitch's settings script and the
+  minute-watched payload carries account identifiers, so it must now parse as a
+  public HTTPS origin (or loopback HTTP for tests) before any request is sent.
+- Ignores `EventSub` message types and subscription types this build does not
+  model, rather than treating them as protocol violations. An additive Twitch
+  change previously dropped the socket, and because each reconnect re-derives
+  capacity from the still-listed subscriptions of the dropped session, it could
+  degrade into progressively smaller subscription sets. Payloads for
+  subscription types the miner does act on still fail closed.
+- Re-derives the active `EventSub` subscription count from Twitch after a
+  session reconnect instead of reporting the previous session's numbers, and
+  marks the resulting report verified.
+- Decodes each `EventSub` frame once through a shared path, removing the
+  duplicated text/binary handling in the welcome and listen loops, and parses
+  each notification once instead of validating it twice.
 - Classifies watch-selection metadata refresh failures as `metadata-refresh`
   on the `minute` task instead of leaving them as unclassified warnings, so a
   failing stream-info read stays visible to health and warning classification

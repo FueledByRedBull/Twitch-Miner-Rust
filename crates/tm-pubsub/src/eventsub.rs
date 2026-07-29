@@ -23,8 +23,10 @@ pub use planning::plan_eventsub_capacity;
 use planning::subscription_plan_with_capacity;
 #[cfg(test)]
 use planning::{subscription_plan, subscription_requests, subscription_requests_with_policy};
+#[cfg(test)]
+use protocol::event_from_notification;
 pub use protocol::parse_eventsub_message;
-use protocol::{event_from_notification, MessageDeduper};
+use protocol::MessageDeduper;
 
 pub const EVENTSUB_WEBSOCKET_URL: &str =
     "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30";
@@ -208,9 +210,11 @@ pub enum EventSubMessage {
     },
     Notification {
         message_id: String,
-        subscription_type: String,
-        event: Value,
+        event: Box<MinerEvent>,
     },
+    /// A message or subscription type this build does not model. Ignored so an
+    /// additive Twitch change cannot force a reconnect loop.
+    Unsupported,
 }
 
 impl EventSubClient {
@@ -230,7 +234,7 @@ impl EventSubClient {
 
         let mut deduper = MessageDeduper::default();
         let mut websocket_url = self.settings.websocket_url.clone();
-        let mut inherited_subscriptions = false;
+        let mut inherited_subscriptions: Option<EventSubSetupReport> = None;
         loop {
             let (mut socket, _) =
                 tokio::time::timeout(EVENTSUB_CONNECT_TIMEOUT, connect_async(&websocket_url))
@@ -245,18 +249,27 @@ impl EventSubClient {
             else {
                 return Err(EventSubError::Protocol("welcome message was not decoded"));
             };
-            if !inherited_subscriptions {
-                let report = self
-                    .create_subscriptions(&session_id, tracked_streamers)
-                    .await?;
-                if report.active_subscriptions == 0 {
-                    return Err(EventSubError::NoSubscriptions);
+            let report = match inherited_subscriptions.take() {
+                // Twitch carries the subscriptions to the reconnect URL, but the
+                // count must be re-derived for the new session rather than
+                // reported from memory.
+                Some(previous) => {
+                    self.reconcile_inherited_report(&session_id, previous)
+                        .await?
                 }
-                sender
-                    .send(EventSubConnectionEvent::Setup(Box::new(report)))
-                    .await
-                    .map_err(|_| EventSubError::Protocol("event channel closed"))?;
+                None => {
+                    self.create_subscriptions(&session_id, tracked_streamers)
+                        .await?
+                }
+            };
+            if report.active_subscriptions == 0 {
+                return Err(EventSubError::NoSubscriptions);
             }
+            let carried_report = report.clone();
+            sender
+                .send(EventSubConnectionEvent::Setup(Box::new(report)))
+                .await
+                .map_err(|_| EventSubError::Protocol("event channel closed"))?;
             sender
                 .send(EventSubConnectionEvent::Heartbeat)
                 .await
@@ -275,7 +288,7 @@ impl EventSubClient {
                     // Twitch keeps the subscriptions attached to the reconnect URL. Do not
                     // recreate them, which would produce duplicate-subscription errors.
                     websocket_url = reconnect_url;
-                    inherited_subscriptions = true;
+                    inherited_subscriptions = Some(carried_report);
                 }
                 result => return result,
             }
@@ -352,6 +365,45 @@ impl EventSubClient {
             report.verified = true;
         }
         Ok(report)
+    }
+
+    /// Re-derives the active subscription count for a session inherited through
+    /// a reconnect. The previous plan is retained for capability detail, but the
+    /// counts and cost come from Twitch rather than from the prior session.
+    async fn reconcile_inherited_report(
+        &self,
+        session_id: &str,
+        previous: EventSubSetupReport,
+    ) -> Result<EventSubSetupReport, EventSubError> {
+        let mut report = previous;
+        let mut active_subscriptions = 0_usize;
+        let mut cursor: Option<String> = None;
+        for _ in 0..EVENTSUB_MAX_LIST_PAGES {
+            let response = self.list_subscriptions_page(cursor.as_deref()).await?;
+            report.total_cost = response.total_cost;
+            report.max_total_cost = response.max_total_cost;
+            active_subscriptions += response
+                .data
+                .iter()
+                .filter(|subscription| {
+                    subscription.transport.method == "websocket"
+                        && subscription.transport.session_id == session_id
+                        && subscription.status == "enabled"
+                })
+                .count();
+            cursor = response
+                .pagination
+                .cursor
+                .filter(|value| !value.trim().is_empty());
+            if cursor.is_none() {
+                report.active_subscriptions = active_subscriptions;
+                report.verified = true;
+                return Ok(report);
+            }
+        }
+        Err(EventSubError::Protocol(
+            "subscription list exceeded the bounded page limit",
+        ))
     }
 
     async fn create_subscription(
@@ -599,31 +651,50 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     while let Some(message) = socket.next().await {
-        match message? {
-            Message::Text(text) => {
-                let parsed = parse_eventsub_message(text.as_ref(), tracked_streamers)?;
-                if matches!(parsed, EventSubMessage::Welcome { .. }) {
-                    return Ok(parsed);
-                }
-                return Err(EventSubError::Protocol("welcome was not the first message"));
+        match decode_frame(socket, message?).await? {
+            DecodedFrame::Ignored => {}
+            DecodedFrame::Closed => {
+                return Err(EventSubError::Protocol("closed before welcome"));
             }
-            Message::Binary(bytes) => {
-                let text = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| EventSubError::Protocol("binary frame is not UTF-8"))?;
-                let parsed = parse_eventsub_message(&text, tracked_streamers)?;
-                if matches!(parsed, EventSubMessage::Welcome { .. }) {
-                    return Ok(parsed);
-                }
-                return Err(EventSubError::Protocol("welcome was not the first message"));
-            }
-            Message::Ping(payload) => {
-                socket.send(Message::Pong(payload)).await?;
-            }
-            Message::Pong(_) | Message::Frame(_) => {}
-            Message::Close(_) => return Err(EventSubError::Protocol("closed before welcome")),
+            DecodedFrame::Text(text) => match parse_eventsub_message(&text, tracked_streamers)? {
+                parsed @ EventSubMessage::Welcome { .. } => return Ok(parsed),
+                // An unmodelled frame before the welcome is ignored rather than
+                // treated as a protocol violation.
+                EventSubMessage::Unsupported => {}
+                _ => return Err(EventSubError::Protocol("welcome was not the first message")),
+            },
         }
     }
     Err(EventSubError::Protocol("socket ended before welcome"))
+}
+
+enum DecodedFrame {
+    Text(String),
+    Ignored,
+    Closed,
+}
+
+/// Normalizes one websocket frame, answering pings so both the welcome and the
+/// listen loop share a single decoding path.
+async fn decode_frame<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    message: Message,
+) -> Result<DecodedFrame, EventSubError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match message {
+        Message::Text(text) => Ok(DecodedFrame::Text(text.as_str().to_owned())),
+        Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
+            .map(DecodedFrame::Text)
+            .map_err(|_| EventSubError::Protocol("binary frame is not UTF-8")),
+        Message::Ping(payload) => {
+            socket.send(Message::Pong(payload)).await?;
+            Ok(DecodedFrame::Ignored)
+        }
+        Message::Pong(_) | Message::Frame(_) => Ok(DecodedFrame::Ignored),
+        Message::Close(_) => Ok(DecodedFrame::Closed),
+    }
 }
 
 async fn listen_socket<S>(
@@ -646,80 +717,34 @@ where
         else {
             return Ok(());
         };
-        match message? {
-            Message::Text(text) => {
-                match parse_eventsub_message(text.as_ref(), tracked_streamers)? {
-                    EventSubMessage::Keepalive => sender
-                        .send(EventSubConnectionEvent::Heartbeat)
+        let text = match decode_frame(socket, message?).await? {
+            DecodedFrame::Ignored => continue,
+            DecodedFrame::Closed => return Ok(()),
+            DecodedFrame::Text(text) => text,
+        };
+        match parse_eventsub_message(&text, tracked_streamers)? {
+            EventSubMessage::Keepalive => sender
+                .send(EventSubConnectionEvent::Heartbeat)
+                .await
+                .map_err(|_| EventSubError::Protocol("event channel closed"))?,
+            EventSubMessage::Notification { message_id, event } => {
+                if deduper.insert(message_id) {
+                    sender
+                        .send(EventSubConnectionEvent::Event(event))
                         .await
-                        .map_err(|_| EventSubError::Protocol("event channel closed"))?,
-                    EventSubMessage::Notification {
-                        message_id,
-                        subscription_type,
-                        event,
-                    } => {
-                        if deduper.insert(message_id) {
-                            let event = event_from_notification(
-                                &subscription_type,
-                                &event,
-                                tracked_streamers,
-                            )?;
-                            sender
-                                .send(EventSubConnectionEvent::Event(Box::new(event)))
-                                .await
-                                .map_err(|_| EventSubError::Protocol("event channel closed"))?;
-                        }
-                    }
-                    EventSubMessage::Reconnect { reconnect_url } => {
-                        return Err(EventSubError::ReconnectRequested { reconnect_url });
-                    }
-                    EventSubMessage::Revocation { reason } => {
-                        return Err(EventSubError::Revoked { reason });
-                    }
-                    EventSubMessage::Welcome { .. } => {
-                        return Err(EventSubError::Protocol("unexpected welcome message"));
-                    }
+                        .map_err(|_| EventSubError::Protocol("event channel closed"))?;
                 }
             }
-            Message::Binary(bytes) => {
-                let text = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| EventSubError::Protocol("binary frame is not UTF-8"))?;
-                match parse_eventsub_message(&text, tracked_streamers)? {
-                    EventSubMessage::Keepalive => sender
-                        .send(EventSubConnectionEvent::Heartbeat)
-                        .await
-                        .map_err(|_| EventSubError::Protocol("event channel closed"))?,
-                    EventSubMessage::Notification {
-                        message_id,
-                        subscription_type,
-                        event,
-                    } => {
-                        if deduper.insert(message_id) {
-                            let event = event_from_notification(
-                                &subscription_type,
-                                &event,
-                                tracked_streamers,
-                            )?;
-                            sender
-                                .send(EventSubConnectionEvent::Event(Box::new(event)))
-                                .await
-                                .map_err(|_| EventSubError::Protocol("event channel closed"))?;
-                        }
-                    }
-                    EventSubMessage::Reconnect { reconnect_url } => {
-                        return Err(EventSubError::ReconnectRequested { reconnect_url });
-                    }
-                    EventSubMessage::Revocation { reason } => {
-                        return Err(EventSubError::Revoked { reason });
-                    }
-                    EventSubMessage::Welcome { .. } => {
-                        return Err(EventSubError::Protocol("unexpected welcome message"));
-                    }
-                }
+            EventSubMessage::Unsupported => {}
+            EventSubMessage::Reconnect { reconnect_url } => {
+                return Err(EventSubError::ReconnectRequested { reconnect_url });
             }
-            Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
-            Message::Pong(_) | Message::Frame(_) => {}
-            Message::Close(_) => return Ok(()),
+            EventSubMessage::Revocation { reason } => {
+                return Err(EventSubError::Revoked { reason });
+            }
+            EventSubMessage::Welcome { .. } => {
+                return Err(EventSubError::Protocol("unexpected welcome message"));
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::client::last_playlist_url;
+use crate::client::{last_playlist_url, validate_remote_endpoint};
 use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
@@ -38,6 +38,33 @@ fn extracts_settings_script_and_spade_url() {
         extract_spade_url(settings).unwrap(),
         "https://spade.example/submit"
     );
+}
+
+#[test]
+fn remote_document_endpoints_require_public_https_or_loopback_http() {
+    for accepted in [
+        "https://spade.example/submit",
+        "https://usher.ttvnw.net/playlist.m3u8",
+        "http://127.0.0.1:8080/test",
+        "http://[::1]:8080/test",
+    ] {
+        let url = reqwest::Url::parse(accepted).unwrap();
+        assert!(validate_remote_endpoint(&url, "test_url").is_ok());
+    }
+
+    for rejected in [
+        "http://spade.example/submit",
+        "http://localhost:8080/test",
+        "http://miner.local/test",
+        "https://192.168.1.10/test",
+        "ftp://spade.example/test",
+    ] {
+        let url = reqwest::Url::parse(rejected).unwrap();
+        assert!(matches!(
+            validate_remote_endpoint(&url, "test_url"),
+            Err(TwitchClientError::InvalidField("test_url"))
+        ));
+    }
 }
 
 #[test]

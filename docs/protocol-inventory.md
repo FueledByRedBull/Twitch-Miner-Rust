@@ -59,6 +59,13 @@ notifications. Record the source revision, image digest, date, and success or
 failure class in the release notes; never record cookies, account IDs, raw
 payloads, or request headers.
 
+Every request target that Twitch supplies inside a document rather than one the
+miner compiles in is origin-checked before use: the playback master playlist,
+media playlist, and segment, and the spade endpoint extracted from the settings
+script. Each must be a public HTTPS origin, with loopback HTTP allowed only so
+tests can serve them locally. This matters most for spade, whose minute-watched
+payload carries the channel, broadcast, and account identifiers.
+
 `CLIENT_ID` is the browser identity required consistently by device auth, GQL,
 and EventSub; it cannot be discovered safely at runtime. `Client-Version` is
 not pinned to a compiled fallback: the client extracts the current build ID
@@ -112,6 +119,14 @@ failed presence capabilities use bounded GQL polling instead of silently
 dropping channels. The WebSocket requests Twitch's supported 30-second
 keepalive window and applies a five-second delivery grace before reconnecting,
 avoiding an edge race at the advertised silence boundary.
+
+Message and subscription types this build does not model are ignored rather
+than treated as protocol violations, so an additive Twitch change cannot force a
+reconnect loop that shrinks the subscription set on each cycle; a payload for a
+subscription type the miner does act on still fails closed. A session inherited
+through a reconnect keeps its subscriptions, and its active count is re-derived
+from Twitch for the new session ID rather than carried over from the previous
+session's report.
 
 The isolated PubSub compatibility path connects to
 `wss://pubsub-edge.twitch.tv/v1`. It supplies viewer prediction discovery and
