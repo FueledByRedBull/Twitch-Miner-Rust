@@ -7,6 +7,9 @@ use tm_runtime::RuntimeTime;
 const MINUTE_WATCHER_RESUME_GAP: i64 = 10 * 60;
 const MAX_CONCURRENT_WATCHERS: usize = 2;
 const WATCH_ROTATION_SECONDS: i64 = 15 * 60;
+// Streak promotions defer the fair rotation clock, so cap how long a channel at
+// the front of the queue can hold its slot before fair rotation wins outright.
+const MAX_ROTATION_DEFERRAL_SECONDS: i64 = 2 * WATCH_ROTATION_SECONDS;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedSpadeUrl {
@@ -33,6 +36,7 @@ pub(crate) struct WatchRotation {
     active_since: Option<RuntimeTime>,
     promoted_streak_broadcasts: HashMap<String, String>,
     last_streak_promotion: Option<RuntimeTime>,
+    last_fair_rotation: Option<RuntimeTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,8 +59,20 @@ impl WatchRotation {
             .cloned();
         let campaign_changed = self.pinned_campaign != pinned_campaign;
         self.pinned_campaign = pinned_campaign;
-        self.promoted_streak_broadcasts
-            .retain(|login, _| ordered_eligible.contains(login));
+        // One promotion per broadcast. A record is released only when the
+        // channel reports a different broadcast, never when it drops out of the
+        // eligible set for a pass, so a suspension or presence blip cannot hand
+        // the same broadcast a second jump. Keys come from configured logins, so
+        // the map stays bounded by the configured channel count.
+        for candidate in streak_candidates {
+            if self
+                .promoted_streak_broadcasts
+                .get(&candidate.login)
+                .is_some_and(|promoted| promoted != &candidate.broadcast_id)
+            {
+                self.promoted_streak_broadcasts.remove(&candidate.login);
+            }
+        }
 
         // Twitch advances Drop progress on only one channel. Pin the first
         // ranked campaign and keep competing campaigns out of the spare slot.
@@ -73,7 +89,7 @@ impl WatchRotation {
 
         if self.queue.is_empty() {
             self.active_since = None;
-            self.promoted_streak_broadcasts.clear();
+            self.last_fair_rotation = None;
             self.last_streak_promotion = None;
             return self.pinned_campaign.iter().cloned().collect();
         }
@@ -81,11 +97,18 @@ impl WatchRotation {
         if campaign_changed || self.active_since.is_none() {
             self.active_since = Some(now);
         }
+        if self.last_fair_rotation.is_none() {
+            self.last_fair_rotation = Some(now);
+        }
 
         let rotating_slots = MAX_CONCURRENT_WATCHERS - usize::from(self.pinned_campaign.is_some());
-        let promotion_allowed = self
-            .last_streak_promotion
-            .is_none_or(|last| (now - last).whole_seconds() >= WATCH_ROTATION_SECONDS);
+        let fair_rotation_overdue = self
+            .last_fair_rotation
+            .is_some_and(|last| (now - last).whole_seconds() >= MAX_ROTATION_DEFERRAL_SECONDS);
+        let promotion_allowed = !fair_rotation_overdue
+            && self
+                .last_streak_promotion
+                .is_none_or(|last| (now - last).whole_seconds() >= WATCH_ROTATION_SECONDS);
         let promotion = promotion_allowed.then(|| {
             streak_candidates.iter().find_map(|candidate| {
                 let position = self
@@ -117,6 +140,7 @@ impl WatchRotation {
                 }
             }
             self.active_since = Some(now);
+            self.last_fair_rotation = Some(now);
         }
 
         let selected = self
@@ -358,6 +382,118 @@ mod tests {
                 ts(1_900),
             ),
             logins(&["alpha", "delta"])
+        );
+    }
+
+    #[test]
+    fn eligibility_blip_does_not_return_a_second_jump_for_the_same_broadcast() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[streak("charlie", "broadcast-c")],
+                ts(100),
+            ),
+            logins(&["charlie", "alpha"])
+        );
+
+        // charlie leaves the eligible set for one pass, then returns on the same
+        // broadcast. Its promotion record must survive the gap.
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &logins(&["alpha", "bravo", "delta"]),
+                &[],
+                &[],
+                ts(200)
+            ),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[streak("charlie", "broadcast-c")],
+                ts(1_100),
+            ),
+            logins(&["delta", "charlie"])
+        );
+    }
+
+    #[test]
+    fn a_new_broadcast_releases_the_promotion_record() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[streak("charlie", "broadcast-c1")],
+                ts(100),
+            ),
+            logins(&["charlie", "alpha"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[streak("charlie", "broadcast-c1")],
+                ts(1_000),
+            ),
+            logins(&["bravo", "delta"])
+        );
+
+        // charlie starts a different broadcast, which releases the record and
+        // makes it eligible for exactly one more jump.
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[streak("charlie", "broadcast-c2")],
+                ts(1_900),
+            ),
+            logins(&["charlie", "bravo"])
+        );
+    }
+
+    #[test]
+    fn fair_rotation_wins_once_streak_promotions_defer_it_too_long() {
+        let eligible = (0..17)
+            .map(|index| format!("s{index:02}"))
+            .collect::<Vec<_>>();
+        let candidates = eligible
+            .iter()
+            .map(|login| streak(login, &format!("broadcast-{login}")))
+            .collect::<Vec<_>>();
+        let mut rotation = WatchRotation::default();
+
+        // Every eligible channel wants a streak jump, so promotions keep
+        // resetting the rotation clock.
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &candidates, ts(0)),
+            logins(&["s02", "s00"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &candidates, ts(900)),
+            logins(&["s01", "s02"])
+        );
+
+        // At the deferral ceiling fair rotation takes the pass back from
+        // promotion, so the queue keeps turning over at production scale.
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &candidates, ts(1_800)),
+            logins(&["s00", "s03"])
         );
     }
 }

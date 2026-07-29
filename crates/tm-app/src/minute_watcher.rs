@@ -5,7 +5,7 @@ use std::time::Instant as StdInstant;
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde_json::json;
-use tm_domain::Streamer;
+use tm_domain::{Stream, Streamer};
 use tm_observability::Event as DiscordEvent;
 use tm_twitch::TwitchClient;
 
@@ -19,6 +19,9 @@ use crate::watching::{
 use crate::{MINUTE_WATCHER_REQUEST_TIMEOUT, SPADE_URL_TTL, WATCH_SELECTION_REFRESH_CONCURRENCY};
 
 const RENAME_RECOVERY_SUSPENSION_SECONDS: u64 = 5 * 60;
+// Comfortably above the 120-second batched refresh cadence, so this only fires
+// when the refresh itself has stalled.
+const MAX_WATCH_METADATA_AGE_SECONDS: i64 = 5 * 60;
 
 struct MinuteWatcherContext {
     runtime: tm_runtime::RuntimeHandle,
@@ -119,17 +122,25 @@ async fn select_watch_logins(
     now: tm_runtime::RuntimeTime,
 ) -> Option<Vec<String>> {
     let snapshot = snapshot_or_log(&context.runtime, "minute watcher snapshot failed").await?;
-    if let Err(error) = refresh_watch_selection_metadata(
+    // The refresh fans out per streamer and never aborts the pass, so failures
+    // are counted and reported as one task failure per cycle rather than being
+    // left as unclassified log lines.
+    let refresh_failures = refresh_watch_selection_metadata(
         &context.runtime,
         &context.twitch,
         &snapshot.streamers,
         &context.observability,
         now,
     )
-    .await
-    {
+    .await;
+    if refresh_failures > 0 {
         context.health.failure("minute", "metadata-refresh");
-        tracing::warn!(task = "minute", error_class = "metadata-refresh", %error, "watch selection metadata refresh failed");
+        tracing::warn!(
+            task = "minute",
+            error_class = "metadata-refresh",
+            failures = refresh_failures,
+            "watch selection metadata refresh failed"
+        );
     }
     let snapshot = snapshot_or_log(
         &context.runtime,
@@ -232,6 +243,7 @@ async fn watch_streamer_login(
                 &context.spade_urls,
                 &streamer,
                 &context.user_id,
+                &context.observability,
             ),
         )
         .await,
@@ -273,7 +285,8 @@ pub(crate) async fn refresh_watch_selection_metadata(
     streamers: &[Streamer],
     observability: &AppObservability,
     now: tm_runtime::RuntimeTime,
-) -> Result<()> {
+) -> usize {
+    let mut failures = 0_usize;
     let mut refreshes = tokio::task::JoinSet::new();
     let completed_campaign_ids = Arc::new(
         if streamers.iter().any(|streamer| {
@@ -313,7 +326,7 @@ pub(crate) async fn refresh_watch_selection_metadata(
     }) {
         while refreshes.len() >= WATCH_SELECTION_REFRESH_CONCURRENCY {
             if let Some(result) = refreshes.join_next().await {
-                log_watch_selection_refresh_result(result);
+                failures += usize::from(log_watch_selection_refresh_result(result));
             }
         }
 
@@ -371,19 +384,35 @@ pub(crate) async fn refresh_watch_selection_metadata(
     }
 
     while let Some(result) = refreshes.join_next().await {
-        log_watch_selection_refresh_result(result);
+        failures += usize::from(log_watch_selection_refresh_result(result));
     }
 
-    Ok(())
+    failures
 }
 
 fn log_watch_selection_refresh_result(
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
-) {
+) -> bool {
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!(%error, "watch selection refresh failed"),
-        Err(error) => tracing::warn!(%error, "watch selection refresh task failed"),
+        Ok(Ok(())) => false,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                task = "minute",
+                error_class = "metadata-refresh",
+                %error,
+                "watch selection refresh failed"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                task = "minute",
+                error_class = "metadata-refresh",
+                %error,
+                "watch selection refresh task failed"
+            );
+            true
+        }
     }
 }
 
@@ -443,11 +472,17 @@ pub(crate) async fn send_minute_watched_for_streamer(
     spade_urls: &tokio::sync::Mutex<HashMap<String, SpadeCacheEntry>>,
     streamer: &Streamer,
     user_id: &str,
+    observability: &AppObservability,
 ) -> Result<()> {
     let now = time_now();
-    let info = stream_info_from_snapshot(streamer)?;
+    let streamer = match watch_metadata_defect(streamer, now) {
+        None => streamer.clone(),
+        Some(defect) => {
+            recover_watch_metadata(runtime, twitch, streamer, observability, now, defect).await?
+        }
+    };
     let mut stream = streamer.stream.clone().unwrap_or_default();
-    stream.payload = vec![build_minute_watched_event(streamer, &info, user_id)];
+    stream.payload = vec![build_minute_watched_event(&streamer, &stream, user_id)];
 
     twitch
         .prime_live_playback(&streamer.username)
@@ -487,26 +522,70 @@ pub(crate) async fn send_minute_watched_for_streamer(
     ))
 }
 
-fn stream_info_from_snapshot(streamer: &Streamer) -> Result<tm_twitch::StreamInfo> {
-    let stream = streamer
-        .stream
-        .as_ref()
-        .filter(|stream| !stream.broadcast_id.trim().is_empty())
+/// Reports why the cached snapshot cannot back a minute-watched send, if it
+/// cannot. The batched refresh normally keeps this `None`; a bounded age check
+/// stops a stalled refresh from posting watch events against metadata that no
+/// longer describes the broadcast.
+pub(crate) fn watch_metadata_defect(
+    streamer: &Streamer,
+    now: tm_runtime::RuntimeTime,
+) -> Option<&'static str> {
+    let Some(stream) = streamer.stream.as_ref() else {
+        return Some("missing stream metadata");
+    };
+    if stream.broadcast_id.trim().is_empty() {
+        return Some("missing broadcast id");
+    }
+    match stream.last_update {
+        Some(last_update)
+            if (now - last_update).whole_seconds() <= MAX_WATCH_METADATA_AGE_SECONDS =>
+        {
+            None
+        }
+        _ => Some("stale stream metadata"),
+    }
+}
+
+/// One bounded inline refresh for the rare pass whose batched refresh did not
+/// land. Without it a single failed refresh would fail every watch tick for the
+/// channel until the next batch succeeded.
+async fn recover_watch_metadata(
+    runtime: &tm_runtime::RuntimeHandle,
+    twitch: &TwitchClient,
+    streamer: &Streamer,
+    observability: &AppObservability,
+    now: tm_runtime::RuntimeTime,
+    defect: &'static str,
+) -> Result<Streamer> {
+    tracing::debug!(
+        streamer = %streamer.username,
+        defect,
+        "refreshing stream metadata inline before minute watched"
+    );
+    let info = twitch
+        .fetch_stream_info(&streamer.username)
+        .await
+        .with_context(|| format!("{defect} for {}", streamer.username))?;
+    apply_live_stream_update(runtime, streamer, &info, observability, now).await?;
+    let snapshot = runtime
+        .state_snapshot()
+        .await
+        .with_context(|| format!("snapshot after inline refresh for {}", streamer.username))?;
+    let recovered = snapshot
+        .streamers
+        .iter()
+        .find(|candidate| candidate.channel_id == streamer.channel_id)
+        .cloned()
         .ok_or_else(|| {
             anyhow!(
-                "missing refreshed stream metadata for {}",
+                "streamer {} missing after inline refresh",
                 streamer.username
             )
         })?;
-    Ok(tm_twitch::StreamInfo {
-        id: stream.broadcast_id.clone(),
-        title: stream.title.clone(),
-        game_name: stream.game_name().clone(),
-        game_id: stream.game_id.clone(),
-        viewers_count: stream.viewers_count,
-        tags: stream.tags.clone(),
-        created_at: stream.stream_up_at,
-    })
+    if let Some(defect) = watch_metadata_defect(&recovered, now) {
+        return Err(anyhow!("{defect} for {} after refresh", streamer.username));
+    }
+    Ok(recovered)
 }
 
 pub(crate) async fn handle_minute_watched_info_error(
@@ -711,20 +790,21 @@ where
 
 pub(crate) fn build_minute_watched_event(
     streamer: &Streamer,
-    info: &tm_twitch::StreamInfo,
+    stream: &Stream,
     user_id: &str,
 ) -> serde_json::Value {
     let mut properties = serde_json::Map::from_iter([
         (String::from("channel_id"), json!(streamer.channel_id)),
-        (String::from("broadcast_id"), json!(info.id)),
+        (String::from("broadcast_id"), json!(stream.broadcast_id)),
         (String::from("user_id"), json!(user_id)),
         (String::from("player"), json!("site")),
         (String::from("live"), json!(true)),
         (String::from("channel"), json!(streamer.username)),
     ]);
-    if streamer.settings.farm_drops && !info.game_name.trim().is_empty() {
-        properties.insert(String::from("game"), json!(info.game_name));
-        if let Some(game_id) = info
+    let game_name = stream.game_name();
+    if streamer.settings.farm_drops && !game_name.trim().is_empty() {
+        properties.insert(String::from("game"), json!(game_name));
+        if let Some(game_id) = stream
             .game_id
             .as_deref()
             .filter(|value| !value.trim().is_empty())
