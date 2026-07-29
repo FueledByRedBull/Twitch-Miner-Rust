@@ -5,12 +5,16 @@
 
 use std::fmt;
 use std::io;
+use std::sync::{Arc, OnceLock};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
 
 pub const IRC_HOST: &str = "irc.chat.twitch.tv";
-pub const IRC_PORT: u16 = 6667;
+pub const IRC_PORT: u16 = 6697;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedLine {
@@ -130,6 +134,11 @@ where
 
     pub async fn connect_and_run(&mut self) -> io::Result<()> {
         let stream = TcpStream::connect(irc_addr()).await?;
+        let server_name = ServerName::try_from(IRC_HOST.to_owned())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let stream = TlsConnector::from(irc_tls_config())
+            .connect(server_name, stream)
+            .await?;
         self.run_stream(stream).await
     }
 
@@ -261,6 +270,21 @@ pub fn irc_addr() -> String {
     format!("{IRC_HOST}:{IRC_PORT}")
 }
 
+fn irc_tls_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    Arc::clone(CONFIG.get_or_init(|| {
+        let roots = webpki_roots::TLS_SERVER_ROOTS
+            .iter()
+            .cloned()
+            .collect::<RootCertStore>();
+        Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }))
+}
+
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
@@ -371,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_commands_match_go() {
+    fn registration_commands_use_verified_tls_endpoint() {
         let client = ChatClient::new(
             "UserName",
             " token ",
@@ -387,7 +411,8 @@ mod tests {
                 "JOIN #channel\r\n".to_string(),
             ]
         );
-        assert_eq!(irc_addr(), "irc.chat.twitch.tv:6667");
+        assert_eq!(irc_addr(), "irc.chat.twitch.tv:6697");
+        assert!(Arc::ptr_eq(&irc_tls_config(), &irc_tls_config()));
     }
 
     #[test]
