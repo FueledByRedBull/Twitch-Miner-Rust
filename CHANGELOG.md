@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Classifies watch-selection metadata refresh failures as `metadata-refresh`
+  on the `minute` task instead of leaving them as unclassified warnings, so a
+  failing stream-info read stays visible to health and warning classification
+  after the refresh moved out of the per-tick send path.
+- Bounds a streak promotion to the broadcast that earned it. The record is
+  released only by a different broadcast, never by a channel dropping out of
+  the eligible set for a pass, and fair rotation reclaims the pass once
+  promotions have deferred it for two rotation windows.
+- Refreshes stream metadata inline once when the batched refresh has not landed
+  or is older than five minutes, so a single failed refresh no longer fails
+  every watch tick for that channel and no watch event is sent against
+  metadata that may no longer describe the broadcast. Presence changes are
+  detected by the batched refresh and the event transports rather than by every
+  watch tick.
+- Drops the unread `Stream.tags` field and builds the minute-watched payload
+  directly from the runtime stream record.
 - Resets credited watch progress through the runtime actor when a channel loses
   a watch slot, and gives a newly eligible streak channel at most one bounded
   promotion per broadcast and 15-minute rotation window. Fair rotation and

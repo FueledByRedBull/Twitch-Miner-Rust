@@ -89,9 +89,16 @@ user. The typed response must return the same requested ID and a non-empty
 normalized login before runtime identity is changed. A successful change is
 retried once; an unresolved mismatch releases the watch slot for five minutes
 instead of allowing it to consume half of the watch capacity indefinitely.
-Minute-watched sends reuse the refreshed runtime snapshot, including broadcast,
-game, tag, and viewer metadata, rather than issuing a second stream-info request
-on every tick. No response payload, token, or cookie is logged.
+Minute-watched sends reuse the refreshed runtime snapshot, including broadcast
+and game metadata, rather than issuing a second stream-info request on every
+tick. A send performs one inline stream-info refresh only when that snapshot is
+absent, has no broadcast, or is older than five minutes, so a stalled batched
+refresh neither fails every tick for the channel nor lets a watch event be sent
+against metadata that may no longer describe the broadcast. Because the batched
+refresh owns presence detection, an offline channel can be selected for up to
+one refresh interval before the event transports or the next refresh clear it.
+Refresh failures are reported as one `metadata-refresh` task failure per cycle.
+No response payload, token, or cookie is logged.
 
 The preferred EventSub WebSocket path handles stream presence and observes
 raids. Broadcaster prediction subscriptions are requested only when a tracked

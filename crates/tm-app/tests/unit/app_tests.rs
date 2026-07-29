@@ -23,7 +23,7 @@ mod tests {
     use crate::minute_watcher::{
         build_minute_watched_event, has_unfinished_campaign, refresh_watch_selection_metadata,
         released_watch_channel_ids, resolve_spade_url, send_minute_watched_for_streamer,
-        send_minute_watched_with_spade_cache,
+        send_minute_watched_with_spade_cache, watch_metadata_defect,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -1543,8 +1543,7 @@ mod tests {
             &test_observability(),
             now,
         )
-        .await
-        .unwrap();
+        .await;
 
         let snapshot = runtime.state_snapshot().await.unwrap();
         let request_count_after_refresh = requests.lock().unwrap().len();
@@ -1555,8 +1554,7 @@ mod tests {
             &test_observability(),
             now,
         )
-        .await
-        .unwrap();
+        .await;
         server.join().unwrap();
         assert_eq!(
             snapshot.watch_target_logins(now),
@@ -1577,12 +1575,6 @@ mod tests {
                 .and_then(|stream| stream.game_id.as_deref()),
             Some("game-1")
         );
-        assert!(!snapshot.streamers[0]
-            .stream
-            .as_ref()
-            .unwrap()
-            .tags
-            .is_empty());
         assert_eq!(
             snapshot.streamers[0]
                 .stream
@@ -1662,8 +1654,7 @@ mod tests {
             &test_observability(),
             now,
         )
-        .await
-        .unwrap();
+        .await;
 
         server.join().unwrap();
         let snapshot = runtime.state_snapshot().await.unwrap();
@@ -1872,10 +1863,11 @@ mod tests {
                 title: String::from("Title"),
                 game: Some(Game::from_name("Game Name")),
                 game_id: Some(String::from("42")),
-                tags: vec![String::from("tag")],
                 viewers_count: 1,
-                stream_up_at: Some(ts(0)),
-                last_update: Some(ts(0)),
+                stream_up_at: Some(tm_domain::OffsetDateTime::now_utc()),
+                // Fresh enough that the send path reuses the snapshot instead of
+                // refreshing stream info inline.
+                last_update: Some(tm_domain::OffsetDateTime::now_utc()),
                 ..tm_domain::Stream::default()
             }),
             ..Streamer::default()
@@ -1884,9 +1876,16 @@ mod tests {
 
         let mut snapshot = runtime.state_snapshot().await.unwrap();
         let streamer = snapshot.streamers.remove(0);
-        send_minute_watched_for_streamer(&runtime, &twitch, &spade_urls, &streamer, "user-1")
-            .await
-            .unwrap();
+        send_minute_watched_for_streamer(
+            &runtime,
+            &twitch,
+            &spade_urls,
+            &streamer,
+            "user-1",
+            &test_observability(),
+        )
+        .await
+        .unwrap();
 
         let snapshot = runtime.state_snapshot().await.unwrap();
         twitch_server.join().unwrap();
@@ -1906,15 +1905,137 @@ mod tests {
     }
 
     #[test]
+    fn watch_metadata_defect_reports_missing_and_stale_snapshots() {
+        let now = tm_domain::OffsetDateTime::now_utc();
+        let mut streamer = Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            ..Streamer::default()
+        };
+        assert_eq!(
+            watch_metadata_defect(&streamer, now),
+            Some("missing stream metadata")
+        );
+
+        streamer.stream = Some(tm_domain::Stream {
+            last_update: Some(now),
+            ..tm_domain::Stream::default()
+        });
+        assert_eq!(
+            watch_metadata_defect(&streamer, now),
+            Some("missing broadcast id")
+        );
+
+        streamer.stream = Some(tm_domain::Stream {
+            broadcast_id: String::from("stream-1"),
+            last_update: Some(now - Duration::from_secs(5 * 60 + 1)),
+            ..tm_domain::Stream::default()
+        });
+        assert_eq!(
+            watch_metadata_defect(&streamer, now),
+            Some("stale stream metadata")
+        );
+
+        streamer.stream = Some(tm_domain::Stream {
+            broadcast_id: String::from("stream-1"),
+            last_update: Some(now - Duration::from_secs(60)),
+            ..tm_domain::Stream::default()
+        });
+        assert_eq!(watch_metadata_defect(&streamer, now), None);
+    }
+
+    #[tokio::test]
+    async fn minute_watched_recovers_once_when_the_snapshot_is_stale() {
+        let (endpoints, requests, twitch_server) = spawn_twitch_server(6);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let (spade_url, _spade_requests, spade_server) =
+            spawn_status_server(vec!["204 No Content"]);
+        let spade_urls = tokio::sync::Mutex::new(HashMap::from([(
+            String::from("alice"),
+            SpadeCacheEntry::Ready(CachedSpadeUrl {
+                url: spade_url,
+                fetched_at: StdInstant::now(),
+            }),
+        )]));
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![String::from("alice")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            is_online: true,
+            presence_known: true,
+            // The batched refresh stalled, so the cached broadcast is unusable.
+            stream: Some(tm_domain::Stream {
+                broadcast_id: String::from("stale-stream"),
+                last_update: Some(
+                    tm_domain::OffsetDateTime::now_utc() - Duration::from_secs(30 * 60),
+                ),
+                ..tm_domain::Stream::default()
+            }),
+            ..Streamer::default()
+        }];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+
+        let mut snapshot = runtime.state_snapshot().await.unwrap();
+        let streamer = snapshot.streamers.remove(0);
+        send_minute_watched_for_streamer(
+            &runtime,
+            &twitch,
+            &spade_urls,
+            &streamer,
+            "user-1",
+            &test_observability(),
+        )
+        .await
+        .unwrap();
+
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        twitch_server.join().unwrap();
+        spade_server.join().unwrap();
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .map(|stream| stream.broadcast_id.as_str()),
+            Some("stream-1")
+        );
+        assert!(snapshot.streamers[0]
+            .stream
+            .as_ref()
+            .and_then(|stream| stream.last_minute_update)
+            .is_some());
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request
+                    .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn minute_watched_drop_metadata_depends_on_farming_not_claiming() {
-        let info = tm_twitch::StreamInfo {
-            id: String::from("broadcast-1"),
+        let stream = tm_domain::Stream {
+            broadcast_id: String::from("broadcast-1"),
             title: String::from("Title"),
+            game: Some(Game::from_name("Game Name")),
             game_id: Some(String::from("42")),
-            game_name: String::from("Game Name"),
             viewers_count: 1,
-            tags: Vec::new(),
-            created_at: None,
+            ..tm_domain::Stream::default()
         };
         let mut streamer = Streamer {
             username: String::from("alice"),
@@ -1927,13 +2048,14 @@ mod tests {
             ..Streamer::default()
         };
 
-        let farming = build_minute_watched_event(&streamer, &info, "user-1");
+        let farming = build_minute_watched_event(&streamer, &stream, "user-1");
+        assert_eq!(farming["properties"]["broadcast_id"], "broadcast-1");
         assert_eq!(farming["properties"]["game"], "Game Name");
         assert_eq!(farming["properties"]["game_id"], "42");
 
         streamer.settings.farm_drops = false;
         streamer.settings.claim_drops = true;
-        let claiming_only = build_minute_watched_event(&streamer, &info, "user-1");
+        let claiming_only = build_minute_watched_event(&streamer, &stream, "user-1");
         assert!(claiming_only["properties"].get("game").is_none());
         assert!(claiming_only["properties"].get("game_id").is_none());
     }
@@ -1996,8 +2118,7 @@ mod tests {
             &test_observability(),
             ts(300),
         )
-        .await
-        .unwrap();
+        .await;
 
         twitch_server.join().unwrap();
         let snapshot = runtime.state_snapshot().await.unwrap();

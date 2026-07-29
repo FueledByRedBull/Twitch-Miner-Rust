@@ -204,8 +204,6 @@ pub struct Stream {
     pub title: String,
     pub game: Option<Game>,
     pub game_id: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
     pub drops_tags: bool,
     #[serde(skip)]
     pub drop_campaign_eligible: Option<bool>,
@@ -233,7 +231,6 @@ impl Default for Stream {
             title: String::new(),
             game: None,
             game_id: None,
-            tags: Vec::new(),
             drops_tags: false,
             drop_campaign_eligible: None,
             viewers_count: 0,
@@ -269,7 +266,6 @@ impl Stream {
         self.broadcast_id = broadcast_id.into();
         self.title = title.into().trim().to_string();
         self.game_id = game_id.filter(|value| !value.trim().is_empty());
-        self.tags = tag_ids.to_vec();
         self.drops_tags = tag_ids.iter().any(|tag| tag == drop_id)
             && (game.display_name.is_some() || game.name.is_some());
         self.game = Some(game);
@@ -590,7 +586,6 @@ mod tests {
         );
         assert_eq!(stream.title, "title");
         assert_eq!(stream.game_id.as_deref(), Some("game-id"));
-        assert_eq!(stream.tags, [String::from("drop-tag")]);
         assert_eq!(stream.broadcast_id, "id");
         assert!(stream.drops_tags);
         assert!(!stream.update_required_at(now));
