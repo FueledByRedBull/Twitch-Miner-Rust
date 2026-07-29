@@ -5,7 +5,7 @@ use std::time::Instant as StdInstant;
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde_json::json;
-use tm_domain::{Game, Streamer};
+use tm_domain::Streamer;
 use tm_observability::Event as DiscordEvent;
 use tm_twitch::TwitchClient;
 
@@ -13,7 +13,8 @@ use crate::observability::{streamer_game_name, AppObservability};
 use crate::status::HealthTracker;
 use crate::utilities::{sleep_or_stop, time_now};
 use crate::watching::{
-    minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction, WatchRotation,
+    minute_watcher_resume_gap, CachedSpadeUrl, SpadeCacheEntry, SpadeResolveAction,
+    StreakCandidate, WatchRotation,
 };
 use crate::{MINUTE_WATCHER_REQUEST_TIMEOUT, SPADE_URL_TTL, WATCH_SELECTION_REFRESH_CONCURRENCY};
 
@@ -30,6 +31,7 @@ struct MinuteWatcherContext {
 
 struct MinuteWatcherState {
     watch_rotation: WatchRotation,
+    selected_channel_ids: HashSet<String>,
     last_loop_at: tm_runtime::RuntimeTime,
 }
 
@@ -64,6 +66,7 @@ async fn run_minute_watcher_loop(
 ) {
     let mut state = MinuteWatcherState {
         watch_rotation: WatchRotation::default(),
+        selected_channel_ids: HashSet::new(),
         last_loop_at: time_now(),
     };
     while !*stop.borrow() {
@@ -81,8 +84,7 @@ async fn run_minute_watcher_pass(
     let now = time_now();
     let loop_gap = minute_watcher_resume_gap(state.last_loop_at, now);
     state.last_loop_at = now;
-    let Some(watch_logins) = select_watch_logins(context, &mut state.watch_rotation, now).await
-    else {
+    let Some(watch_logins) = select_watch_logins(context, state, now).await else {
         return WatchAction::Stop;
     };
     if watch_logins.is_empty() {
@@ -113,7 +115,7 @@ async fn run_minute_watcher_pass(
 
 async fn select_watch_logins(
     context: &MinuteWatcherContext,
-    watch_rotation: &mut WatchRotation,
+    state: &mut MinuteWatcherState,
     now: tm_runtime::RuntimeTime,
 ) -> Option<Vec<String>> {
     let snapshot = snapshot_or_log(&context.runtime, "minute watcher snapshot failed").await?;
@@ -134,11 +136,54 @@ async fn select_watch_logins(
         "minute watcher post-refresh snapshot failed",
     )
     .await?;
-    Some(watch_rotation.select_with_campaigns(
-        &snapshot.watch_target_logins(now),
+    let eligible = snapshot.watch_target_logins(now);
+    let streak_candidates = eligible
+        .iter()
+        .filter_map(|login| {
+            let streamer = snapshot
+                .streamers
+                .iter()
+                .find(|streamer| &streamer.username == login)?;
+            let stream = streamer.stream.as_ref()?;
+            (tm_domain::should_prioritize_streak(streamer, now)
+                && !stream.broadcast_id.trim().is_empty())
+            .then(|| StreakCandidate {
+                login: login.clone(),
+                broadcast_id: stream.broadcast_id.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let watch_logins = state.watch_rotation.select_with_campaigns(
+        &eligible,
         &snapshot.campaign_watch_logins(now),
+        &streak_candidates,
         now,
-    ))
+    );
+    let selected_channel_ids = watch_logins
+        .iter()
+        .filter_map(|login| {
+            snapshot
+                .streamers
+                .iter()
+                .find(|streamer| &streamer.username == login)
+                .map(|streamer| streamer.channel_id.clone())
+        })
+        .collect::<HashSet<_>>();
+    for released in released_watch_channel_ids(&state.selected_channel_ids, &selected_channel_ids) {
+        if let Err(error) = context.runtime.reset_watch_progress(released).await {
+            tracing::warn!(%error, "watch slot release could not reset streak progress");
+            return None;
+        }
+    }
+    state.selected_channel_ids = selected_channel_ids;
+    Some(watch_logins)
+}
+
+pub(crate) fn released_watch_channel_ids(
+    previous: &HashSet<String>,
+    selected: &HashSet<String>,
+) -> Vec<String> {
+    previous.difference(selected).cloned().collect()
 }
 
 async fn snapshot_or_log(
@@ -187,7 +232,6 @@ async fn watch_streamer_login(
                 &context.spade_urls,
                 &streamer,
                 &context.user_id,
-                &context.observability,
             ),
         )
         .await,
@@ -280,10 +324,33 @@ pub(crate) async fn refresh_watch_selection_metadata(
         let completed_campaign_ids = Arc::clone(&completed_campaign_ids);
         refreshes.spawn(async move {
             let previous_game = streamer_game_name(&streamer);
-            let info = twitch
-                .fetch_stream_info(&streamer.username)
-                .await
-                .with_context(|| format!("refresh stream info for {}", streamer.username))?;
+            let (streamer, info) = match twitch.fetch_stream_info(&streamer.username).await {
+                Ok(info) => (streamer, info),
+                Err(error) => {
+                    let Some(recovered_streamer) = handle_minute_watched_info_error(
+                        &runtime,
+                        &twitch,
+                        &streamer,
+                        &observability,
+                        now,
+                        error,
+                    )
+                    .await?
+                    else {
+                        return Ok(());
+                    };
+                    let info = twitch
+                        .fetch_stream_info(&recovered_streamer.username)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "refresh stream info after channel rename for {}",
+                                recovered_streamer.username
+                            )
+                        })?;
+                    (recovered_streamer, info)
+                }
+            };
             apply_live_stream_update(&runtime, &streamer, &info, &observability, now).await?;
             refresh_drop_campaign_eligibility(
                 &runtime,
@@ -376,58 +443,11 @@ pub(crate) async fn send_minute_watched_for_streamer(
     spade_urls: &tokio::sync::Mutex<HashMap<String, SpadeCacheEntry>>,
     streamer: &Streamer,
     user_id: &str,
-    observability: &AppObservability,
 ) -> Result<()> {
     let now = time_now();
-    let previous_game = streamer_game_name(streamer);
-    let (streamer, info) = match twitch.fetch_stream_info(&streamer.username).await {
-        Ok(info) => (streamer.clone(), info),
-        Err(error) => {
-            let Some(recovered_streamer) = handle_minute_watched_info_error(
-                runtime,
-                twitch,
-                streamer,
-                observability,
-                now,
-                error,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            let info = twitch
-                .fetch_stream_info(&recovered_streamer.username)
-                .await
-                .with_context(|| {
-                    format!(
-                        "refresh stream info after channel rename for {}",
-                        recovered_streamer.username
-                    )
-                })?;
-            (recovered_streamer, info)
-        }
-    };
-
-    apply_live_stream_update(runtime, &streamer, &info, observability, now).await?;
-    log_stream_presence_changes(
-        observability,
-        &streamer,
-        previous_game.as_deref(),
-        &info.game_name,
-    );
-
+    let info = stream_info_from_snapshot(streamer)?;
     let mut stream = streamer.stream.clone().unwrap_or_default();
-    stream.stream_up_at = Some(now);
-    stream.update(
-        &info.id,
-        &info.title,
-        Game::from_name(&info.game_name),
-        &info.tags,
-        info.viewers_count,
-        tm_twitch::DROP_ID,
-        now,
-    );
-    stream.payload = vec![build_minute_watched_event(&streamer, &info, user_id)];
+    stream.payload = vec![build_minute_watched_event(streamer, &info, user_id)];
 
     twitch
         .prime_live_playback(&streamer.username)
@@ -465,6 +485,28 @@ pub(crate) async fn send_minute_watched_for_streamer(
         "minute watched returned unexpected status {status} for {}",
         streamer.username
     ))
+}
+
+fn stream_info_from_snapshot(streamer: &Streamer) -> Result<tm_twitch::StreamInfo> {
+    let stream = streamer
+        .stream
+        .as_ref()
+        .filter(|stream| !stream.broadcast_id.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "missing refreshed stream metadata for {}",
+                streamer.username
+            )
+        })?;
+    Ok(tm_twitch::StreamInfo {
+        id: stream.broadcast_id.clone(),
+        title: stream.title.clone(),
+        game_name: stream.game_name().clone(),
+        game_id: stream.game_id.clone(),
+        viewers_count: stream.viewers_count,
+        tags: stream.tags.clone(),
+        created_at: stream.stream_up_at,
+    })
 }
 
 pub(crate) async fn handle_minute_watched_info_error(

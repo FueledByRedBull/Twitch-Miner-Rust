@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 use crate::types::{IrcMode, Stream, Streamer};
 
 const STREAK_PRIORITY_MINUTES: f64 = 15.0;
+const STREAK_RESTART_COOLDOWN_MINUTES: i64 = 30;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WatchPriority {
     Order,
@@ -98,23 +99,22 @@ pub fn should_join_chat(mode: IrcMode, online: bool) -> bool {
 }
 
 #[must_use]
-pub fn streak_priority_limit(_started_at: Option<OffsetDateTime>, _now: OffsetDateTime) -> f64 {
+pub const fn streak_priority_limit() -> f64 {
     STREAK_PRIORITY_MINUTES
 }
 
 #[must_use]
-pub fn should_prioritize_streak(
-    streamer: &Streamer,
-    started_at: Option<OffsetDateTime>,
-    now: OffsetDateTime,
-) -> bool {
+pub fn should_prioritize_streak(streamer: &Streamer, now: OffsetDateTime) -> bool {
     let Some(stream) = streamer.stream.as_ref() else {
         return false;
     };
     if !streamer.settings.watch_streak || !stream.watch_streak_missing {
         return false;
     }
-    stream.minute_watched < streak_priority_limit(started_at, now)
+    let restart_is_eligible = streamer.last_stream_ended_at.is_none_or(|ended_at| {
+        now - ended_at >= time::Duration::minutes(STREAK_RESTART_COOLDOWN_MINUTES)
+    });
+    restart_is_eligible && stream.minute_watched < streak_priority_limit()
 }
 
 #[must_use]
@@ -132,7 +132,6 @@ pub fn pick_streamers_to_watch(
     watch_priorities: &[WatchPriority],
     game_priority: &[String],
     game_exclusions: &[String],
-    started_at: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Vec<usize> {
     #[derive(Clone, Copy)]
@@ -197,7 +196,7 @@ pub fn pick_streamers_to_watch(
         let priority_game = game
             .as_ref()
             .is_some_and(|game| game_priority_index.contains_key(game));
-        let streak_ready = should_prioritize_streak(streamer, started_at, now);
+        let streak_ready = should_prioritize_streak(streamer, now);
         let candidate = Candidate {
             idx,
             rank,
@@ -463,17 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn streak_priority_limit_matches_go() {
-        let now = datetime!(2026-03-27 06:00 UTC);
-        assert_f64_eq(streak_priority_limit(None, now), 15.0);
-        assert_f64_eq(
-            streak_priority_limit(Some(now - time::Duration::hours(11)), now),
-            15.0,
-        );
+    fn streak_priority_limit_is_fifteen_minutes() {
+        assert_f64_eq(streak_priority_limit(), 15.0);
     }
 
     #[test]
-    fn should_prioritize_streak_matches_go() {
+    fn should_prioritize_streak_enforces_platform_restart_cooldown() {
         let now = datetime!(2026-03-27 06:00 UTC);
         let mut streamer = Streamer {
             settings: StreamerSettings {
@@ -487,22 +481,19 @@ mod tests {
             }),
             ..Streamer::default()
         };
-        assert!(should_prioritize_streak(&streamer, None, now));
+        assert!(should_prioritize_streak(&streamer, now));
 
-        streamer.offline_at = Some(now - time::Duration::minutes(10));
-        assert!(should_prioritize_streak(&streamer, None, now));
+        streamer.last_stream_ended_at = Some(now - time::Duration::minutes(10));
+        assert!(!should_prioritize_streak(&streamer, now));
+        streamer.last_stream_ended_at = Some(now - time::Duration::minutes(30));
+        assert!(should_prioritize_streak(&streamer, now));
 
         streamer.watch_suspended_until = Some(now + time::Duration::minutes(5));
         streamer.is_online = true;
-        assert!(pick_streamers_to_watch(
-            &[streamer],
-            &[WatchPriority::Streak],
-            &[],
-            &[],
-            None,
-            now,
-        )
-        .is_empty());
+        assert!(
+            pick_streamers_to_watch(&[streamer], &[WatchPriority::Streak], &[], &[], now,)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -545,7 +536,6 @@ mod tests {
             &[WatchPriority::Drops, WatchPriority::Order],
             &[],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
 
@@ -594,7 +584,6 @@ mod tests {
             ]),
             &[],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
         assert_eq!(selected, vec![2, 3, 1, 0]);
@@ -641,7 +630,6 @@ mod tests {
             &[WatchPriority::Order],
             &[],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
 
@@ -673,7 +661,6 @@ mod tests {
             &[WatchPriority::Drops, WatchPriority::Order],
             &[],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
 
@@ -706,7 +693,6 @@ mod tests {
             &[WatchPriority::Drops],
             &[],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
 
@@ -741,7 +727,6 @@ mod tests {
             &[WatchPriority::Drops],
             &[],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
 
@@ -777,25 +762,11 @@ mod tests {
         ];
 
         assert_eq!(
-            pick_streamers_to_watch(
-                &streamers,
-                &[WatchPriority::LongestStreak],
-                &[],
-                &[],
-                None,
-                now,
-            ),
+            pick_streamers_to_watch(&streamers, &[WatchPriority::LongestStreak], &[], &[], now,),
             vec![1, 2, 0, 3]
         );
         assert_eq!(
-            pick_streamers_to_watch(
-                &streamers,
-                &[WatchPriority::ExpiringStreak],
-                &[],
-                &[],
-                None,
-                now,
-            ),
+            pick_streamers_to_watch(&streamers, &[WatchPriority::ExpiringStreak], &[], &[], now,),
             vec![2, 1, 0, 3]
         );
     }
@@ -831,7 +802,6 @@ mod tests {
             &[WatchPriority::Order],
             &[String::from("priority game")],
             &[],
-            None,
             datetime!(2026-03-27 06:00 UTC),
         );
 

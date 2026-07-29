@@ -316,22 +316,6 @@ impl TwitchClient {
         .await
     }
 
-    /// Low-level compatibility escape hatch for protocol experiments.
-    pub async fn post_gql_batch(
-        &self,
-        operations: &[GqlPersistedOperation],
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql_value_with_cookie(
-            serde_json::to_value(operations)?,
-            None,
-            !operations.is_empty()
-                && operations
-                    .iter()
-                    .all(|operation| operation_is_read_only(operation.operation_name)),
-        )
-        .await
-    }
-
     pub async fn fetch_channel_points_context(
         &self,
         channel_login: &str,
@@ -593,12 +577,6 @@ impl TwitchClient {
         Ok(())
     }
 
-    /// Compatibility facade for callers that need to inspect the raw response.
-    /// Runtime code should use `fetch_inventory_typed` or `fetch_claimable_drops`.
-    pub async fn fetch_inventory(&self) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::inventory()).await
-    }
-
     pub async fn fetch_inventory_typed(&self) -> Result<Vec<InventoryDrop>, TwitchClientError> {
         Ok(self.fetch_inventory_snapshot_typed().await?.drops)
     }
@@ -612,13 +590,6 @@ impl TwitchClient {
 
     pub async fn fetch_claimable_drops(&self) -> Result<Vec<InventoryDrop>, TwitchClientError> {
         self.fetch_inventory_typed().await
-    }
-
-    /// Compatibility facade for callers that need the raw experimental dashboard shape.
-    pub async fn fetch_viewer_drops_dashboard(
-        &self,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::viewer_drops_dashboard()).await
     }
 
     pub async fn fetch_viewer_drops_dashboard_typed(
@@ -644,14 +615,6 @@ impl TwitchClient {
         validate_typed_claim_drop_response(response)
     }
 
-    pub async fn fetch_available_drop_campaigns(
-        &self,
-        channel_id: &str,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::drops_highlight_service_available(channel_id))
-            .await
-    }
-
     pub async fn fetch_available_drop_campaigns_typed(
         &self,
         channel_id: &str,
@@ -660,22 +623,6 @@ impl TwitchClient {
             .post_gql_typed(&operations::drops_highlight_service_available(channel_id))
             .await?;
         available_drop_campaign_ids_from_typed(response)
-    }
-
-    pub async fn fetch_available_drop_campaign_ids(
-        &self,
-        channel_id: &str,
-    ) -> Result<Vec<String>, TwitchClientError> {
-        self.fetch_available_drop_campaigns_typed(channel_id).await
-    }
-
-    /// Compatibility facade for callers that need the raw contribution response.
-    pub async fn fetch_user_points_contribution(
-        &self,
-        channel_login: &str,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql(&operations::user_points_contribution(channel_login))
-            .await
     }
 
     pub async fn fetch_user_points_contribution_typed(

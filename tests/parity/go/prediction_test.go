@@ -71,3 +71,31 @@ func TestParityPrediction(t *testing.T) {
 		t.Fatalf("settlement diverged: %d %d %d %s %s", gained, placed, won, resultType, resultString)
 	}
 }
+
+func TestParityPredictionTie(t *testing.T) {
+	value := parityVectors(t)["prediction_tie"].(map[string]interface{})
+	settings := value["settings"].(map[string]interface{})
+	streamer := &entities.Streamer{
+		ChannelPoints: int(value["balance"].(float64)),
+		Settings: entities.StreamerSettings{Bet: entities.BetSettings{
+			Strategy:    entities.Strategy(settings["strategy"].(string)),
+			Percentage:  parityInt(settings["percentage"]),
+			MaxPoints:   parityInt(settings["max_points"]),
+			StealthMode: parityBool(settings["stealth_mode"]),
+		}},
+	}
+	event := NewPredictionEvent(streamer, map[string]interface{}{
+		"id":       "parity-tie",
+		"title":    "Parity tie",
+		"status":   "ACTIVE",
+		"outcomes": value["outcomes"],
+	})
+	if event == nil {
+		t.Fatal("expected prediction tie event")
+	}
+	decision := event.Decide(streamer.ChannelPoints)
+	expected := value["expected"].(map[string]interface{})
+	if decision.Choice != int(expected["choice"].(float64)) || decision.OutcomeID != expected["outcome_id"].(string) {
+		t.Fatalf("tie decision diverged: %#v", decision)
+	}
+}

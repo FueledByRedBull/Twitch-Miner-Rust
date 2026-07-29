@@ -103,7 +103,6 @@ impl RuntimeState {
             &self.watch_priorities,
             &self.game_priority,
             &self.game_exclusions,
-            Some(self.started_at),
             now,
         )
     }
@@ -495,6 +494,7 @@ impl RuntimeState {
                 let short_restart = streamer.offline_at.is_some_and(|offline_at| {
                     (now - offline_at).whole_seconds() <= STREAK_RESTART_CARRYOVER_SECONDS
                 });
+                streamer.last_stream_ended_at = streamer.offline_at;
                 streamer.online_at = Some(now);
                 streamer.offline_at = None;
                 let stream = streamer.stream.get_or_insert_with(Stream::default);
@@ -507,6 +507,7 @@ impl RuntimeState {
                 }
             } else {
                 streamer.offline_at = Some(now);
+                streamer.last_stream_ended_at = Some(now);
                 if let Some(stream) = streamer.stream.as_mut() {
                     stream.stream_up_at = None;
                     stream.streak_carryover_until = Some(
@@ -576,6 +577,7 @@ impl RuntimeState {
                     .then(|| update.game_name.clone()),
                 name: (!update.game_name.trim().is_empty()).then(|| update.game_name.clone()),
             },
+            update.game_id.clone(),
             &update.tags,
             update.viewers_count,
             tm_twitch_drop_id(),
@@ -601,6 +603,17 @@ impl RuntimeState {
             return;
         };
         stream.update_minute_watched(now);
+    }
+
+    pub fn reset_watch_progress(&mut self, channel_id: &str) -> bool {
+        let Some(stream) = self
+            .streamer_mut_by_channel_id(channel_id)
+            .and_then(|streamer| streamer.stream.as_mut())
+        else {
+            return false;
+        };
+        stream.reset_watch_progress();
+        true
     }
 
     pub fn mark_watch_streak_recovered(

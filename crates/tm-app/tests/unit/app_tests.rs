@@ -1,7 +1,7 @@
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::env;
     use std::fs;
     use std::io::{self, Read, Write};
@@ -22,7 +22,8 @@ mod tests {
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
         build_minute_watched_event, has_unfinished_campaign, refresh_watch_selection_metadata,
-        resolve_spade_url, send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
+        released_watch_channel_ids, resolve_spade_url, send_minute_watched_for_streamer,
+        send_minute_watched_with_spade_cache,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -1573,6 +1574,19 @@ mod tests {
             snapshot.streamers[0]
                 .stream
                 .as_ref()
+                .and_then(|stream| stream.game_id.as_deref()),
+            Some("game-1")
+        );
+        assert!(!snapshot.streamers[0]
+            .stream
+            .as_ref()
+            .unwrap()
+            .tags
+            .is_empty());
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
                 .and_then(|stream| stream.drop_campaign_eligible),
             Some(true)
         );
@@ -1741,8 +1755,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_minute_watched_for_streamer_updates_presence_and_watch_progress() {
-        let (endpoints, _requests, twitch_server) = spawn_twitch_server(6);
+    async fn claim_available_drops_continues_after_one_claim_fails() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![
+            serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "name": "Campaign",
+                                "timeBasedDrops": [
+                                    {
+                                        "name": "Broken reward",
+                                        "requiredMinutesWatched": 60,
+                                        "self": {
+                                            "dropInstanceID": "drop-broken",
+                                            "currentMinutesWatched": 60,
+                                            "isClaimed": false
+                                        }
+                                    },
+                                    {
+                                        "name": "Good reward",
+                                        "requiredMinutesWatched": 60,
+                                        "self": {
+                                            "dropInstanceID": "drop-good",
+                                            "currentMinutesWatched": 60,
+                                            "isClaimed": false
+                                        }
+                                    }
+                                ]
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "data": {
+                    "claimDropRewards": {
+                        "status": "INELIGIBLE"
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "data": {
+                    "claimDropRewards": {
+                        "status": "CLAIMED"
+                    }
+                }
+            })
+            .to_string(),
+        ]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+
+        let error = claim_available_drops(&twitch, "periodic", &test_observability())
+            .await
+            .unwrap_err();
+
+        server.join().unwrap();
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("drop-broken")),
+            "{error:?}"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.contains(r#""dropInstanceID":"drop-broken""#)));
+        assert!(requests
+            .iter()
+            .any(|request| request.contains(r#""dropInstanceID":"drop-good""#)));
+    }
+
+    #[tokio::test]
+    async fn minute_watched_reuses_refreshed_snapshot_and_updates_watch_progress() {
+        let (endpoints, requests, twitch_server) = spawn_twitch_server(5);
         let twitch = TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -1770,22 +1866,27 @@ mod tests {
         state.streamers = vec![Streamer {
             username: String::from("alice"),
             channel_id: String::from("100"),
+            is_online: true,
+            stream: Some(tm_domain::Stream {
+                broadcast_id: String::from("stream-1"),
+                title: String::from("Title"),
+                game: Some(Game::from_name("Game Name")),
+                game_id: Some(String::from("42")),
+                tags: vec![String::from("tag")],
+                viewers_count: 1,
+                stream_up_at: Some(ts(0)),
+                last_update: Some(ts(0)),
+                ..tm_domain::Stream::default()
+            }),
             ..Streamer::default()
         }];
         let runtime = tm_runtime::spawn_runtime_state(state);
 
         let mut snapshot = runtime.state_snapshot().await.unwrap();
         let streamer = snapshot.streamers.remove(0);
-        send_minute_watched_for_streamer(
-            &runtime,
-            &twitch,
-            &spade_urls,
-            &streamer,
-            "user-1",
-            &test_observability(),
-        )
-        .await
-        .unwrap();
+        send_minute_watched_for_streamer(&runtime, &twitch, &spade_urls, &streamer, "user-1")
+            .await
+            .unwrap();
 
         let snapshot = runtime.state_snapshot().await.unwrap();
         twitch_server.join().unwrap();
@@ -1796,6 +1897,12 @@ mod tests {
             .as_ref()
             .and_then(|stream| stream.last_minute_update)
             .is_some());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(!requests
+            .iter()
+            .any(|request| request
+                .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
     }
 
     #[test]
@@ -1831,6 +1938,17 @@ mod tests {
         assert!(claiming_only["properties"].get("game_id").is_none());
     }
 
+    #[test]
+    fn watch_selection_reports_only_released_channel_ids() {
+        let previous = HashSet::from([String::from("channel-a"), String::from("channel-b")]);
+        let selected = HashSet::from([String::from("channel-b"), String::from("channel-c")]);
+
+        assert_eq!(
+            released_watch_channel_ids(&previous, &selected),
+            vec![String::from("channel-a")]
+        );
+    }
+
     #[tokio::test]
     async fn minute_watcher_recovers_channel_rename_by_stable_id() {
         let (endpoints, requests, twitch_server) = spawn_json_response_server(vec![
@@ -1839,7 +1957,7 @@ mod tests {
             String::from(r#"{"data":{"user":{"id":"100","login":"new_login"}}}"#),
             fixture_json("twitch.stream_info.json"),
         ]);
-        let twitch = TwitchClient::with_client_and_endpoints(
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -1847,15 +1965,7 @@ mod tests {
             "token",
             "ua",
             endpoints,
-        );
-        let (spade_url, spade_requests, spade_server) = spawn_status_server(vec!["204 No Content"]);
-        let spade_urls = tokio::sync::Mutex::new(HashMap::from([(
-            String::from("new_login"),
-            SpadeCacheEntry::Ready(CachedSpadeUrl {
-                url: spade_url,
-                fetched_at: StdInstant::now(),
-            }),
-        )]));
+        ));
         let mut state = tm_runtime::RuntimeState::from_targets(
             &ConfigFile::default(),
             &[String::from("old-login")],
@@ -1868,6 +1978,10 @@ mod tests {
             is_online: true,
             presence_known: true,
             online_at: Some(ts(0)),
+            settings: tm_domain::StreamerSettings {
+                farm_drops: false,
+                ..tm_domain::StreamerSettings::default()
+            },
             stream: Some(tm_domain::Stream::default()),
             ..Streamer::default()
         }];
@@ -1875,32 +1989,35 @@ mod tests {
         let runtime = tm_runtime::spawn_runtime_state(state);
         let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
 
-        send_minute_watched_for_streamer(
+        refresh_watch_selection_metadata(
             &runtime,
             &twitch,
-            &spade_urls,
-            &streamer,
-            "user-1",
+            &[streamer],
             &test_observability(),
+            ts(300),
         )
         .await
         .unwrap();
 
         twitch_server.join().unwrap();
-        spade_server.join().unwrap();
         let snapshot = runtime.state_snapshot().await.unwrap();
         assert_eq!(snapshot.streamers[0].username, "new_login");
         assert_eq!(snapshot.initial_points.get("new_login"), Some(&500));
-        assert!(snapshot.streamers[0]
-            .stream
-            .as_ref()
-            .and_then(|stream| stream.last_minute_update)
-            .is_some());
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .map(|stream| stream.broadcast_id.as_str()),
+            Some("stream-1")
+        );
         let requests = requests.lock().unwrap();
         assert!(requests
             .iter()
             .any(|request| request.contains(r#""operationName":"ResolveLoginById""#)));
-        assert_eq!(spade_requests.lock().unwrap().len(), 1);
+        assert!(requests
+            .iter()
+            .any(|request| request
+                .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
     }
 
     #[tokio::test]

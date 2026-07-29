@@ -142,9 +142,9 @@ enum RuntimeCommand {
         now: OffsetDateTime,
         respond_to: oneshot::Sender<bool>,
     },
-    MarkMinuteWatched {
+    UpdateWatchProgress {
         channel_id: String,
-        now: OffsetDateTime,
+        now: Option<OffsetDateTime>,
     },
     MarkWatchStreakRecovered {
         channel_id: String,
@@ -243,8 +243,8 @@ impl RuntimeActor {
                 now,
                 respond_to,
             } => self.set_presence_checked(&channel_id, online, now, respond_to),
-            RuntimeCommand::MarkMinuteWatched { channel_id, now } => {
-                self.mark_minute_watched(&channel_id, now);
+            RuntimeCommand::UpdateWatchProgress { channel_id, now } => {
+                self.update_watch_progress(&channel_id, now);
             }
             RuntimeCommand::MarkWatchStreakRecovered {
                 channel_id,
@@ -356,9 +356,13 @@ impl RuntimeActor {
         self.notify_state_change();
     }
 
-    fn mark_minute_watched(&mut self, channel_id: &str, now: OffsetDateTime) {
-        self.state.mark_minute_watched(channel_id, now);
-        self.notify_state_change();
+    fn update_watch_progress(&mut self, channel_id: &str, now: Option<OffsetDateTime>) {
+        if let Some(now) = now {
+            self.state.mark_minute_watched(channel_id, now);
+            self.notify_state_change();
+        } else if self.state.reset_watch_progress(channel_id) {
+            self.notify_state_change();
+        }
     }
 
     fn mark_watch_streak_recovered(
@@ -700,13 +704,25 @@ impl RuntimeHandle {
         now: OffsetDateTime,
     ) -> Result<()> {
         self.sender
-            .send(RuntimeCommand::MarkMinuteWatched {
+            .send(RuntimeCommand::UpdateWatchProgress {
                 channel_id: channel_id.into(),
-                now,
+                now: Some(now),
             })
             .await
             .map_err(|_| RuntimeError::SendFailed {
                 command: "MarkMinuteWatched",
+            })
+    }
+
+    pub async fn reset_watch_progress(&self, channel_id: impl Into<String>) -> Result<()> {
+        self.sender
+            .send(RuntimeCommand::UpdateWatchProgress {
+                channel_id: channel_id.into(),
+                now: None,
+            })
+            .await
+            .map_err(|_| RuntimeError::SendFailed {
+                command: "ResetWatchProgress",
             })
     }
 

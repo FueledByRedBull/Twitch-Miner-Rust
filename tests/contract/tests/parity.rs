@@ -198,6 +198,66 @@ fn normalized_prediction_contract_matches_expected() {
 }
 
 #[test]
+fn normalized_prediction_tie_contract_selects_first_outcome() {
+    let value = vectors();
+    let input = &value["prediction_tie"];
+    let settings = &input["settings"];
+    let streamer = Streamer {
+        channel_points: input["balance"].as_i64().unwrap(),
+        settings: StreamerSettings {
+            bet: BetSettings {
+                strategy: Strategy::MostVoted,
+                percentage: Some(settings["percentage"].as_u64().unwrap() as u32),
+                max_points: Some(settings["max_points"].as_u64().unwrap() as u32),
+                stealth_mode: Some(settings["stealth_mode"].as_bool().unwrap()),
+                ..BetSettings::default()
+            },
+            ..StreamerSettings::default()
+        },
+        ..Streamer::default()
+    };
+    let outcomes = input["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|outcome| PredictionOutcome {
+            id: outcome["id"].as_str().unwrap().to_string(),
+            title: outcome["title"].as_str().unwrap().to_string(),
+            color: outcome["color"].as_str().unwrap().to_string(),
+            total_users: outcome["total_users"].as_i64().unwrap(),
+            total_points: outcome["total_points"].as_i64().unwrap(),
+            top_points: outcome["top_points"].as_i64().unwrap(),
+            ..PredictionOutcome::default()
+        })
+        .collect();
+    let mut event = PredictionEvent {
+        streamer,
+        event_id: String::from("parity-tie"),
+        title: String::from("Parity tie"),
+        status: String::from("ACTIVE"),
+        created_at: ts(100),
+        window_seconds: 30.0,
+        outcomes,
+        decision: Default::default(),
+        bet_placed: false,
+        bet_confirmed: false,
+        result_type: String::new(),
+        result_string: String::new(),
+    };
+    event.update_outcomes();
+    let decision = event.decide(input["balance"].as_i64().unwrap());
+    let expected = &input["expected"];
+    assert_eq!(
+        decision.choice,
+        Some(expected["choice"].as_u64().unwrap() as usize)
+    );
+    assert_eq!(
+        decision.outcome_id,
+        expected["outcome_id"].as_str().unwrap()
+    );
+}
+
+#[test]
 fn normalized_points_and_history_contract_matches_expected() {
     let value = vectors();
     let input = &value["points"];
@@ -276,7 +336,6 @@ fn normalized_watch_selection_contract_matches_expected() {
         &parse_watch_priorities(&priorities),
         &game_priority,
         &game_exclude,
-        None,
         ts(10_000),
     );
     let expected = input["expected"]
