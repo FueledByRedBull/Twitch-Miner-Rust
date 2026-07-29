@@ -10,17 +10,22 @@ gap before each release.
 | --- | --- | --- |
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
-| Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context and `RewardList` fixtures, a private bounded warm cache for null-milestone restarts, deterministic longest/expiring streak priorities, resolved/unresolved short-restart carryover, a fixed 15-minute live budget, channel-rename recovery by stable ID, and opt-in single-worker VOD/clip recovery with live preemption. Playback acceptance is distinct from typed recovery confirmation. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
-| Drops and moments | Improved | Inventory, campaign, claim-status, and PubSub fixtures. Drop progress and claim mutations have independent global/per-streamer controls; a verified campaign can limit the watch set to one deterministic streamer so Twitch progress is not split. Inventory and per-channel campaign IDs are matched so a fully claimed campaign releases its pin, while new/incomplete/unknown campaigns remain eligible. Legacy `claim_drops` configurations migrate without changing their prior effective behavior. |
-| Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including PubSub pending-state updates followed by terminal viewer results. |
+| Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context and `RewardList` fixtures, a private bounded warm cache for null-milestone restarts, deterministic longest/expiring streak priorities, resolved/unresolved short-restart carryover, Twitch's documented 30-minute inter-broadcast eligibility rule, a fixed 15-minute live budget, one bounded streak jump per broadcast, watch-progress reset when a channel loses its credited slot, snapshot reuse for minute-watched payloads, channel-rename recovery by stable ID, and opt-in single-worker VOD/clip recovery with live preemption. Playback acceptance is distinct from typed recovery confirmation. Read-only GQL requests use bounded header-aware retries; mutations remain single-attempt. |
+| Drops and moments | Improved | Inventory, campaign, claim-status, and PubSub fixtures. Drop progress and claim mutations have independent global/per-streamer controls; a verified campaign can limit the watch set to one deterministic streamer so Twitch progress is not split. Inventory and per-channel campaign IDs are matched so a fully claimed campaign releases its pin, while new/incomplete/unknown campaigns remain eligible. One failed drop claim is reported after the remaining claimable batch has been attempted. Legacy `claim_drops` configurations migrate without changing their prior effective behavior. |
+| Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including an explicit first-outcome tie contract shared with Go/Python and PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
-| EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and IRC tests. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
+| EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | EventSub welcome/keepalive/reconnect/revocation/capacity tests, independently supervised PubSub `/v1` LISTEN/PING/PONG tests, transport-neutral runtime events, bounded dedupe, and verified Rustls/WebPKI IRC on port 6697. EventSub predictions are selected only when the tracked channel ID matches the authenticated broadcaster and the validated token has a prediction read/manage scope; ordinary viewer discovery/confirmation remains on PubSub compatibility. |
 | Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
 | Runtime supervision and health | Improved | Task-exit/panic supervision plus separate success/activity freshness and failure thresholds; active bounded recovery remains degraded without restarting the whole miner, silent tasks remain fatal, saved-session validation retries transient startup failures in-process, and batched presence polling records at most one task failure per cycle. |
 | Docker amd64, arm64, arm/v7 | Supported | Per-platform digest and post-manifest smoke tests in release CI. |
 | Automatic updater | Deliberately removed | Legacy `auto_update=true` is rejected; no dormant binary replacement code remains. |
 | Config mutation | Improved | Versioned preview, atomic write, and rollback backup. |
+
+Twitch's current [Watch Streaks requirements](https://help.twitch.tv/s/article/recover-watch-streaks)
+state that at least 30 minutes must pass between the end of one stream and the
+start of the next. That platform rule, rather than parent-miner lineage, is the
+contract used by streak prioritization.
 
 ## Configuration compatibility
 
@@ -43,10 +48,11 @@ working Rust implementation:
 
 The persisted-operation names/hashes that Rust actively uses are captured from
 the Go source and checked against Rust builders in [protocol-inventory.md](../protocol-inventory.md).
-Rust now exercises the Go/Python `PlaybackAccessToken` contract as part of the
-live HLS preflight. Go's remaining unused definitions (`ModViewChannelQuery`,
-`DropCampaignDetails`, and `PersonalSections`) are not part of either miner's
-exercised runtime behavior and are intentionally not copied into Rust.
+Go defines but never issues five operations: `PlaybackAccessToken`,
+`ModViewChannelQuery`, `ViewerDropsDashboard`, `DropCampaignDetails`, and
+`PersonalSections`. Rust exercises the first and third as typed read-only
+contracts. The remaining three are not part of either miner's exercised runtime
+behavior and are intentionally not copied into Rust.
 
 The normalized cross-process vectors in `tests/parity/vectors.json` are run by
 the Rust contract tests and by the pinned Go baseline through

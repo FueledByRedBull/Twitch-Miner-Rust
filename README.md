@@ -212,7 +212,9 @@ independently; bounded GQL polling covers EventSub presence overflow/outage.
 - Do not commit `data/` or cookie files.
 - Cookie files contain authentication material; treat them like credentials.
 - The app uses device-code login and does not need your Twitch password.
-- TLS certificate verification is always enforced; insecure certificate bypass is not supported.
+- TLS certificate verification is always enforced; insecure certificate bypass
+  is not supported. Optional IRC uses verified TLS on port 6697 and never sends
+  the OAuth token over plaintext IRC.
 - Run `tm-app --canary --data-dir ./data` on a dedicated account before publishing a release.
 - The repo ignores runtime data and logs by default.
 - This project is unofficial and not affiliated with Twitch.

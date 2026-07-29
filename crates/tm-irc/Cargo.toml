@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

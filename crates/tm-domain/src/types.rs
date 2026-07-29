@@ -203,6 +203,9 @@ pub struct Stream {
     pub broadcast_id: String,
     pub title: String,
     pub game: Option<Game>,
+    pub game_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub drops_tags: bool,
     #[serde(skip)]
     pub drop_campaign_eligible: Option<bool>,
@@ -229,6 +232,8 @@ impl Default for Stream {
             broadcast_id: String::new(),
             title: String::new(),
             game: None,
+            game_id: None,
+            tags: Vec::new(),
             drops_tags: false,
             drop_campaign_eligible: None,
             viewers_count: 0,
@@ -255,6 +260,7 @@ impl Stream {
         broadcast_id: impl Into<String>,
         title: impl Into<String>,
         game: Game,
+        game_id: Option<String>,
         tag_ids: &[String],
         viewers: u32,
         drop_id: &str,
@@ -262,6 +268,8 @@ impl Stream {
     ) {
         self.broadcast_id = broadcast_id.into();
         self.title = title.into().trim().to_string();
+        self.game_id = game_id.filter(|value| !value.trim().is_empty());
+        self.tags = tag_ids.to_vec();
         self.drops_tags = tag_ids.iter().any(|tag| tag == drop_id)
             && (game.display_name.is_some() || game.name.is_some());
         self.game = Some(game);
@@ -389,6 +397,8 @@ pub struct Streamer {
     pub presence_known: bool,
     pub online_at: Option<OffsetDateTime>,
     pub offline_at: Option<OffsetDateTime>,
+    #[serde(skip)]
+    pub last_stream_ended_at: Option<OffsetDateTime>,
     #[serde(skip)]
     pub watch_suspended_until: Option<OffsetDateTime>,
     pub stream: Option<Stream>,
@@ -572,12 +582,15 @@ mod tests {
                 display_name: Some(String::from("Game")),
                 name: None,
             },
+            Some(String::from("game-id")),
             &[String::from("drop-tag")],
             100,
             "drop-tag",
             now,
         );
         assert_eq!(stream.title, "title");
+        assert_eq!(stream.game_id.as_deref(), Some("game-id"));
+        assert_eq!(stream.tags, [String::from("drop-tag")]);
         assert_eq!(stream.broadcast_id, "id");
         assert!(stream.drops_tags);
         assert!(!stream.update_required_at(now));

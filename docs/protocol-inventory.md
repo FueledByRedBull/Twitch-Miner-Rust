@@ -4,7 +4,8 @@ The Rust client keeps persisted-operation names and SHA-256 hashes in
 `tm-twitch::PERSISTED_OPERATION_CONTRACTS`. A unit test verifies that every
 builder uses an inventoried, unique contract. The comparison source is the Go
 implementation at commit `91f00698314d`; the baseline gate permits only its three
-documented unused definitions plus Rust's two typed offline-recovery reads.
+unimplemented definitions plus the two Go-unused definitions that Rust exercises
+as typed playback and Drops-dashboard reads.
 
 When both repositories are available, run the baseline tests and the explicit
 comparison gate from the Rust workspace:
@@ -14,8 +15,11 @@ comparison gate from the Rust workspace:
 ```
 
 The gate runs `go test ./...`, compares every Go persisted-operation hash with
-Rust, and permits only the four documented Go definitions that neither miner
-exercises.
+Rust, and accounts for five Go definitions that Go never issues:
+`PlaybackAccessToken`, `ModViewChannelQuery`, `ViewerDropsDashboard`,
+`DropCampaignDetails`, and `PersonalSections`. Rust actively exercises
+`PlaybackAccessToken` and `ViewerDropsDashboard`; the remaining three are not
+part of either miner's runtime.
 
 | Operation | Mode |
 | --- | --- |
@@ -78,14 +82,16 @@ automatically replayed after an uncertain response. A release with a changed
 operation hash must add its sanitized fixture, update this inventory, and pass
 the canary before publication.
 
-The minute watcher has one bounded raw read-only GraphQL query,
-`ResolveLoginById`, used only after a selected channel is still live by stable
-numeric ID but its login-based stream-info lookup reports a missing user. The
-typed response must return the same requested ID and a non-empty normalized
-login before runtime identity is changed. A successful change is retried once;
-an unresolved mismatch releases the watch slot for five minutes instead of
-allowing it to consume half of the watch capacity indefinitely. No response
-payload, token, or cookie is logged.
+The watch-selection metadata refresh has one bounded raw read-only GraphQL
+query, `ResolveLoginById`, used only after a selected channel is still live by
+stable numeric ID but its login-based stream-info lookup reports a missing
+user. The typed response must return the same requested ID and a non-empty
+normalized login before runtime identity is changed. A successful change is
+retried once; an unresolved mismatch releases the watch slot for five minutes
+instead of allowing it to consume half of the watch capacity indefinitely.
+Minute-watched sends reuse the refreshed runtime snapshot, including broadcast,
+game, tag, and viewer metadata, rather than issuing a second stream-info request
+on every tick. No response payload, token, or cookie is logged.
 
 The preferred EventSub WebSocket path handles stream presence and observes
 raids. Broadcaster prediction subscriptions are requested only when a tracked
@@ -111,6 +117,8 @@ Both paths normalize into `tm-events`; mutation IDs, point-event state, and
 prediction event IDs are boundedly deduplicated before effects are scheduled. GQL remains the typed
 mutation/reconciliation path. Twitch currently supports
 `drop.entitlement.grant` only through webhooks or conduits, not WebSockets.
+Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` through
+Rustls with WebPKI roots; the OAuth token is never sent over plaintext IRC.
 
 ## Typing policy
 

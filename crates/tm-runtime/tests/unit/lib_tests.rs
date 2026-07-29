@@ -451,6 +451,10 @@ fn short_restart_chains_preserve_resolved_streak_state() {
     {
         assert!(state.apply_presence("123", false, ts(offline_at)));
         assert!(state.apply_presence("123", true, ts(online_at)));
+        assert_eq!(
+            state.streamers[0].last_stream_ended_at,
+            Some(ts(offline_at))
+        );
         state.apply_stream_update(
             &StreamUpdate {
                 channel_id: "123".into(),
@@ -472,7 +476,6 @@ fn short_restart_chains_preserve_resolved_streak_state() {
         );
         assert!(!should_prioritize_streak(
             &state.streamers[0],
-            Some(state.started_at),
             ts(online_at + 1),
         ));
     }
@@ -486,11 +489,7 @@ fn short_restart_chains_preserve_resolved_streak_state() {
             .unwrap()
             .watch_streak_missing
     );
-    assert!(should_prioritize_streak(
-        &state.streamers[0],
-        Some(state.started_at),
-        ts(2_101),
-    ));
+    assert!(should_prioritize_streak(&state.streamers[0], ts(2_101),));
 }
 
 #[test]
@@ -1310,6 +1309,34 @@ async fn checked_presence_update_reports_only_real_transitions() {
         .set_presence_if_changed("100", false, ts(22))
         .await
         .unwrap());
+}
+
+#[tokio::test]
+async fn releasing_watch_slot_resets_only_that_channels_progress() {
+    let config = ConfigFile {
+        streamers: vec!["alpha".into(), "bravo".into()],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(10));
+    for (index, channel_id) in ["100", "200"].into_iter().enumerate() {
+        state.streamers[index].channel_id = channel_id.to_owned();
+        state.streamers[index].stream = Some(Stream {
+            minute_watched: 12.0,
+            last_minute_update: Some(ts(20)),
+            ..Stream::default()
+        });
+    }
+    let runtime = spawn_runtime_state(state);
+
+    runtime.reset_watch_progress("100").await.unwrap();
+
+    let snapshot = runtime.state_snapshot().await.unwrap();
+    let released = snapshot.streamers[0].stream.as_ref().unwrap();
+    let retained = snapshot.streamers[1].stream.as_ref().unwrap();
+    assert_f64_eq(released.minute_watched, 0.0);
+    assert!(released.last_minute_update.is_none());
+    assert_f64_eq(retained.minute_watched, 12.0);
+    assert_eq!(retained.last_minute_update, Some(ts(20)));
 }
 
 #[tokio::test]

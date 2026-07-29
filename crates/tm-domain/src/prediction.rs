@@ -377,26 +377,34 @@ fn max_index(
     outcomes: &[PredictionOutcome],
     scorer: impl Fn(&PredictionOutcome) -> f64,
 ) -> Option<usize> {
-    outcomes
-        .iter()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| {
-            scorer(left)
-                .partial_cmp(&scorer(right))
-                .unwrap_or(Ordering::Equal)
-        })
-        .map(|(index, _)| index)
+    let mut outcomes = outcomes.iter().enumerate();
+    let (mut best_index, first) = outcomes.next()?;
+    let mut best_score = scorer(first);
+    for (index, outcome) in outcomes {
+        let score = scorer(outcome);
+        if score.partial_cmp(&best_score) == Some(Ordering::Greater) {
+            best_index = index;
+            best_score = score;
+        }
+    }
+    Some(best_index)
 }
 
 fn max_index_by_key<T: Ord>(
     outcomes: &[PredictionOutcome],
     key: impl Fn(&PredictionOutcome) -> T,
 ) -> Option<usize> {
-    outcomes
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, outcome)| key(outcome))
-        .map(|(index, _)| index)
+    let mut outcomes = outcomes.iter().enumerate();
+    let (mut best_index, first) = outcomes.next()?;
+    let mut best_key = key(first);
+    for (index, outcome) in outcomes {
+        let candidate_key = key(outcome);
+        if candidate_key > best_key {
+            best_index = index;
+            best_key = candidate_key;
+        }
+    }
+    Some(best_index)
 }
 
 fn format_float(value: f64) -> String {
@@ -459,6 +467,49 @@ mod tests {
         assert_eq!(select_outcome(&outcomes, &settings), Some(0));
         settings.strategy = Strategy::SmartMoney;
         assert_eq!(select_outcome(&outcomes, &settings), Some(0));
+    }
+
+    #[test]
+    fn prediction_strategy_ties_select_the_first_outcome() {
+        let outcomes = vec![
+            PredictionOutcome {
+                id: String::from("first"),
+                total_users: 10,
+                top_points: 20,
+                odds: 2.0,
+                odds_percentage: 50.0,
+                percentage_users: 50.0,
+                ..PredictionOutcome::default()
+            },
+            PredictionOutcome {
+                id: String::from("second"),
+                total_users: 10,
+                top_points: 20,
+                odds: 2.0,
+                odds_percentage: 50.0,
+                percentage_users: 50.0,
+                ..PredictionOutcome::default()
+            },
+        ];
+        for strategy in [
+            Strategy::MostVoted,
+            Strategy::HighOdds,
+            Strategy::Percentage,
+            Strategy::SmartMoney,
+            Strategy::Smart,
+        ] {
+            assert_eq!(
+                select_outcome(
+                    &outcomes,
+                    &BetSettings {
+                        strategy,
+                        ..BetSettings::default()
+                    }
+                ),
+                Some(0),
+                "strategy={strategy:?}"
+            );
+        }
     }
 
     #[test]

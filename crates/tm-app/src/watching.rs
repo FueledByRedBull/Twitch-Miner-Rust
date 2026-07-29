@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
@@ -31,6 +31,14 @@ pub(crate) struct WatchRotation {
     queue: VecDeque<String>,
     pinned_campaign: Option<String>,
     active_since: Option<RuntimeTime>,
+    promoted_streak_broadcasts: HashMap<String, String>,
+    last_streak_promotion: Option<RuntimeTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StreakCandidate {
+    pub(crate) login: String,
+    pub(crate) broadcast_id: String,
 }
 
 impl WatchRotation {
@@ -38,6 +46,7 @@ impl WatchRotation {
         &mut self,
         ordered_eligible: &[String],
         campaign_logins: &[String],
+        streak_candidates: &[StreakCandidate],
         now: RuntimeTime,
     ) -> Vec<String> {
         let pinned_campaign = campaign_logins
@@ -46,6 +55,8 @@ impl WatchRotation {
             .cloned();
         let campaign_changed = self.pinned_campaign != pinned_campaign;
         self.pinned_campaign = pinned_campaign;
+        self.promoted_streak_broadcasts
+            .retain(|login, _| ordered_eligible.contains(login));
 
         // Twitch advances Drop progress on only one channel. Pin the first
         // ranked campaign and keep competing campaigns out of the spare slot.
@@ -62,6 +73,8 @@ impl WatchRotation {
 
         if self.queue.is_empty() {
             self.active_since = None;
+            self.promoted_streak_broadcasts.clear();
+            self.last_streak_promotion = None;
             return self.pinned_campaign.iter().cloned().collect();
         }
 
@@ -70,7 +83,30 @@ impl WatchRotation {
         }
 
         let rotating_slots = MAX_CONCURRENT_WATCHERS - usize::from(self.pinned_campaign.is_some());
-        if self.queue.len() > rotating_slots
+        let promotion_allowed = self
+            .last_streak_promotion
+            .is_none_or(|last| (now - last).whole_seconds() >= WATCH_ROTATION_SECONDS);
+        let promotion = promotion_allowed.then(|| {
+            streak_candidates.iter().find_map(|candidate| {
+                let position = self
+                    .queue
+                    .iter()
+                    .position(|login| login == &candidate.login)?;
+                let already_promoted = self.promoted_streak_broadcasts.get(&candidate.login)
+                    == Some(&candidate.broadcast_id);
+                (position >= rotating_slots && !already_promoted)
+                    .then(|| (position, candidate.clone()))
+            })
+        });
+        if let Some(Some((position, candidate))) = promotion {
+            if let Some(login) = self.queue.remove(position) {
+                self.queue.push_front(login);
+                self.promoted_streak_broadcasts
+                    .insert(candidate.login, candidate.broadcast_id);
+                self.last_streak_promotion = Some(now);
+                self.active_since = Some(now);
+            }
+        } else if self.queue.len() > rotating_slots
             && self
                 .active_since
                 .is_some_and(|started| (now - started).whole_seconds() >= WATCH_ROTATION_SECONDS)
@@ -83,11 +119,20 @@ impl WatchRotation {
             self.active_since = Some(now);
         }
 
-        self.pinned_campaign
+        let selected = self
+            .pinned_campaign
             .iter()
             .cloned()
             .chain(self.queue.iter().take(rotating_slots).cloned())
-            .collect()
+            .collect::<Vec<_>>();
+        for candidate in streak_candidates
+            .iter()
+            .filter(|candidate| selected.contains(&candidate.login))
+        {
+            self.promoted_streak_broadcasts
+                .insert(candidate.login.clone(), candidate.broadcast_id.clone());
+        }
+        selected
     }
 }
 
@@ -101,7 +146,7 @@ pub(crate) fn minute_watcher_resume_gap(
 
 #[cfg(test)]
 mod tests {
-    use super::WatchRotation;
+    use super::{StreakCandidate, WatchRotation};
     use tm_runtime::RuntimeTime;
 
     fn ts(seconds: u64) -> RuntimeTime {
@@ -112,29 +157,36 @@ mod tests {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
+    fn streak(login: &str, broadcast_id: &str) -> StreakCandidate {
+        StreakCandidate {
+            login: login.to_owned(),
+            broadcast_id: broadcast_id.to_owned(),
+        }
+    }
+
     #[test]
     fn rotates_two_creditable_slots_every_fifteen_minutes() {
         let eligible = logins(&["alpha", "bravo", "charlie", "delta", "echo"]);
         let mut rotation = WatchRotation::default();
 
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(0)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(0)),
             logins(&["alpha", "bravo"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(899)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(899)),
             logins(&["alpha", "bravo"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(900)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(900)),
             logins(&["charlie", "delta"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(1_800)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(1_800)),
             logins(&["echo", "alpha"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(2_700)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(2_700)),
             logins(&["bravo", "charlie"])
         );
     }
@@ -143,20 +195,35 @@ mod tests {
     fn removes_ineligible_channels_and_refills_without_waiting() {
         let mut rotation = WatchRotation::default();
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["alpha", "bravo", "charlie"]), &[], ts(0),),
+            rotation.select_with_campaigns(
+                &logins(&["alpha", "bravo", "charlie"]),
+                &[],
+                &[],
+                ts(0),
+            ),
             logins(&["alpha", "bravo"])
         );
 
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["bravo", "charlie"]), &[], ts(30),),
+            rotation.select_with_campaigns(&logins(&["bravo", "charlie"]), &[], &[], ts(30),),
             logins(&["bravo", "charlie"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["bravo", "charlie", "delta"]), &[], ts(899),),
+            rotation.select_with_campaigns(
+                &logins(&["bravo", "charlie", "delta"]),
+                &[],
+                &[],
+                ts(899),
+            ),
             logins(&["bravo", "charlie"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["bravo", "charlie", "delta"]), &[], ts(900),),
+            rotation.select_with_campaigns(
+                &logins(&["bravo", "charlie", "delta"]),
+                &[],
+                &[],
+                ts(900),
+            ),
             logins(&["delta", "bravo"])
         );
     }
@@ -165,14 +232,16 @@ mod tests {
     fn returns_every_available_channel_when_at_or_below_the_limit() {
         let mut rotation = WatchRotation::default();
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["alpha"]), &[], ts(0)),
+            rotation.select_with_campaigns(&logins(&["alpha"]), &[], &[], ts(0)),
             logins(&["alpha"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["alpha", "bravo"]), &[], ts(1)),
+            rotation.select_with_campaigns(&logins(&["alpha", "bravo"]), &[], &[], ts(1)),
             logins(&["alpha", "bravo"])
         );
-        assert!(rotation.select_with_campaigns(&[], &[], ts(2)).is_empty());
+        assert!(rotation
+            .select_with_campaigns(&[], &[], &[], ts(2))
+            .is_empty());
     }
 
     #[test]
@@ -181,23 +250,23 @@ mod tests {
         let mut rotation = WatchRotation::default();
 
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(0)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(0)),
             logins(&["alpha", "bravo"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &logins(&["delta"]), ts(100)),
+            rotation.select_with_campaigns(&eligible, &logins(&["delta"]), &[], ts(100)),
             logins(&["delta", "alpha"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &logins(&["delta"]), ts(999)),
+            rotation.select_with_campaigns(&eligible, &logins(&["delta"]), &[], ts(999)),
             logins(&["delta", "alpha"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &logins(&["delta"]), ts(1_000)),
+            rotation.select_with_campaigns(&eligible, &logins(&["delta"]), &[], ts(1_000)),
             logins(&["delta", "bravo"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &[], ts(1_001)),
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(1_001)),
             logins(&["bravo", "charlie"])
         );
     }
@@ -208,11 +277,11 @@ mod tests {
         let mut rotation = WatchRotation::default();
 
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &logins(&["delta", "charlie"]), ts(0),),
+            rotation.select_with_campaigns(&eligible, &logins(&["delta", "charlie"]), &[], ts(0),),
             logins(&["delta", "alpha"])
         );
         assert_eq!(
-            rotation.select_with_campaigns(&eligible, &logins(&["charlie"]), ts(1)),
+            rotation.select_with_campaigns(&eligible, &logins(&["charlie"]), &[], ts(1)),
             logins(&["charlie", "alpha"])
         );
     }
@@ -222,16 +291,73 @@ mod tests {
         let mut rotation = WatchRotation::default();
 
         assert_eq!(
-            rotation.select_with_campaigns(&logins(&["delta"]), &logins(&["delta"]), ts(0),),
+            rotation.select_with_campaigns(&logins(&["delta"]), &logins(&["delta"]), &[], ts(0),),
             logins(&["delta"])
         );
         assert_eq!(
             rotation.select_with_campaigns(
                 &logins(&["alpha", "bravo", "delta"]),
                 &logins(&["delta"]),
+                &[],
                 ts(1_000),
             ),
             logins(&["delta", "alpha"])
+        );
+    }
+
+    #[test]
+    fn streak_candidates_get_one_bounded_jump_without_starving_rotation() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[streak("charlie", "broadcast-c")],
+                ts(100),
+            ),
+            logins(&["charlie", "alpha"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[
+                    streak("charlie", "broadcast-c"),
+                    streak("bravo", "broadcast-b"),
+                ],
+                ts(101),
+            ),
+            logins(&["charlie", "alpha"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[
+                    streak("charlie", "broadcast-c"),
+                    streak("bravo", "broadcast-b"),
+                ],
+                ts(1_000),
+            ),
+            logins(&["bravo", "charlie"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(
+                &eligible,
+                &[],
+                &[
+                    streak("charlie", "broadcast-c"),
+                    streak("bravo", "broadcast-b"),
+                ],
+                ts(1_900),
+            ),
+            logins(&["alpha", "delta"])
         );
     }
 }

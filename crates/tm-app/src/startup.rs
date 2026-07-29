@@ -178,6 +178,7 @@ async fn bootstrap_online_stream(
         &info.id,
         &info.title,
         Game::from_name(&info.game_name),
+        info.game_id.clone(),
         &info.tags,
         info.viewers_count,
         tm_twitch::DROP_ID,

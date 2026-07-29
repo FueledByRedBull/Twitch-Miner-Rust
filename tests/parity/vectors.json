@@ -79,6 +79,39 @@
       "result_string": "WIN, Gained: +131"
     }
   },
+  "prediction_tie": {
+    "balance": 1000,
+    "settings": {
+      "strategy": "MOST_VOTED",
+      "percentage": 10,
+      "max_points": 1000,
+      "stealth_mode": false
+    },
+    "outcomes": [
+      {
+        "id": "first",
+        "title": "First",
+        "color": "blue",
+        "total_users": 10,
+        "total_points": 100,
+        "top_points": 20,
+        "top_predictors": [{"points": 20}]
+      },
+      {
+        "id": "second",
+        "title": "Second",
+        "color": "pink",
+        "total_users": 10,
+        "total_points": 100,
+        "top_points": 20,
+        "top_predictors": [{"points": 20}]
+      }
+    ],
+    "expected": {
+      "choice": 0,
+      "outcome_id": "first"
+    }
+  },
   "points": {
     "initial_balance": 1000,
     "earned": 50,

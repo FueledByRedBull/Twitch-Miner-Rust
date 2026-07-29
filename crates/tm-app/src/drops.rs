@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use tm_config::ConfigFile;
 use tm_domain::Streamer;
 use tm_observability::Event as DiscordEvent;
@@ -110,11 +110,16 @@ async fn claim_available_drops_with_health(
             tracing::info!(operation = "drop_progress", "{message}");
         }
     }
+    let mut failures = Vec::new();
     for drop in drops.into_iter().filter(drop_is_claimable) {
-        twitch
+        let result = twitch
             .claim_drop(&drop.drop_instance_id)
             .await
-            .with_context(|| format!("claim drop {}", drop.drop_instance_id))?;
+            .with_context(|| format!("claim drop {}", drop.drop_instance_id));
+        if let Err(error) = result {
+            failures.push(error);
+            continue;
+        }
         if let Some(health) = health {
             health.record_claim();
         }
@@ -124,5 +129,17 @@ async fn claim_available_drops_with_health(
             .send_event(DiscordEvent::DropClaim, &message)
             .await;
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{} drop claim(s) failed: {}",
+            failures.len(),
+            failures
+                .iter()
+                .map(|error| format!("{error:#}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    }
 }

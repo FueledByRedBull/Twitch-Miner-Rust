@@ -2,7 +2,8 @@
 
 ## Executive summary
 
-**Baseline:** `3e2a715286b2ddb8ada1bd73767870f66770fc6c`
+**Baseline:** `2389550662cfe0de61d2b6c02837262b3a003036`  
+**Candidate:** `01c01a394ab5485f645df52ea005bfc49385549f`
 
 | Severity | Count |
 | --- | ---: |
@@ -11,149 +12,182 @@
 | Medium | 0 |
 | Low | 0 |
 
-**Overall risk:** Low after local verification
+**Overall risk:** Medium until the exact image completes CI, canary, and live
+acceptance; low at source level after local verification.
 
-**Recommendation:** Approve after the pinned Linux CI/deep-quality jobs,
-immutable-image checks, and live Pi gates pass.
+**Recommendation:** Approve for the guarded release pipeline. Do not merge or
+deploy if the pinned Linux fuzz, mutation, coverage, dependency, image, or
+canary gates fail.
 
-The change makes the Go/Rust prediction comparison materially harder to game
-and defers Tokio construction until after Clap handles `--help` and `--version`.
-It does not change mining algorithms, prediction policy, arithmetic, serialized
-types, public APIs, transport behavior, persistence, credentials, or network
-calls.
+Key metrics:
+
+- 23 changed files, 807 additions, and 285 deletions across two commits.
+- Every changed production behavior has focused regression coverage.
+- One high-risk transport change has one production caller and removes an
+  existing credential-exposure path.
+- No validation, authentication, mutation-safety, or privacy regression found.
 
 ## What changed
 
-The implementation has seven changed paths: one production entry point, one
-unit-test module, two benchmark harnesses, one comparison script, one workflow,
-and one performance document. This review document is updated in place rather
-than adding another report.
+| Area | Risk | Blast radius | Result |
+| --- | --- | --- | --- |
+| IRC connection | High | One production caller | Plaintext port 6667 is replaced by Rustls/WebPKI hostname and certificate verification on port 6697. |
+| Watch accounting | Medium | One selection path and the runtime actor | Stable channel IDs reset progress only when a selected slot is released. |
+| Streak selection | Medium | One selection path | One jump per broadcast and rotation window preserves campaign priority and eventual fair rotation. |
+| Stream metadata | Medium | Startup and minute refresh writers | Exact game ID and tags are retained so the minute payload reuses the refreshed snapshot. |
+| Drop claiming | Medium | Startup and periodic claim passes | Individual failures no longer prevent later claims; the task still returns one classified failure. |
+| Prediction ties | Medium | Five strategies and the Smart fallback | Equal scores retain the first outcome, matching the Go and Python parents. |
+| Client cleanup | Low | No callers | Six unreachable raw/alias methods are removed from non-published path-only crates. |
+| Documentation | Low | Operators and maintainers | Protocol, parity, security, and release notes now match implementation. |
 
-| Area | Risk | Result |
-| --- | --- | --- |
-| Process startup | Medium | Clap parses before runtime creation; commands that continue construct the same enabled multi-thread Tokio runtime. |
-| Benchmark harnesses | Low | Both implementations consume a complete decision, vary balances, and expose matching output and semantic checksums. |
-| Comparison script | Low | Separate checked builds prevent a stale miner binary; schema and output parity are enforced. |
-| CI | Low | The existing pinned Rust action and toolchain now run a bounded comparison in the Go baseline job. |
-| Documentation | Low | Methodology, work differences, measurements, and rejected optimizations are explicit. |
+The commit sequence is:
 
-No dependency, manifest, lockfile, unsafe block, external endpoint, secret
-source, or deployment configuration changes.
+1. `e3e4378` — watch accounting, bounded streak promotion, snapshot reuse,
+   Drop-batch continuation, prediction parity, and dead client cleanup.
+2. `01c01a3` — certificate-verified IRC TLS and shared release documentation.
 
-## Production-path analysis
+## High-risk transport analysis
 
-### CLI and Tokio lifecycle
+### IRC credential path
 
-The baseline `#[tokio::main]` macro created a multi-thread runtime before
-entering `main`. The replacement parses `Cli` first, then calls a private
-`build_runtime()` only when Clap has not already completed or rejected the
-command.
+`tm-app::chat` is the only production caller of
+`tm_irc::ChatClient::connect_and_run`. The baseline opened a plain TCP stream to
+port 6667 and then passed it to `run_stream`, which writes `PASS oauth:...`.
+History traces that behavior to the initial parity implementation rather than
+to a prior security requirement.
 
-The builder uses `new_multi_thread().enable_all()` and blocks on the unchanged
-`run_cli(cli)` future. Therefore mining startup, immediate operator commands,
-task supervision, signal handling, and graceful shutdown retain the same
-runtime flavor and drivers. A focused unit test asserts
-`RuntimeFlavor::MultiThread`; the full application suite exercises the
-unchanged command and runtime behavior.
+The candidate still opens TCP first, but it must complete a
+`TlsConnector::connect` using the owned Twitch server name and the WebPKI root
+store before `run_stream` can write registration data. Certificate or hostname
+failure returns an I/O error to the existing supervised reconnect loop. There
+is no custom verifier, plaintext retry, certificate bypass, or alternate token
+write path.
 
-**Adversarial check:** Malformed arguments still fail inside Clap before
-application state is loaded. Deferring the runtime does not add a fallback,
-second executor, alternate configuration path, or way to bypass validation.
+**Attacker model:** an on-path network attacker can delay, reset, redirect, or
+modify traffic, but does not control a WebPKI-trusted certificate for
+`irc.chat.twitch.tv`.
 
-**Blast radius:** `main` is the sole production caller. `build_runtime` is
-crate-private and has one test caller.
+**Adversarial result:** redirection to a server without a valid Twitch
+certificate fails before OAuth registration. A forged certificate also fails.
+Reset and timeout behavior remains a recoverable connection failure. A
+compromised public root remains an external PKI trust limitation shared with
+the miner's other verified HTTPS and WebSocket transports.
 
-### Comparison integrity
+The implementation compiled under strict no-panic/no-unwrap Clippy and
+completed a credential-free certificate-verified TLS 1.2 handshake to Twitch
+port 6697 with verification code zero. Live authenticated IRC remains part of
+the guarded operational observation rather than a unit test.
 
-The previous harness checksum covered only `amount` and used a constant
-balance. The new schema cycles eight balances and validates the complete final
-decision plus two checksums:
+## State and algorithm analysis
 
-- an operation checksum consumes choice, outcome-ID length, and amount on every
-  iteration;
-- a stable FNV checksum consumes every choice, amount, and outcome-ID byte in a
-  separate deterministic verification pass, keeping validation overhead out of
-  the timed production decision;
-- the report compares choice, outcome ID, amount, schema, workload, run count,
-  and iteration count before it can pass.
+### Slot-release accounting
 
-Rust passes the complete decision to `black_box`; Go passes it to
-`runtime.KeepAlive`. The comparison also discloses the remaining production
-differences: Rust's size-oriented profile, exact `i128` percentage arithmetic,
-and owned string output versus Go's default speed optimizer, `float64`
-truncation, and shallow string-header copy.
+The minute watcher compares the previous and current selected channel-ID sets
+after metadata refresh and selection. Each released ID is sent through the
+existing bounded single-writer actor before the next watch pass. Renames cannot
+reset the wrong channel because identity is keyed by stable channel ID. A
+temporary snapshot failure does not fabricate a selection transition.
 
-The script now builds `tm-app` and the Rust example separately. This closes a
-measurement-integrity bug where a combined Cargo invocation containing
-`--example` could leave an older `tm-app` executable in place.
+The actor clears only `minute_watched` and `last_minute_update`; other stream,
+campaign, streak, points, and prediction state is unchanged. Tests exercise the
+set difference and prove that resetting one channel leaves another channel's
+watch progress intact.
 
-**Adversarial check:** A harness cannot pass with a different decision,
-constant-only fixture, stale miner executable, mismatched run shape, or
-amount-only checksum. Equal-length intermediate outcome IDs cannot converge to
-a passing final decision because every decision contributes its bytes to the
-semantic checksum. The script uses only sanitized fixtures and removes its
-temporary Go source copy in `finally`.
+### Bounded streak promotion
 
-## Historical context
+The queue remains the authority for fair rotation. A streak candidate outside
+the active rotating slots can move to the front at most once for its broadcast,
+and global promotion is limited to once per 15-minute rotation window.
+Campaign pinning is computed first and retains its reserved slot. Tests prove
+immediate bounded promotion, suppression of repeated jumps, later promotion of
+another candidate, and eventual service of ordinary channels.
 
-Git history traces the application runtime entry point to `f8fc4cf`. The
-change preserves that commit's async `run_cli` body and only replaces macro
-construction with the equivalent explicit builder. No validation,
-authorization, credential, privacy, retry, or mutation-safety line is removed.
+The 30-minute restart condition uses the last observed offline transition.
+Twitch's current Watch Streak help documents at least a 30-minute break between
+streams; the implementation does not infer an end time across a process
+restart.
 
-The language comparison was introduced during the campaign/release work
-leading to `22b8314`. Its purpose was evidence, not a public contract. Schema 2
-tightens that evidence and retains the pinned Go baseline; it does not copy or
-expose the Go selector.
+### Snapshot reuse
 
-## Test and quality evidence
+Selection metadata refresh remains the single source of live broadcast ID,
+title, game name, game ID, viewers, tags, and creation time. The minute sender
+requires a non-empty refreshed broadcast ID and builds the same typed payload
+from that snapshot. Rename/offline recovery moved to the refresh boundary,
+where the authoritative request now occurs.
 
-Completed local evidence:
+The focused mock now observes five Twitch requests and explicitly rejects the
+previous extra `VideoPlayerStreamInfoOverlayChannel` operation. Before
+deployment, the current image recorded 48 watch-request/minute-watch failures
+over 72 hours; that measured baseline will be compared with the candidate
+without attributing unrelated failures or repeating the earlier projected
+three-times-volume claim.
 
-- format and `gofmt` checks;
-- strict workspace/all-target/all-feature Clippy with warnings denied;
-- warning-free workspace rustdoc;
-- full locked workspace/all-target/all-feature tests;
-- documentation, architecture, and release-hygiene gates;
-- exact CI-pinned Go revision comparison with matching schema, checksums, and
-  decision output;
-- equivalent-output alternating 100-pair startup A/B measurement.
+### Mutations and prediction parity
 
-The startup experiment used the same executable filename and full revision
-metadata. Normalized `--version` and exact `--help` output matched. Median
-startup improved from 7.980 ms to 7.326 ms and p95 from 9.225 ms to 8.573 ms;
-the candidate was 1,536 bytes smaller.
+Drop claims remain single-attempt mutations. A failed claim is collected and
+later claimable drops are attempted once; successful claims alone update health
+claim counters and notifications. The caller still receives one
+`inventory-or-claim` failure after the batch.
 
-Windows cargo-fuzz compilation cannot supply the required sanitizer coverage
-runtime (`STATUS_DLL_NOT_FOUND`, then unresolved `sancov` symbols without the
-sanitizer). Existing arbitrary-byte parser tests pass locally. The pinned Linux
-deep-quality job remains the authoritative fuzz execution and is a blocking
-release gate, not an inferred pass.
+Prediction selection updates the stored maximum only on a strictly greater
+score/key, so equality retains index zero. Unit coverage spans all affected
+strategies, while the shared JSON vector is executed by both Rust and the
+pinned Go baseline.
+
+## Test coverage and quality evidence
+
+Completed on the clean candidate revision:
+
+- format, strict all-target/all-feature Clippy, and production
+  no-panic/no-unwrap Clippy;
+- all locked workspace tests and warning-free rustdoc;
+- architecture, documentation, release-hygiene, and pinned Go parity gates;
+- RustSec audit with no vulnerability finding and duplicate-dependency review;
+- deterministic byte-identical release builds;
+- clean same-host Go/Rust comparison with identical decisions, operation
+  checksum, and all-decision semantic checksum;
+- sanitized mixed-runtime replay;
+- credential-free verified TLS handshake to the production IRC endpoint.
+
+Windows built both fuzz targets but could not execute the sanitizer runtime
+(`STATUS_DLL_NOT_FOUND`). The exact pinned Linux ASan fuzz jobs, branch
+coverage, and mutation shards are therefore blocking PR gates, not inferred
+passes.
+
+## Historical and regression analysis
+
+Git history does not show a removed security check being reintroduced. Port
+6667 dates to the original parity implementation. Snapshot refresh and watch
+rotation were introduced as mining features and retain their existing
+fail-closed metadata and fair-queue boundaries. Removed Twitch client methods
+have no callers in production or tests, and every crate is non-published with
+path-only workspace dependencies.
+
+No new public configuration option, schema version, persisted secret,
+telemetry, unsafe block, authentication fallback, automatic replay of uncertain
+mutations, or dependency direction is introduced.
 
 ## Remaining release gates
 
-- Pass the committed Linux CI dependency, license, secret, coverage, docs,
-  architecture, and Go/Rust comparison jobs.
-- Pass the manually dispatched pinned deep-quality branch-coverage, replay,
-  sanitizer-fuzz, and mutation jobs on the accepted revision.
-- Verify reproducible builds and the offline source bundle from the commit.
-- Build and attest the exact multi-architecture image, then verify its embedded
-  revision, SBOM, provenance, smoke behavior, and size.
-- Canary and deploy the immutable ARM64 digest to the Pi without building
-  there, establish a fresh post-SIGTERM clock, and pass the 24-hour and 72-hour
-  acceptance audits.
-- Remove rebuildable artifacts and obsolete release state only after the
-  72-hour gate while retaining protected rollback evidence.
+- Pass exact-head CI and manually dispatched Deep Quality on Linux.
+- Resolve every review thread and merge only the accepted head.
+- Verify the exact post-merge three-platform manifest, embedded revision,
+  smoke tests, SBOM, and provenance.
+- Run the exclusive Pi canary and guarded immutable deployment with preserved
+  rollback material.
+- Establish a fresh post-SIGTERM strict-health baseline and complete the
+  non-backdated 72-hour acceptance window.
+- Compare candidate watch-request warnings and point/campaign behavior against
+  the measured old-image baseline.
 
 ## Methodology and confidence
 
-This was a focused security differential review of every changed path against
-`3e2a715`. Production changes received line-by-line before/after analysis,
-history inspection, caller counting, invariant checks, adversarial scenarios,
-and test review. Benchmark and workflow changes received output-integrity and
-supply-chain review. Dependencies were not re-audited because manifests and
-lockfiles are unchanged.
+This was a deep review because the scope was under 20 production/test modules
+plus documentation. Every changed production hunk and its baseline was read;
+callers, state flows, removed methods, history, invariants, trust boundaries,
+tests, and adversarial transport scenarios were traced. All high-risk code and
+one-hop dependencies were reviewed.
 
-Confidence is high for the source diff and local behavior. Deployment
-confidence remains conditional until the exact committed image passes CI,
-deep-quality, immutable-image, canary, and fresh live-soak gates.
+Confidence is high for source behavior and local deterministic evidence.
+Deployment confidence remains conditional on the exact Linux and live-image
+gates above.

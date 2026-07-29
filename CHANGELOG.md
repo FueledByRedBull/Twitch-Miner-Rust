@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Resets credited watch progress through the runtime actor when a channel loses
+  a watch slot, and gives a newly eligible streak channel at most one bounded
+  promotion per broadcast and 15-minute rotation window. Fair rotation and
+  Drop-campaign pinning remain intact.
+- Enforces Twitch's documented 30-minute break before prioritizing a restarted
+  stream for streak recovery, and reuses the refreshed stream snapshot for
+  minute-watch payloads instead of issuing a second stream-info request on
+  every watch tick.
+- Makes prediction ties select the first outcome, matching the Go and Python
+  parents, and continues a Drop claim batch after an individual mutation
+  fails while retaining one aggregate task failure.
+- Encrypts IRC authentication and chat traffic with certificate-verified TLS
+  on port 6697. There is no plaintext or certificate-bypass fallback.
+- Removes unused raw Twitch client facades and the empty updater directory,
+  and corrects the persisted-operation and parity documentation.
 - Decomposes EventSub connection handling, deterministic subscription planning,
   and protocol normalization; separates Twitch typed-response validation from
   HTTP execution and config setting composition from persistence/migration.
