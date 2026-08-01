@@ -22,6 +22,10 @@ const MAX_COMPLETED_PREDICTIONS: usize = 256;
 
 const MAX_PROCESSED_MUTATION_IDS: usize = 128;
 const STREAK_RESTART_CARRYOVER_SECONDS: i64 = 30 * 60;
+// At two selected channels, each pass can spend 90 seconds inside the bounded
+// request plus 10 seconds on its scheduler interval. Two complete passes allow
+// one failed tick before a later success stops proving continuous watch time.
+const MAX_CONFIRMED_WATCH_INTERVAL_SECONDS: i64 = 400;
 
 impl RuntimeSession {
     #[must_use]
@@ -602,7 +606,7 @@ impl RuntimeState {
         let Some(stream) = streamer.stream.as_mut() else {
             return;
         };
-        stream.update_minute_watched(now);
+        stream.update_minute_watched(now, MAX_CONFIRMED_WATCH_INTERVAL_SECONDS);
     }
 
     pub fn reset_watch_progress(&mut self, channel_id: &str) -> bool {

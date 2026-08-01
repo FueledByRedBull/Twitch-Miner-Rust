@@ -1,3 +1,5 @@
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -353,7 +355,8 @@ pub(crate) async fn evaluate_prediction(
         "{}",
         context.observability.prediction_start_message(&event)
     );
-    let decision = event.decide(streamer.channel_points);
+    let stealth_offset = prediction_stealth_offset(event_id);
+    let decision = event.decide_with_stealth_offset(streamer.channel_points, stealth_offset);
     if decision.outcome_id.is_empty() {
         skip_prediction(
             &context.runtime,
@@ -401,6 +404,20 @@ pub(crate) async fn evaluate_prediction(
     }
 
     place_prediction(context, event_id, &event, &decision, &streamer).await
+}
+
+fn prediction_stealth_offset(event_id: &str) -> u8 {
+    stealth_offset_from_entropy(RandomState::new().hash_one(event_id))
+}
+
+pub(crate) const fn stealth_offset_from_entropy(entropy: u64) -> u8 {
+    match entropy % 5 {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        _ => 5,
+    }
 }
 
 pub(crate) async fn maybe_skip_prediction_for_status(

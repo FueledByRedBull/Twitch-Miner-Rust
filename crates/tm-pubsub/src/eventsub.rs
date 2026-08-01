@@ -105,6 +105,8 @@ pub enum EventSubError {
     NoSubscriptions,
     #[error("eventsub operation timed out: {0}")]
     Timeout(&'static str),
+    #[error("eventsub keepalive timeout")]
+    KeepaliveTimeout,
     #[error("eventsub reconnect requested")]
     ReconnectRequested { reconnect_url: String },
 }
@@ -616,6 +618,7 @@ fn subscription_failure_class(error: &EventSubError) -> &'static str {
             "protocol"
         }
         EventSubError::WebSocket(_)
+        | EventSubError::KeepaliveTimeout
         | EventSubError::Revoked { .. }
         | EventSubError::NoSubscriptions
         | EventSubError::ReconnectRequested { .. } => "transport",
@@ -713,7 +716,7 @@ where
             socket.next(),
         )
         .await
-        .map_err(|_| EventSubError::Protocol("eventsub keepalive timeout"))?
+        .map_err(|_| EventSubError::KeepaliveTimeout)?
         else {
             return Ok(());
         };

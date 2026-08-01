@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Logs the sanitized concrete `EventSub` failure beside its stable error class
+  and classifies a missed keepalive deadline as `keepalive-timeout` instead of
+  conflating normal liveness recovery with a rejected protocol payload.
+- Reports a partially failed context-refresh cycle to task health only after
+  all bounded child refreshes finish. Successful sibling updates remain
+  applied, and the successful-refresh counter advances only for an entirely
+  successful cycle.
+- Uses a ten-minute live streak-priority budget derived from the current
+  production sample's seven-minute p90 plus a bounded three-minute margin.
+  The documented 30-minute inter-broadcast rule, one promotion per broadcast,
+  campaign pinning, slot release, and fair-rotation ceiling remain unchanged.
+- Restores prediction stealth amount variation as one application-selected
+  integer offset in `1..=5`. The pure decision path accepts the offset as an
+  input so tests remain deterministic, and minimum, balance, maximum, and
+  top-predictor bounds remain enforced. This is amount variation, not an
+  anti-detection guarantee.
+- Selects the lowest-bandwidth explicitly playable HLS video variant and a
+  valid media segment from playlist structure instead of taking the final URI.
+  Relative URL resolution and public-HTTPS endpoint validation remain
+  mandatory.
+- Keeps playback priming uncached after measuring the roughly 20-second
+  selected-channel cadence and pinning the four-request preflight contract.
+  No credited WATCH/WATCH_STREAK A/B evidence currently proves that reuse is
+  safe.
+- Decodes the primary `spade_url` as a JSON string while accepting harmless
+  whitespace and escaping. Missing or malformed primary shapes fail clearly;
+  no alternate extraction chain is added.
+- Stops stale, zero, or backward wall-clock gaps from changing confirmed watch
+  progress. The accepted interval is bounded by two worst-case two-slot
+  scheduler passes; longer gaps move the anchor without crediting or erasing
+  points already confirmed.
+- Documents that Python pickle cookie jars are never inspected or converted.
+  Operators migrate safely through Rust device login and preserve the old
+  secret file as a private backup outside the active data mount.
 - Holds the spade endpoint to the same origin rules as playback. The URL is
   extracted from an unconstrained field inside Twitch's settings script and the
   minute-watched payload carries account identifiers, so it must now parse as a

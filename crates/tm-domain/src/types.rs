@@ -281,10 +281,14 @@ impl Stream {
         }
     }
 
-    pub fn update_minute_watched(&mut self, now: OffsetDateTime) {
+    pub fn update_minute_watched(&mut self, now: OffsetDateTime, maximum_continuous_seconds: i64) {
         if let Some(last_minute_update) = self.last_minute_update {
             let elapsed = now - last_minute_update;
-            self.minute_watched += elapsed.as_seconds_f64() / 60.0;
+            if elapsed > time::Duration::ZERO
+                && elapsed <= time::Duration::seconds(maximum_continuous_seconds)
+            {
+                self.minute_watched += elapsed.as_seconds_f64() / 60.0;
+            }
         }
         self.last_minute_update = Some(now);
     }
@@ -592,18 +596,43 @@ mod tests {
     }
 
     #[test]
-    fn stream_watch_progress_and_game_name() {
+    fn stream_watch_progress_counts_only_bounded_positive_intervals() {
         let now = datetime!(2026-03-27 06:00 UTC);
         let mut stream = Stream {
-            last_minute_update: Some(now - time::Duration::minutes(2)),
+            minute_watched: 3.0,
+            last_minute_update: Some(now - time::Duration::seconds(20)),
             ..Stream::default()
         };
-        stream.update_minute_watched(now);
-        assert!(stream.minute_watched > 1.9 && stream.minute_watched < 2.1);
+        let maximum_interval_seconds = 40;
+
+        stream.update_minute_watched(now, maximum_interval_seconds);
+        assert_f64_eq(stream.minute_watched, 10.0 / 3.0);
+
+        stream.update_minute_watched(now + time::Duration::seconds(40), maximum_interval_seconds);
+        assert_f64_eq(stream.minute_watched, 4.0);
+
+        stream.update_minute_watched(now + time::Duration::minutes(5), maximum_interval_seconds);
+        assert_f64_eq(stream.minute_watched, 4.0);
+        assert_eq!(
+            stream.last_minute_update,
+            Some(now + time::Duration::minutes(5))
+        );
+
+        stream.update_minute_watched(now + time::Duration::minutes(4), maximum_interval_seconds);
+        assert_f64_eq(stream.minute_watched, 4.0);
+        assert_eq!(
+            stream.last_minute_update,
+            Some(now + time::Duration::minutes(4))
+        );
+
         stream.reset_watch_progress();
         assert_f64_eq(stream.minute_watched, 0.0);
         assert!(stream.last_minute_update.is_none());
+    }
 
+    #[test]
+    fn stream_game_name_prefers_display_name() {
+        let mut stream = Stream::default();
         assert_eq!(stream.game_name(), "");
         stream.game = Some(Game {
             display_name: Some(String::from("My Game")),

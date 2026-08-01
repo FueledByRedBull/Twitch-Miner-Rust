@@ -107,6 +107,21 @@ one refresh interval before the event transports or the next refresh clear it.
 Refresh failures are reported as one `metadata-refresh` task failure per cycle.
 No response payload, token, or cookie is logged.
 
+Playback priming deliberately remains uncached. The scheduler gives one
+selected channel a 20-second interval; with the normal two slots it serializes
+the sends 10 seconds apart, so each channel is revisited about every 20 seconds.
+Every successful tick therefore performs one `PlaybackAccessToken` GQL request,
+one master-playlist GET, one selected media-playlist GET, and one media-segment
+HEAD before the spade POST. A regression test calls the primer twice and proves
+that all four requests are repeated for each call. Production failure counts
+are recorded with each release's acceptance evidence. Successful per-stage
+requests are not logged, so their volume comes from the deterministic scheduler
+and request path rather than invented telemetry. No credited WATCH/WATCH_STREAK
+A/B or canary evidence currently proves that reusing a playback session
+preserves credit. Adding a broadcast-bound cache on request volume alone would
+therefore weaken a working private protocol contract without evidence, and is
+rejected.
+
 The preferred EventSub WebSocket path handles stream presence and observes
 raids. Broadcaster prediction subscriptions are requested only when a tracked
 channel ID exactly matches the authenticated user ID and the validated token

@@ -19,8 +19,9 @@ static SETTINGS_SCRIPT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("settings script regex must compile")
 });
 #[allow(clippy::expect_used)]
-static SPADE_URL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""spade_url":"(.*?)""#).expect("spade url regex must compile"));
+static SPADE_URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""spade_url"\s*:\s*("(?:\\.|[^"\\])*")"#).expect("spade url regex must compile")
+});
 
 pub fn extract_build_id(html: &str) -> Result<String, TwitchContractError> {
     BUILD_ID_REGEX
@@ -39,9 +40,10 @@ pub fn extract_settings_script_url(html: &str) -> Result<String, TwitchContractE
 }
 
 pub fn extract_spade_url(settings_js: &str) -> Result<String, TwitchContractError> {
-    SPADE_URL_REGEX
+    let encoded = SPADE_URL_REGEX
         .captures(settings_js)
         .and_then(|captures| captures.get(1))
-        .map(|value| value.as_str().to_string())
-        .ok_or(TwitchContractError::SpadeUrlNotFound)
+        .map(|value| value.as_str())
+        .ok_or(TwitchContractError::SpadeUrlNotFound)?;
+    serde_json::from_str(encoded).map_err(|_| TwitchContractError::InvalidSpadeUrlString)
 }

@@ -25,9 +25,18 @@ normal Rust startup performs a versioned config migration only when necessary:
 
 `auto_update=true` is rejected and must be removed manually. A newer schema
 version is also rejected rather than overwritten. Cookie files are decoded from
-the current and legacy formats; changed cookie files are atomically replaced
-and retain a `.bak` copy of their previous content. The application never
-copies data out of the configured directory.
+the current JSON map and legacy JSON record-list shapes only; changed cookie
+files are atomically replaced and retain a `.bak` copy of their previous
+content. The application never copies data out of the configured directory.
+
+Python cookie jars are outside that migration boundary. They are commonly
+Python pickle files, and loading a pickle can execute code. The Rust miner does
+not inspect or deserialize them and does not include a pickle runtime or parser.
+When moving from the Python miner, preserve its cookie file unchanged as a
+private backup outside the active Rust data mount, then complete Rust's device
+login so it creates `data/cookies/<username>.json`. Do not auto-convert, rename,
+or delete the old secret file. Keep both the old backup and the new JSON session
+private; never upload or commit either one.
 
 If a migration fails, stop the Rust container, restore the `config.json.bak`
 or cookie `.bak` file in the mounted data directory, and restart the previous

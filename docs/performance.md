@@ -158,6 +158,17 @@ million decisions/s. That small change does not explain or close the Go gap and
 does not justify inflating the shipped binary. These development experiments
 are design evidence, not clean release baselines.
 
+The 2026-08-01 protocol-hardening branch was also compared with its exact
+`3a9c30c` parent in separate same-host worktrees under the same Rust and Go
+toolchains. The parent measured 12.50 million Rust and 46.41 million Go
+decisions/s; the candidate measured 14.03 million Rust and 52.80 million Go
+decisions/s. Because both languages moved with host conditions, the normalized
+Rust/Go ratio changed by only -1.39%, which is noise-scale rather than a
+prediction-path regression. Candidate median startup improved from 8.932 ms to
+8.515 ms and the stripped binary grew by 6,144 bytes. Both trees produced the
+same complete semantic checksum. The candidate report was intentionally dirty
+development evidence; clean revision evidence is still required after commit.
+
 Prediction decisions occur once per event, so either implementation remains
 millions of times beyond runtime demand. A 40-50 million decisions/s headline
 is not a product requirement and must not drive ownership, API, arithmetic, or

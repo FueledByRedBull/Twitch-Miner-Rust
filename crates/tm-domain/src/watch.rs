@@ -10,7 +10,10 @@ use time::OffsetDateTime;
 
 use crate::types::{IrcMode, Stream, Streamer};
 
-const STREAK_PRIORITY_MINUTES: f64 = 15.0;
+// A sanitized current-production sample put the first WATCH_STREAK signal at
+// or below seven minutes for 90% of observed broadcasts. Three more minutes
+// bound detection/queue delay without tying eligibility to miner uptime.
+const STREAK_PRIORITY_MINUTES: f64 = 10.0;
 const STREAK_RESTART_COOLDOWN_MINUTES: i64 = 30;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WatchPriority {
@@ -456,18 +459,20 @@ mod tests {
     #[test]
     fn watch_interval_matches_go() {
         assert_eq!(watch_interval(0), Duration::from_secs(20));
+        assert_eq!(watch_interval(1), Duration::from_secs(20));
         assert_eq!(watch_interval(2), Duration::from_secs(10));
+        assert_eq!(watch_interval(2) * 2, Duration::from_secs(20));
         assert_eq!(watch_interval(10), Duration::from_secs(5));
         assert_eq!(watch_interval(17), Duration::from_secs(5));
     }
 
     #[test]
-    fn streak_priority_limit_is_fifteen_minutes() {
-        assert_f64_eq(streak_priority_limit(), 15.0);
+    fn streak_priority_limit_uses_observed_p90_plus_bounded_margin() {
+        assert_f64_eq(streak_priority_limit(), 10.0);
     }
 
     #[test]
-    fn should_prioritize_streak_enforces_platform_restart_cooldown() {
+    fn streak_priority_contract_covers_new_broadcast_deadline_and_restart_cooldown() {
         let now = datetime!(2026-03-27 06:00 UTC);
         let mut streamer = Streamer {
             settings: StreamerSettings {
@@ -481,6 +486,11 @@ mod tests {
             }),
             ..Streamer::default()
         };
+        assert!(should_prioritize_streak(&streamer, now));
+
+        streamer.stream.as_mut().unwrap().minute_watched = 10.0;
+        assert!(!should_prioritize_streak(&streamer, now));
+        streamer.stream.as_mut().unwrap().minute_watched = 0.0;
         assert!(should_prioritize_streak(&streamer, now));
 
         streamer.last_stream_ended_at = Some(now - time::Duration::minutes(10));
