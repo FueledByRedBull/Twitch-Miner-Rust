@@ -38,7 +38,9 @@ If you want to watch logs in the foreground, run the command directly in the ter
   streak milestone before it reports recovery. The private
   `data/streak-cache.json` stores only bounded channel/streak metadata.
 - `LONGEST_STREAK` and `EXPIRING_STREAK` may be used in `watch_priority`; both
-  stay inside the existing 15-minute live-streak budget.
+  stay inside the evidence-based ten-minute live-streak budget. The budget is
+  internal policy, not an operator setting; campaign pinning and the 15-minute
+  all-channel fair-rotation window are separate rules.
 - Start the app and open the Twitch activation URL shown in the console.
 - Enter the device code and wait for cookie persistence under `data/cookies/<username>.json`.
 - A saved session starts reauthorization only after a definitive authentication

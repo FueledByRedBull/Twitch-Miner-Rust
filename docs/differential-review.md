@@ -1,6 +1,148 @@
 # Differential Review
 
-## Executive summary
+## Current review: protocol and accounting hardening
+
+**Baseline:** `3a9c30c4f980a8baeff779404cae6f045afa6898`
+
+**Candidate:** `next-release-protocol-hardening` working tree, 2026-08-01
+
+| Severity | Open | Resolved during review |
+| --- | ---: | ---: |
+| Critical | 0 | 0 |
+| High | 0 | 0 |
+| Medium | 0 | 0 |
+| Low | 0 | 1 |
+
+**Overall source risk:** Low after review and local verification.
+
+**Recommendation:** Conditional approval for PR/CI and the guarded image
+pipeline. Do not merge or deploy until the exact clean commit passes pinned
+dependency policy, coverage, mutation, Linux fuzzing, multiarchitecture image
+smoke, canary, and review checks.
+
+The reviewed implementation set contains 24 files and approximately 1,004
+additions and 101 deletions, excluding this report. All changed production
+functions have direct regression coverage. No authentication, endpoint-origin,
+single-writer, mutation-uniqueness, campaign, or cookie-trust boundary was
+weakened.
+
+### Change and risk summary
+
+| Area | Risk | Production blast radius | Review result |
+| --- | --- | --- | --- |
+| EventSub errors | Medium | One supervised connection loop | Concrete sanitized causes are retained; keepalive silence is no longer classified as rejected protocol input. |
+| Context refresh | Medium | Context and pending-claim loops | All children drain; successful siblings apply; partial failure reaches task health. |
+| Streak policy | Medium | One watch-selection predicate | Ten-minute budget is p90 plus bounded margin; restart, campaign, promotion, and rotation invariants remain. |
+| Prediction stealth | High | One prediction decision boundary | One injected `1..=5` offset; balance, maximum, effective minimum, and top-predictor bounds hold. |
+| HLS and Spade | High | One minute-watch preflight path | Semantic parsing retains final public-HTTPS/loopback validation; no fallback chain or cache was added. |
+| Watch progress | Medium | One runtime-actor event reducer | Only bounded positive intervals add progress; stale/backward gaps re-anchor without credit or deletion. |
+| Cookie migration | High | Operator trust boundary only | Documentation requires device login and explicitly forbids pickle inspection or conversion. |
+
+### High-risk analysis
+
+#### Twitch-supplied playback and telemetry URLs
+
+**Attacker model:** a compromised or malformed Twitch document controls HLS
+playlist lines or the `spade_url` JSON string, but does not control the miner's
+compiled endpoints or local configuration.
+
+The baseline selected the final non-comment playlist URI. The candidate parses
+`EXT-X-STREAM-INF`, requires a positive bandwidth and an explicit video signal,
+chooses the lowest-bandwidth playable variant, then requires an `EXTINF` media
+segment. Relative URLs are resolved against their containing playlist.
+
+The trust boundary remains after resolution: every selected playlist, segment,
+and Spade URL must pass `validate_remote_endpoint`, which accepts public HTTPS
+and test-only loopback HTTP. A document cannot use relative resolution,
+whitespace, JSON escaping, audio-only renditions, or playlist reordering to
+bypass the origin check. Rust's regex engine is linear-time, and JSON decoding
+validates escape sequences before the endpoint is used.
+
+**Adversarial result:** no new SSRF or credential-disclosure path was found.
+Malformed primary shapes fail closed. Playback priming stays uncached because
+request volume alone does not prove that reuse preserves credited rewards.
+
+#### Prediction amount transfer
+
+**Attacker model:** Twitch supplies outcome totals/top-predictor points while an
+operator enables stealth mode and configures percentage/maximum limits.
+
+The application chooses one randomized integer offset and injects it into the
+pure decision function. The amount is still bounded by the non-negative
+balance and configured maximum. Stealth applies only when the calculated amount
+would meet or exceed the leading predictor, and it cannot lower a placeable bet
+below the effective ten-point minimum.
+
+Review found one pre-existing edge case where `balance < max_points < 10` could
+raise the normalized amount above balance. The candidate now clamps that branch
+to balance and has a regression test. No open value-transfer finding remains.
+
+### State and liveness analysis
+
+- EventSub logging computes the class once and includes the typed error display.
+  Reconnect URLs and credentials are not part of the displayed variants.
+- `KeepaliveTimeout` is a typed liveness error; protocol JSON, timestamp, and
+  modelled-payload rejection remain distinct.
+- Context refresh aggregates ordinary errors and panics only after every
+  bounded child finishes. One child's failure cannot cancel or roll back a
+  successful sibling update.
+- Confirmed watch progress accepts at most 400 seconds: two selected slots,
+  each with a 90-second request bound plus a 10-second interval, across two
+  passes. Longer, zero, and backward deltas update only the timestamp anchor.
+- The ten-minute streak budget comes from 28 sanitized observations over the
+  available approximately 43-hour session (median four minutes, p90 seven),
+  plus a three-minute margin. Detection time is not claimed as authoritative
+  broadcast start.
+
+### Test and tool evidence
+
+Passed locally on the candidate working tree:
+
+- formatting and diff hygiene;
+- locked workspace tests for all targets and features;
+- strict all-target/all-feature Clippy plus production no-panic shortcuts;
+- warning-free workspace rustdoc;
+- architecture, documentation, build-integrity, and release-hygiene scripts;
+- isolated fuzz-workspace compilation;
+- Go baseline tests and persisted-operation parity;
+- local RustSec audit with no reported advisory;
+- same-host semantic Rust/Go comparison with identical complete checksums.
+
+The same-host parent/candidate comparison found no decision-throughput
+regression after normalizing against Go: the Rust/Go ratio changed by -1.39%,
+candidate startup improved 4.67%, and the stripped binary grew 6,144 bytes.
+
+Local execution of the pinned fuzz binary stopped before fuzzing with Windows
+`STATUS_DLL_NOT_FOUND`; compilation succeeded. `cargo-llvm-cov`,
+`cargo-mutants`, and `cargo-deny` are not installed locally. Their pinned Linux
+CI jobs are therefore mandatory release evidence rather than silently skipped
+checks.
+
+### Historical context and regression assessment
+
+- The original fixed stealth decrement and Go-style 7/20-minute streak policy
+  entered in `f8fc4cf`; the unexplained flat 15-minute policy entered in
+  `be7ecd7`. Neither was a security fix being reverted.
+- Playback priming and final-URI selection entered in `c8d5d2b`; the complete
+  token/HLS/Spade sequence is retained, with only parsing made semantic.
+- Context child-warning behavior traces to module decomposition in `8341456`;
+  the new aggregation preserves its bounded sibling execution.
+- No removed validation originated in a security/CVE commit, and no previously
+  removed insecure fallback was reintroduced.
+
+### Remaining release gates
+
+1. Commit the reviewed tree and rerun clean-revision replay/performance/build
+   integrity evidence.
+2. Require every PR and deep-quality check, including dependency policy,
+   coverage, mutation, and Linux fuzzing.
+3. Publish and verify the exact multiarchitecture manifest through GitHub.
+4. Run the exclusive canary, guarded ARM64 digest deployment, initial live
+   health/points/campaign acceptance, artifact cleanup, and fresh soak.
+
+## Historical review: previous release
+
+### Executive summary
 
 **Baseline:** `2389550662cfe0de61d2b6c02837262b3a003036`  
 **Candidate:** `01c01a394ab5485f645df52ea005bfc49385549f`
