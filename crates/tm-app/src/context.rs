@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use tm_domain::Streamer;
 use tm_twitch::TwitchClient;
 
@@ -10,6 +10,43 @@ use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 use crate::{CONTEXT_REFRESH_CONCURRENCY, PENDING_CLAIMS_INTERVAL};
+
+type ContextRefreshJoinResult = std::result::Result<(String, Result<()>), tokio::task::JoinError>;
+
+#[derive(Debug, Default)]
+pub(crate) struct ContextRefreshSummary {
+    completed: usize,
+    failed: usize,
+}
+
+impl ContextRefreshSummary {
+    fn record(&mut self, result: ContextRefreshJoinResult) {
+        self.completed = self.completed.saturating_add(1);
+        match result {
+            Ok((username, Err(error))) => {
+                self.failed = self.failed.saturating_add(1);
+                tracing::warn!(streamer = %username, %error, "context refresh failed");
+            }
+            Err(error) => {
+                self.failed = self.failed.saturating_add(1);
+                tracing::warn!(%error, "context refresh task failed");
+            }
+            Ok((_, Ok(()))) => {}
+        }
+    }
+
+    pub(crate) fn into_result(self) -> Result<()> {
+        if self.failed == 0 {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "{} of {} streamer context refreshes failed",
+                self.failed,
+                self.completed
+            ))
+        }
+    }
+}
 
 pub(crate) fn apply_context_to_streamer(
     streamer: &mut Streamer,
@@ -81,20 +118,17 @@ pub(crate) fn spawn_context_refresh_loop(
                     }
                 }
                 _ = ticker.tick() => {
-                    if let Err(error) = refresh_snapshot_streamers(
+                    let refresh_result = refresh_snapshot_streamers(
                         &runtime,
                         &twitch,
                         &persistent_user_id,
                         &observability,
                         &health,
                     )
-                    .await
-                    {
-                        health.failure("context", "refresh");
+                    .await;
+                    record_context_refresh_health(&health, "context", &refresh_result);
+                    if let Err(error) = refresh_result {
                         tracing::warn!(task = "context", error_class = "refresh", %error, "context refresh snapshot failed");
-                    } else {
-                        health.success("context");
-                        health.record_refresh();
                     }
                 }
             }
@@ -126,20 +160,17 @@ pub(crate) fn spawn_pending_claim_loop(
                     }
                 }
                 _ = ticker.tick() => {
-                    if let Err(error) = refresh_snapshot_streamers(
+                    let refresh_result = refresh_snapshot_streamers(
                         &runtime,
                         &twitch,
                         &persistent_user_id,
                         &observability,
                         &health,
                     )
-                    .await
-                    {
-                        health.failure("pending-claims", "refresh");
+                    .await;
+                    record_context_refresh_health(&health, "pending-claims", &refresh_result);
+                    if let Err(error) = refresh_result {
                         tracing::warn!(task = "pending-claims", error_class = "refresh", %error, "pending bonus sweep failed");
-                    } else {
-                        health.success("pending-claims");
-                        health.record_refresh();
                     }
                 }
             }
@@ -156,10 +187,11 @@ pub(crate) async fn refresh_snapshot_streamers(
 ) -> Result<()> {
     let snapshot = runtime.state_snapshot().await?;
     let mut refreshes = tokio::task::JoinSet::new();
+    let mut summary = ContextRefreshSummary::default();
 
     for streamer in snapshot.streamers {
         while refreshes.len() >= CONTEXT_REFRESH_CONCURRENCY {
-            log_context_refresh_result(refreshes.join_next().await);
+            record_context_refresh_result(&mut summary, refreshes.join_next().await);
         }
         let runtime = runtime.clone();
         let twitch = Arc::clone(twitch);
@@ -186,24 +218,39 @@ pub(crate) async fn refresh_snapshot_streamers(
         });
     }
 
-    while !refreshes.is_empty() {
-        log_context_refresh_result(refreshes.join_next().await);
-    }
+    collect_context_refresh_results(&mut refreshes, &mut summary).await;
 
-    Ok(())
+    summary.into_result()
 }
 
-pub(crate) fn log_context_refresh_result(
-    result: Option<std::result::Result<(String, Result<()>), tokio::task::JoinError>>,
+pub(crate) fn record_context_refresh_health(
+    health: &HealthTracker,
+    task: &'static str,
+    refresh_result: &Result<()>,
 ) {
-    match result {
-        Some(Ok((username, Err(error)))) => {
-            tracing::warn!(streamer = %username, %error, "context refresh failed");
-        }
-        Some(Err(error)) => {
-            tracing::warn!(%error, "context refresh task failed");
-        }
-        _ => {}
+    if refresh_result.is_ok() {
+        health.success(task);
+        health.record_refresh();
+    } else {
+        health.failure(task, "refresh");
+    }
+}
+
+pub(crate) async fn collect_context_refresh_results(
+    refreshes: &mut tokio::task::JoinSet<(String, Result<()>)>,
+    summary: &mut ContextRefreshSummary,
+) {
+    while let Some(result) = refreshes.join_next().await {
+        summary.record(result);
+    }
+}
+
+fn record_context_refresh_result(
+    summary: &mut ContextRefreshSummary,
+    result: Option<ContextRefreshJoinResult>,
+) {
+    if let Some(result) = result {
+        summary.record(result);
     }
 }
 

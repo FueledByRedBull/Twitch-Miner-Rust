@@ -7,6 +7,9 @@ use time::OffsetDateTime;
 use crate::formatting::trim_trailing_zeros;
 use crate::types::{BetSettings, Condition, OutcomeKey, Strategy, Streamer};
 
+const MIN_STEALTH_OFFSET: u8 = 1;
+const MAX_STEALTH_OFFSET: u8 = 5;
+
 fn safe_duration_from_seconds(seconds: f64) -> std::time::Duration {
     if !seconds.is_finite() || seconds <= 0.0 {
         return std::time::Duration::ZERO;
@@ -110,6 +113,17 @@ impl PredictionEvent {
     }
 
     pub fn decide(&mut self, balance: i64) -> PredictionDecision {
+        self.decide_with_stealth_offset(balance, MIN_STEALTH_OFFSET)
+    }
+
+    /// Evaluates one prediction with an application-selected small amount
+    /// variation. This is not an anti-detection guarantee; keeping the offset
+    /// injected leaves strategy and arithmetic deterministic under test.
+    pub fn decide_with_stealth_offset(
+        &mut self,
+        balance: i64,
+        stealth_offset: u8,
+    ) -> PredictionDecision {
         let Some(choice) = select_outcome(&self.outcomes, &self.streamer.settings.bet) else {
             self.decision = PredictionDecision::default();
             return self.decision.clone();
@@ -124,19 +138,22 @@ impl PredictionEvent {
         }
         amount = amount.min(balance);
 
-        if settings.stealth_mode.unwrap_or(false) {
-            let top_points = self.outcomes[choice].top_points;
-            if top_points > 0 && amount >= top_points {
-                amount = (top_points - 1).max(1);
-            }
-        }
-
         if amount < 10 {
             amount = match settings.max_points {
-                Some(max_points) if max_points < 10 => i64::from(max_points),
+                Some(max_points) if max_points < 10 => i64::from(max_points).min(balance),
                 _ if balance >= 10 => 10,
                 _ => amount,
             };
+        }
+
+        if settings.stealth_mode.unwrap_or(false) {
+            let top_points = self.outcomes[choice].top_points;
+            if top_points > 1 && amount >= top_points {
+                let offset =
+                    i64::from(stealth_offset.clamp(MIN_STEALTH_OFFSET, MAX_STEALTH_OFFSET));
+                let effective_minimum = amount.min(10);
+                amount = top_points.saturating_sub(offset).max(effective_minimum);
+            }
         }
 
         let decision = PredictionDecision {
@@ -679,8 +696,8 @@ mod tests {
     }
 
     #[test]
-    fn decide_applies_stealth_mode_below_top_points() {
-        let mut event = PredictionEvent {
+    fn decide_applies_every_bounded_stealth_offset() {
+        let event = PredictionEvent {
             streamer: Streamer::default(),
             event_id: String::new(),
             title: String::new(),
@@ -713,13 +730,68 @@ mod tests {
             result_type: String::new(),
             result_string: String::new(),
         };
+        let mut event = event;
         event.streamer.settings.bet.strategy = Strategy::HighOdds;
         event.streamer.settings.bet.percentage = Some(5);
         event.streamer.settings.bet.stealth_mode = Some(true);
 
-        let decision = event.decide(2_000);
-        assert_eq!(decision.outcome_id, "b");
-        assert_eq!(decision.amount, 79);
+        for offset in MIN_STEALTH_OFFSET..=MAX_STEALTH_OFFSET {
+            let mut event = event.clone();
+            let decision = event.decide_with_stealth_offset(2_000, offset);
+            assert_eq!(decision.outcome_id, "b");
+            assert_eq!(decision.amount, 80 - i64::from(offset));
+        }
+    }
+
+    #[test]
+    fn stealth_variation_preserves_top_minimum_balance_and_maximum_bounds() {
+        let mut event = PredictionEvent {
+            streamer: Streamer::default(),
+            event_id: String::new(),
+            title: String::new(),
+            status: String::from("ACTIVE"),
+            created_at: datetime!(2026-03-27 06:00 UTC),
+            window_seconds: 10.0,
+            outcomes: vec![PredictionOutcome {
+                id: String::from("a"),
+                total_users: 10,
+                top_points: 1,
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        event.streamer.settings.bet.strategy = Strategy::MostVoted;
+        event.streamer.settings.bet.percentage = Some(100);
+        event.streamer.settings.bet.max_points = None;
+        event.streamer.settings.bet.stealth_mode = Some(true);
+
+        assert_eq!(event.decide_with_stealth_offset(100, 5).amount, 100);
+
+        event.outcomes[0].top_points = 10;
+        assert_eq!(event.decide_with_stealth_offset(100, 5).amount, 10);
+
+        event.outcomes[0].top_points = 80;
+        event.streamer.settings.bet.max_points = Some(70);
+        assert_eq!(event.decide_with_stealth_offset(100, 5).amount, 70);
+
+        event.streamer.settings.bet.max_points = None;
+        assert_eq!(event.decide_with_stealth_offset(50, 5).amount, 50);
+
+        event.outcomes[0].top_points = 12;
+        assert_eq!(event.decide_with_stealth_offset(100, 3).amount, 10);
+
+        event.outcomes[0].top_points = 80;
+        assert_eq!(event.decide_with_stealth_offset(5, 5).amount, 5);
+
+        event.streamer.settings.bet.max_points = Some(5);
+        assert_eq!(event.decide_with_stealth_offset(100, 5).amount, 5);
+
+        event.streamer.settings.bet.max_points = Some(8);
+        assert_eq!(event.decide_with_stealth_offset(5, 5).amount, 5);
     }
 
     #[test]

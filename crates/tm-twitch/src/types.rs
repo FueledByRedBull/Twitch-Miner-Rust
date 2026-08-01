@@ -13,8 +13,10 @@ pub enum TwitchContractError {
     BuildIdNotFound,
     #[error("settings script not found")]
     SettingsScriptNotFound,
-    #[error("spade url not found")]
+    #[error("primary spade_url JSON string not found in settings script")]
     SpadeUrlNotFound,
+    #[error("primary spade_url value is not a valid JSON string")]
+    InvalidSpadeUrlString,
 }
 
 #[derive(Debug, Error)]

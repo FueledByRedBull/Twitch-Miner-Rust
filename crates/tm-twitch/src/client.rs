@@ -9,6 +9,7 @@ use tm_domain::Stream;
 
 use crate::contracts::{extract_build_id, extract_settings_script_url, extract_spade_url};
 use crate::cookies::{claim_bonus_cookie_header, is_twitch_cookie_url, merge_cookie_headers};
+use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
 use crate::ids::{generate_client_session_id, generate_device_id, generate_transaction_id};
 use crate::parsers::minute_watched_request;
 use crate::responses::{
@@ -403,7 +404,7 @@ impl TwitchClient {
             .text()
             .await
             .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
-        let variant_url = last_playlist_url(&master_url, &master_body, "master playlist")?;
+        let variant_url = lowest_bandwidth_variant_url(&master_url, &master_body)?;
         validate_remote_endpoint(&variant_url, "master playlist")?;
 
         let variant = self
@@ -424,7 +425,7 @@ impl TwitchClient {
             .text()
             .await
             .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
-        let segment_url = last_playlist_url(&variant_url, &variant_body, "media playlist")?;
+        let segment_url = media_segment_url(&variant_url, &variant_body)?;
         validate_remote_endpoint(&segment_url, "media playlist")?;
 
         let segment = self
@@ -882,22 +883,6 @@ fn operation_is_read_only(operation_name: &str) -> bool {
         .iter()
         .find(|contract| contract.operation_name == operation_name)
         .is_some_and(|contract| contract.read_only)
-}
-
-pub(crate) fn last_playlist_url(
-    base_url: &reqwest::Url,
-    playlist: &str,
-    field: &'static str,
-) -> Result<reqwest::Url, TwitchClientError> {
-    let uri = playlist
-        .lines()
-        .map(str::trim)
-        .rev()
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .ok_or(TwitchClientError::MissingField(field))?;
-    base_url
-        .join(uri)
-        .map_err(|_| TwitchClientError::InvalidField(field))
 }
 
 /// Guards every request target that Twitch hands us inside a document rather

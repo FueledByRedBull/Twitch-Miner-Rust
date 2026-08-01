@@ -379,6 +379,10 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
         streamers: vec![Streamer {
             username: "tester".into(),
             channel_id: "123".into(),
+            settings: StreamerSettings {
+                watch_streak: true,
+                ..StreamerSettings::default()
+            },
             stream: Some(Stream {
                 broadcast_id: "old-broadcast".into(),
                 title: "Old".into(),
@@ -415,6 +419,7 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
     assert!(stream.last_minute_update.is_none());
     assert!(stream.watch_streak_missing);
     assert_eq!(stream.stream_up_at, Some(ts(120)));
+    assert!(should_prioritize_streak(&state.streamers[0], ts(120)));
 }
 
 #[test]
@@ -1320,6 +1325,7 @@ async fn releasing_watch_slot_resets_only_that_channels_progress() {
     let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(10));
     for (index, channel_id) in ["100", "200"].into_iter().enumerate() {
         state.streamers[index].channel_id = channel_id.to_owned();
+        state.streamers[index].settings.watch_streak = true;
         state.streamers[index].stream = Some(Stream {
             minute_watched: 12.0,
             last_minute_update: Some(ts(20)),
@@ -1337,6 +1343,63 @@ async fn releasing_watch_slot_resets_only_that_channels_progress() {
     assert!(released.last_minute_update.is_none());
     assert_f64_eq(retained.minute_watched, 12.0);
     assert_eq!(retained.last_minute_update, Some(ts(20)));
+    assert!(should_prioritize_streak(&snapshot.streamers[0], ts(30)));
+    assert!(!should_prioritize_streak(&snapshot.streamers[1], ts(30)));
+}
+
+#[test]
+fn confirmed_watch_progress_rejects_stale_and_nonpositive_intervals() {
+    let config = ConfigFile {
+        streamers: vec!["alpha".into()],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(10));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].stream = Some(Stream {
+        minute_watched: 2.0,
+        last_minute_update: Some(ts(100)),
+        ..Stream::default()
+    });
+
+    state.mark_minute_watched("100", ts(120));
+    assert_f64_eq(
+        state.streamers[0].stream.as_ref().unwrap().minute_watched,
+        2.0 + 20.0 / 60.0,
+    );
+
+    // One failed nominal tick still proves a short continuous interval.
+    state.mark_minute_watched("100", ts(160));
+    assert_f64_eq(
+        state.streamers[0].stream.as_ref().unwrap().minute_watched,
+        3.0,
+    );
+
+    // The scheduler/request envelope allows at most 400 seconds.
+    state.mark_minute_watched("100", ts(560));
+    let confirmed = 3.0 + 400.0 / 60.0;
+    assert_f64_eq(
+        state.streamers[0].stream.as_ref().unwrap().minute_watched,
+        confirmed,
+    );
+
+    state.mark_minute_watched("100", ts(961));
+    assert_f64_eq(
+        state.streamers[0].stream.as_ref().unwrap().minute_watched,
+        confirmed,
+    );
+    assert_eq!(
+        state.streamers[0]
+            .stream
+            .as_ref()
+            .unwrap()
+            .last_minute_update,
+        Some(ts(961))
+    );
+
+    state.mark_minute_watched("100", ts(900));
+    let stream = state.streamers[0].stream.as_ref().unwrap();
+    assert_f64_eq(stream.minute_watched, confirmed);
+    assert_eq!(stream.last_minute_update, Some(ts(900)));
 }
 
 #[tokio::test]

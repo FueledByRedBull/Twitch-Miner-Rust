@@ -262,6 +262,11 @@ impl HealthTracker {
             .map(|task| task.consecutive_failures)
     }
 
+    #[cfg(test)]
+    pub(crate) fn successful_refreshes(&self) -> u64 {
+        self.counters_snapshot().successful_refreshes
+    }
+
     fn counters_snapshot(&self) -> StatusCounters {
         self.counters
             .lock()

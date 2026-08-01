@@ -15,6 +15,7 @@ mod client;
 mod contracts;
 mod cookies;
 mod gql;
+mod hls;
 mod ids;
 pub mod operations;
 mod parsers;

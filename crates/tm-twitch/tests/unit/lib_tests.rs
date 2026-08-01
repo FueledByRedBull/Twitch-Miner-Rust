@@ -1,6 +1,7 @@
 use super::*;
-use crate::client::{last_playlist_url, validate_remote_endpoint};
+use crate::client::validate_remote_endpoint;
 use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
+use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
     channel_points_context_from_typed, inventory_snapshot_from_typed, recent_clips_from_typed,
@@ -120,21 +121,116 @@ fn builds_single_and_batch_gql_requests() {
 }
 
 #[test]
-fn resolves_last_hls_entry_and_rejects_empty_playlists() {
+fn master_playlist_selects_lowest_bandwidth_video_variant_by_meaning() {
     let base = reqwest::Url::parse("https://video.example/path/master.m3u8").unwrap();
     assert_eq!(
-        last_playlist_url(
+        lowest_bandwidth_variant_url(
             &base,
-            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow/index.m3u8\n\n",
-            "playlist",
+            concat!(
+                r#"#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio_only",URI="audio/index.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=90,CODECS="mp4a.40.2",VIDEO="audio_only"
+audio/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=800,CODECS="avc1.4d401f,mp4a.40.2",RESOLUTION=1280x720
+https://cdn.example/high/index.m3u8
+# harmless comment between the metadata and URI
+#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS="avc1.4d401e,mp4a.40.2",RESOLUTION=640x360
+# another harmless comment
+low/index.m3u8"#,
+                "   \n"
+            ),
         )
         .unwrap()
         .as_str(),
         "https://video.example/path/low/index.m3u8"
     );
+}
+
+#[test]
+fn spade_contract_decodes_whitespace_and_json_string_escaping() {
+    let settings = r#"window.__settings = {
+        "spade_url"  :  "https:\/\/spade.example\/submit?separator=\u0026"
+    };"#;
+    assert_eq!(
+        extract_spade_url(settings).unwrap(),
+        "https://spade.example/submit?separator=&"
+    );
+}
+
+#[test]
+fn spade_contract_fails_clearly_without_the_primary_json_string_shape() {
     assert!(matches!(
-        last_playlist_url(&base, "#EXTM3U\n", "playlist"),
-        Err(TwitchClientError::MissingField("playlist"))
+        extract_spade_url(r#"window.__settings={"spadeUrl":"https://spade.example"}"#),
+        Err(TwitchContractError::SpadeUrlNotFound)
+    ));
+    assert!(matches!(
+        extract_spade_url(r#"window.__settings={"spade_url":"https:\x2f\x2fexample"}"#),
+        Err(TwitchContractError::InvalidSpadeUrlString)
+    ));
+}
+
+#[test]
+fn hls_parsers_resolve_absolute_and_relative_segment_urls() {
+    let master_base = reqwest::Url::parse("https://video.example/master.m3u8").unwrap();
+    assert_eq!(
+        lowest_bandwidth_variant_url(
+            &master_base,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1.4d401e\",RESOLUTION=640x360\nhttps://media.example/live/index.m3u8\n",
+        )
+        .unwrap()
+        .as_str(),
+        "https://media.example/live/index.m3u8"
+    );
+
+    let media_base = reqwest::Url::parse("https://media.example/live/index.m3u8").unwrap();
+    assert_eq!(
+        media_segment_url(
+            &media_base,
+            "#EXTM3U\n# comment\n#EXTINF:2.0,\n  segments/first.ts  \n#EXTINF:2.0,\nhttps://cdn.example/second.ts\n",
+        )
+        .unwrap()
+        .as_str(),
+        "https://media.example/live/segments/first.ts"
+    );
+    assert_eq!(
+        media_segment_url(
+            &media_base,
+            "#EXTM3U\n#EXTINF:2.0,\nhttps://cdn.example/absolute.ts\n",
+        )
+        .unwrap()
+        .as_str(),
+        "https://cdn.example/absolute.ts"
+    );
+}
+
+#[test]
+fn hls_parsers_reject_empty_audio_only_and_malformed_playlists() {
+    let base = reqwest::Url::parse("https://video.example/path/master.m3u8").unwrap();
+    assert!(matches!(
+        lowest_bandwidth_variant_url(&base, ""),
+        Err(TwitchClientError::InvalidField("master playlist"))
+    ));
+    assert!(matches!(
+        lowest_bandwidth_variant_url(
+            &base,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=90,CODECS=\"mp4a.40.2\"\naudio.m3u8\n",
+        ),
+        Err(TwitchClientError::MissingField("master playlist"))
+    ));
+    assert!(matches!(
+        lowest_bandwidth_variant_url(
+            &base,
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=not-a-number,RESOLUTION=640x360\nvideo.m3u8\n",
+        ),
+        Err(TwitchClientError::InvalidField("master playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\nsegment-without-extinf.ts\n"),
+        Err(TwitchClientError::MissingField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:not-a-duration,\nsegment.ts\n"),
+        Err(TwitchClientError::InvalidField("media playlist"))
     ));
 }
 
@@ -605,6 +701,54 @@ async fn playback_network_errors_do_not_expose_tokenized_urls() {
 }
 
 #[tokio::test]
+async fn playback_priming_repeats_all_four_requests_on_every_tick() {
+    let (endpoints, requests, server) = spawn_playback_server(2);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        endpoints,
+    );
+
+    client.prime_live_playback("tester").await.unwrap();
+    client.prime_live_playback("tester").await.unwrap();
+    server.join().unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.contains(r#""operationName":"PlaybackAccessToken""#))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("GET /hls/tester.m3u8"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("GET /variant.m3u8"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("HEAD /segment.ts"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn retries_only_fixed_read_only_gql_service_errors() {
     let (base_url, requests, server) = spawn_http_server([
         (
@@ -865,6 +1009,55 @@ fn spawn_http_server<const N: usize>(
         }
     });
     (format!("http://{address}"), requests, server)
+}
+
+fn spawn_playback_server(
+    tick_count: usize,
+) -> (
+    TwitchEndpoints,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let server = thread::spawn(move || {
+        for _ in 0..=(4 * tick_count) {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 8192];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            recorded.lock().unwrap().push(request.clone());
+            let body = if request.starts_with("GET / ") {
+                r#"<script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#
+            } else if request.contains(r#""operationName":"PlaybackAccessToken""#) {
+                r#"{"data":{"streamPlaybackAccessToken":{"signature":"sig","value":"token"}}}"#
+            } else if request.starts_with("GET /hls/tester.m3u8") {
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1.4d401e,mp4a.40.2\",RESOLUTION=640x360\n/variant.m3u8\n"
+            } else if request.starts_with("GET /variant.m3u8") {
+                "#EXTM3U\n#EXTINF:2.0,\n/segment.ts\n"
+            } else if request.starts_with("HEAD /segment.ts") {
+                ""
+            } else {
+                panic!("unexpected playback request: {request}");
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    (
+        TwitchEndpoints {
+            twitch_url: format!("http://{address}"),
+            gql_url: format!("http://{address}/gql"),
+            playback_url: format!("http://{address}/hls/"),
+        },
+        requests,
+        server,
+    )
 }
 
 fn read_http_request(stream: &mut TcpStream) {

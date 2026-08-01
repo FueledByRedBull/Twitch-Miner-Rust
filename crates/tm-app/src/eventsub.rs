@@ -158,11 +158,13 @@ fn record_connection_result(
             );
         }
         Ok(Err(error)) => {
-            health.failure("eventsub", classify_eventsub_error(&error));
+            let error_class = classify_eventsub_error(&error);
+            health.failure("eventsub", error_class);
             tracing::warn!(
                 task = "eventsub",
-                error_class = classify_eventsub_error(&error),
+                error_class,
                 failure_attempt = *failure_attempt,
+                %error,
                 "EventSub connection failed; reconnecting"
             );
         }
@@ -445,6 +447,7 @@ fn classify_eventsub_error(error: &EventSubError) -> &'static str {
         EventSubError::Http(_) => "http-error",
         EventSubError::WebSocket(_) => "connection-reset",
         EventSubError::Timeout(_) => "timeout",
+        EventSubError::KeepaliveTimeout => "keepalive-timeout",
         EventSubError::Revoked { .. } => "revoked",
         EventSubError::ReconnectRequested { .. } => "reconnect",
         EventSubError::Json(_) | EventSubError::Protocol(_) | EventSubError::Timestamp => {
@@ -465,11 +468,12 @@ fn eventsub_reconnect_delay(failure_attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use super::{
         classify_eventsub_error, eventsub_reconnect_delay, poll_presence_fallback,
-        update_presence_fallback,
+        record_connection_result, update_presence_fallback,
     };
     use reqwest::StatusCode;
     use tm_domain::Streamer;
@@ -483,6 +487,22 @@ mod tests {
 
     use crate::observability::{AppObservability, AppObservabilitySettings};
     use crate::status::HealthTracker;
+
+    struct TestWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TestWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn test_observability() -> anyhow::Result<AppObservability> {
         Ok(AppObservability::new(
@@ -549,6 +569,43 @@ mod tests {
             classify_eventsub_error(&EventSubError::Timeout("test")),
             "timeout"
         );
+        assert_eq!(
+            classify_eventsub_error(&EventSubError::KeepaliveTimeout),
+            "keepalive-timeout"
+        );
+        assert_eq!(
+            classify_eventsub_error(&EventSubError::Protocol("test")),
+            "protocol"
+        );
+    }
+
+    #[test]
+    fn reconnect_warning_includes_the_class_and_sanitized_error_cause() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer_output = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || TestWriter(Arc::clone(&writer_output)))
+            .finish();
+        let health = HealthTracker::default();
+        let mut failure_attempt = 0;
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(record_connection_result(
+                Ok(Err(EventSubError::Protocol("prediction payload rejected"))),
+                &health,
+                &mut failure_attempt,
+            ));
+        });
+
+        let output = output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("error_class=\"protocol\""));
+        assert!(output.contains("eventsub protocol error: prediction payload rejected"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ mod tests {
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant as StdInstant};
@@ -18,7 +18,10 @@ mod tests {
         normalized_username, preview_config_with_fallback, should_fallback_to_user_config,
         validate_timezone_override, TimezoneValidation, READ_ONLY_FILE_SYSTEM_ERROR,
     };
-    use crate::context::{refresh_snapshot_streamers, spawn_pending_claim_loop};
+    use crate::context::{
+        collect_context_refresh_results, record_context_refresh_health, refresh_snapshot_streamers,
+        spawn_pending_claim_loop, ContextRefreshSummary,
+    };
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
         build_minute_watched_event, has_unfinished_campaign, refresh_watch_selection_metadata,
@@ -30,6 +33,7 @@ mod tests {
     };
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
+    use crate::runtime_effects::stealth_offset_from_entropy;
     use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
     use crate::status::HealthTracker;
     use crate::utilities::new_session_id;
@@ -81,6 +85,14 @@ mod tests {
 
         assert!(Cli::try_parse_from(["tm-app", "--json"]).is_err());
         assert!(Cli::try_parse_from(["tm-app", "--status", "--check-config"]).is_err());
+    }
+
+    #[test]
+    fn prediction_stealth_entropy_maps_to_every_bounded_offset() {
+        assert_eq!(
+            (0..10).map(stealth_offset_from_entropy).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 1, 2, 3, 4, 5]
+        );
     }
 
     #[test]
@@ -295,7 +307,7 @@ mod tests {
                 } else if request.starts_with("GET /hls/") {
                     http_response(
                         "200 OK",
-                        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n/variant.m3u8\n",
+                        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"avc1.4d401e,mp4a.40.2\",RESOLUTION=640x360\n/variant.m3u8\n",
                     )
                 } else if request.starts_with("GET /variant.m3u8") {
                     http_response("200 OK", "#EXTM3U\n#EXTINF:2,\n/segment.ts\n")
@@ -318,6 +330,63 @@ mod tests {
             },
             requests,
             handle,
+        )
+    }
+
+    fn spawn_partial_context_refresh_server() -> (TwitchEndpoints, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut bob_failed = false;
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                let response = if request.starts_with("GET / ") {
+                    http_response(
+                        "200 OK",
+                        r#"<!doctype html><script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#,
+                    )
+                } else if request.contains(r#""channelLogin":"bob""#) && !bob_failed {
+                    bob_failed = true;
+                    http_response("400 Bad Request", r#"{"error":"expected test failure"}"#)
+                } else {
+                    let balance = if request.contains(r#""channelLogin":"alice""#) {
+                        1111
+                    } else {
+                        assert!(request.contains(r#""channelLogin":"bob""#));
+                        2222
+                    };
+                    http_response(
+                        "200 OK",
+                        &serde_json::json!({
+                            "data": {
+                                "community": {
+                                    "channel": {
+                                        "self": {
+                                            "communityPoints": {
+                                                "balance": balance,
+                                                "availableClaim": null,
+                                                "activeMultipliers": []
+                                            }
+                                        },
+                                        "communityPointsSettings": {"goals": []}
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    )
+                };
+                stream.write_all(&response).unwrap();
+            }
+        });
+        (
+            TwitchEndpoints {
+                twitch_url: format!("http://{address}"),
+                gql_url: format!("http://{address}/gql"),
+                playback_url: format!("http://{address}/hls/"),
+            },
+            server,
         )
     }
 
@@ -396,7 +465,7 @@ mod tests {
                     playback_remaining = playback_remaining.saturating_sub(1);
                     http_response(
                         "200 OK",
-                        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n/variant.m3u8\n",
+                        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"avc1.4d401e,mp4a.40.2\",RESOLUTION=640x360\n/variant.m3u8\n",
                     )
                 } else if latest_request.starts_with("GET /variant.m3u8") {
                     playback_remaining = playback_remaining.saturating_sub(1);
@@ -1246,6 +1315,97 @@ mod tests {
             .unwrap()
             .iter()
             .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+    }
+
+    #[tokio::test]
+    async fn partial_context_refresh_retains_success_and_recovers_task_health() {
+        let (endpoints, server) = spawn_partial_context_refresh_server();
+        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        ));
+        twitch.update_client_version().await.unwrap();
+
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![String::from("alice"), String::from("bob")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![
+            Streamer {
+                username: String::from("alice"),
+                channel_id: String::from("100"),
+                ..Streamer::default()
+            },
+            Streamer {
+                username: String::from("bob"),
+                channel_id: String::from("200"),
+                ..Streamer::default()
+            },
+        ];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let health = HealthTracker::default();
+        health.register("context", Duration::from_secs(10 * 60));
+        let observability = test_observability();
+
+        let first =
+            refresh_snapshot_streamers(&runtime, &twitch, "user-1", &observability, &health).await;
+        assert!(first.is_err());
+        record_context_refresh_health(&health, "context", &first);
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert_eq!(snapshot.streamers[0].channel_points, 1111);
+        assert_eq!(snapshot.streamers[1].channel_points, 0);
+        assert_eq!(health.task_consecutive_failures("context"), Some(1));
+        assert_eq!(health.successful_refreshes(), 0);
+
+        let second =
+            refresh_snapshot_streamers(&runtime, &twitch, "user-1", &observability, &health).await;
+        assert!(second.is_ok());
+        record_context_refresh_health(&health, "context", &second);
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert_eq!(snapshot.streamers[0].channel_points, 1111);
+        assert_eq!(snapshot.streamers[1].channel_points, 2222);
+        assert_eq!(health.task_consecutive_failures("context"), Some(0));
+        assert_eq!(health.successful_refreshes(), 1);
+
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_refresh_collection_reports_panics_after_draining_siblings() {
+        let sibling_completed = Arc::new(AtomicBool::new(false));
+        let mut refreshes = tokio::task::JoinSet::new();
+        let completed = Arc::clone(&sibling_completed);
+        refreshes.spawn(async move {
+            tokio::task::yield_now().await;
+            completed.store(true, Ordering::SeqCst);
+            (String::from("alice"), Ok(()))
+        });
+        refreshes.spawn(async {
+            (
+                String::from("bob"),
+                Err(anyhow::anyhow!("expected refresh failure")),
+            )
+        });
+        refreshes.spawn(async {
+            panic!("expected refresh panic");
+        });
+
+        let mut summary = ContextRefreshSummary::default();
+        collect_context_refresh_results(&mut refreshes, &mut summary).await;
+        let error = summary.into_result().unwrap_err();
+
+        assert!(sibling_completed.load(Ordering::SeqCst));
+        assert_eq!(
+            error.to_string(),
+            "2 of 3 streamer context refreshes failed"
+        );
     }
 
     #[tokio::test]
