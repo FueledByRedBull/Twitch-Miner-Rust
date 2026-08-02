@@ -179,3 +179,23 @@ image evidence.
   clean, EventSub 10/10, PubSub 53/53, and restart count zero. The immediately
   following onboarding/documentation release supersedes this candidate before
   timed acceptance, so none of its runtime is credited to the next soak.
+- Runtime revision `a9817e7c4b17805dea7e86084e014e3493888be4`
+  passed exact-head CI run `30767248284` and Multiarch Build run `30767248294`.
+  The published manifest is
+  `sha256:36b40d7bc4c46092b6a5cbb893c5d4bc9d52ec1c8cd571926d4a4c81f6242c0d`;
+  independent Pi inspection confirmed AMD64, ARM64, and ARMv7 runtime
+  descriptors plus per-platform SLSA provenance and SPDX documents. The later
+  `e308e86` commit changes only Mermaid punctuation and was intentionally pushed
+  with `[skip ci]` after GitHub's renderer was verified clean.
+- The onboarding manifest passed read-only candidate and rollback config
+  preflights, exact revision checks, an exclusive canary, atomic digest-only
+  Compose replacement with a mode-600 backup, guarded deployment, and a normal
+  SIGTERM stop with exit code zero. The final container start is
+  `2026-08-02T21:51:42.429110602Z`; its fresh schema-5 session recovered all ten
+  tasks, EventSub 10/10, PubSub 53/53, zero reconnects, restart count zero, and
+  no active error class. Five channels were online and both first ordinary
+  WATCH opportunities credited, with zero warnings/errors and exact empty
+  claim/prediction parity. Cloudflare and Google HTTPS `Date` sources agreed
+  within one second; the conservative non-backdated baseline is
+  `2026-08-02T21:53:29Z`, making the 72-hour checkpoint
+  `2026-08-05T21:53:29Z`.
