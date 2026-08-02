@@ -196,8 +196,18 @@ versus 58.09 million Go decisions/s across five runs of five million decisions
 decision. Rust's 30-run median help startup was 6.937 ms and its stripped
 binary was 7,870,976 bytes; Go measured 6.549 ms and 7,486,976 bytes. The Rust
 worktree and Go `819a2354ccf4a24d648f5c915a44ee68bd46aaaf` checkout were both
-clean. This is the release's clean functional evidence; the following
-documentation-only evidence commit does not change the measured code path.
+clean. This is the release's clean functional checkpoint.
+
+The final clean PR head
+`add8f417e4f47a44d08dbf9c90b9b995af561920`, after the complete security and
+quality-gate integration, measured 74.10 million Rust decisions/s versus 57.03
+million Go decisions/s, a 29.9% Rust lead. The implementations produced
+identical operation and full-sequence semantic checksums and the same final
+decision. Rust's median help startup was 7.001 ms and its stripped binary was
+7,870,976 bytes; Go measured 6.582 ms and 7,486,976 bytes. The merged image
+revision `23636d0d8c3b561b449eb531f26d4d2af6aac3aa` has the same source tree;
+the merge commit and following documentation-only evidence commit do not change
+the measured prediction path.
 
 Prediction decisions occur once per event, so either implementation remains
 millions of times beyond runtime demand. A 40-50 million decisions/s headline

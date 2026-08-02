@@ -155,3 +155,24 @@ The exact PR head must still pass:
 Any source change after this freeze requires rerunning the relevant review and
 tests; any commit amendment after immutable-image publication invalidates the
 image evidence.
+
+## Promotion evidence
+
+- Exact PR head `add8f417e4f47a44d08dbf9c90b9b995af561920`
+  passed CI run `30757982356` and Deep Quality run `30757980509`, including
+  critical-core branch coverage 65.92%, application branch coverage 33.56%,
+  every bounded mutation shard, replay regression, and both 120-second Linux
+  fuzz targets.
+- The preceding `db4a45a` image gate was explicitly ended early by user
+  direction at `2026-08-02T19:37:00Z`, after 25:09:53 of its scheduled 72-hour
+  window. It was healthy at closure, but this is a duration waiver rather than
+  a 72-hour pass.
+- Merge revision `23636d0d8c3b561b449eb531f26d4d2af6aac3aa`
+  passed post-merge CI run `30763785031` and Multiarch Build run `30763785032`.
+  The published manifest is
+  `sha256:9c38b58e5f9b7ef6b5055bdaa973b94fba882b676232616fa7cfd2a8c4395e5f`.
+  AMD64, ARM64, and ARMv7 child images passed workflow smoke tests, and each
+  platform has both SPDX SBOM and SLSA provenance data.
+- Live canary, guarded deployment, and the fresh non-backdated soak baseline
+  remain operational acceptance steps and are not claimed by this source
+  evidence update.
