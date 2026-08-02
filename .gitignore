@@ -20,6 +20,7 @@
 /.tm-build-context.tar.gz
 /.go-parity-context.tar.gz
 /.release-check/
+/.release-evidence-temp/
 /docs/behavior-parity/README.md
 /docs/behavior-parity/gap-list.md
 /docs/behavior-parity/migration-notes.md

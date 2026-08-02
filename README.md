@@ -18,11 +18,11 @@ It is not a toy rewrite. The workspace is split into focused crates, the Twitch 
 
 The point was not to rewrite working behavior for the sake of language preference. The point was to keep the miner useful while making the internals less fragile.
 
-- `tm-runtime` owns mutable state instead of scattering it across the process
-- `tm-domain` keeps decision logic pure and testable
-- `tm-twitch`, `tm-events`, `tm-pubsub`, and `tm-irc` isolate protocol boundaries
-- `tm-auth` and `tm-config` make startup, persistence, and local operation predictable
-- `tm-observability` keeps logging, anonymization, and Discord plumbing out of the hot path
+- one actor owns mutable state instead of scattering it across the process
+- decision logic stays pure and testable
+- protocol boundaries remain isolated from domain state
+- startup, persistence, and local operation use explicit contracts
+- logging, anonymization, and Discord plumbing stay outside the hot path
 
 ## What it does
 
@@ -138,8 +138,8 @@ Notes:
   Exact broadcast-matched VODs are preferred, live streams preempt recovery, and
   HTTP acceptance is never reported as recovery without a newer typed milestone.
 - `LONGEST_STREAK` and `EXPIRING_STREAK` are deterministic watch-priority values.
-  They use typed/cache-backed streak metadata and retain the existing 15-minute
-  live streak budget.
+  They use typed/cache-backed streak metadata and retain the evidence-based
+  ten-minute live streak budget.
 
 Important paths:
 
@@ -156,18 +156,10 @@ Use `tm-app --check-config --json --data-dir ./data` for scripts, and
 
 ## Workspace map
 
-| Crate | Responsibility |
-| --- | --- |
-| `tm-app` | process bootstrap, lifecycle, scheduling glue |
-| `tm-auth` | device auth, session loading, cookie persistence |
-| `tm-config` | config creation, resolution, normalization, write-back |
-| `tm-domain` | pure logic, prediction math, shared types |
-| `tm-events` | transport-neutral runtime event model |
-| `tm-irc` | Twitch IRC transport and chat events |
-| `tm-observability` | logging, anonymization, Discord payloads |
-| `tm-pubsub` | EventSub WebSocket plus legacy PubSub compatibility |
-| `tm-runtime` | single-writer runtime state |
-| `tm-twitch` | Twitch HTTP, GQL, scraping, parser contracts |
+The canonical crate ownership and dependency-direction map lives in
+[docs/architecture/README.md](docs/architecture/README.md). For a concrete
+request-to-reward trace, start with
+[docs/architecture/walkthrough.md](docs/architecture/walkthrough.md).
 
 ## Project status
 
@@ -176,6 +168,7 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - operator guide: [docs/behavior-parity/operator-guide.md](docs/behavior-parity/operator-guide.md)
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
+- end-to-end WATCH walkthrough: [docs/architecture/walkthrough.md](docs/architecture/walkthrough.md)
 - behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
 - release and rollback: [docs/release-process.md](docs/release-process.md)

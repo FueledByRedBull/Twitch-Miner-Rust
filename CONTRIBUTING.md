@@ -3,6 +3,38 @@
 Do not commit cookies, config files, webhooks, logs, or real Twitch payloads.
 Use synthetic or redacted fixtures only.
 
+## Make your first change
+
+Start with a small, deterministic domain behavior. For example, the workspace
+map in `docs/architecture/README.md` assigns pure logic to `tm-domain`; its
+formatting code and focused unit tests are together in
+`crates/tm-domain/src/formatting.rs`.
+
+1. Locate the implementation and its existing test from the repository root:
+
+   ```powershell
+   rg -n "format_drop_progress|progress_percent" crates/tm-domain/src
+   ```
+
+2. Make the smallest behavior change, then add or adjust a synthetic assertion
+   in the existing `#[cfg(test)]` module (for example, `formats_progress`).
+3. Run only that focused test:
+
+   ```powershell
+   cargo test -p tm-domain formatting::tests::formats_progress --lib --locked
+   ```
+
+4. Check formatting and lint the owning crate:
+
+   ```powershell
+   cargo fmt --all -- --check
+   cargo clippy -p tm-domain --lib --all-features --locked -- -D warnings
+   ```
+
+Once the focused checks pass, run the complete **Before submitting a change**
+gate block below. Apply the additional protocol, architecture, or other
+scope-specific requirements there when your change reaches those boundaries.
+
 Before submitting a change, run:
 
 ```powershell

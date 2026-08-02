@@ -56,6 +56,10 @@ The repo ships two compose examples:
 - `deploy/docker-compose.volume.yml` for a named-volume layout.
 - `deploy/docker-compose.rpi.yml` for a Raspberry Pi bind-mount layout that runs as the host user.
 
+Run only one active miner instance per Twitch account. Concurrent instances are
+not a supported high-availability mode: they duplicate transport subscriptions,
+watch heartbeats, and mutation decisions instead of sharing one runtime state.
+
 The container expects:
 
 - `TCPM_CONFIG=/data/config.json`
@@ -93,6 +97,15 @@ hides channel/event/outcome IDs, titles, points, decisions, and result details,
 and uses `miner.log` rather than an account-named log file.
 
 Published images are static Rust binaries in a `scratch` runtime. There is no shell, package manager, or OS certificate bundle inside the image; TLS trust is provided by the Rust TLS stack.
+
+Persistent writes are bounded. `runtime-status.json` is atomically replaced on
+the 30-second supervision heartbeat, and `streak-cache.json` is flushed on its
+30-second timer only when state changed. Saved logs are optional; each active
+log rotates at 10 MiB, retains at most five archives, and prunes archives older
+than 30 days. On flash-backed hosts, keep `/data` persistent for configuration
+and sessions, and move the bind mount to storage that meets the host's endurance
+requirements if that bounded write rate is still unsuitable. Do not place the
+cookie directory on ephemeral storage.
 
 If you are migrating a Linux bind mount from an older root-run image, make sure existing `config/`, `cookies/`, and `log/` files are readable and writable by the UID/GID configured in Compose before restarting the Rust container.
 

@@ -20,6 +20,40 @@ The project runs as a Cargo workspace with crate boundaries split by responsibil
 
 `tm-runtime` owns the single-writer runtime state model, and `tm-app` owns bootstrap, process lifecycle, and top-level scheduling glue that drives it.
 
+## One-screen ownership map
+
+The [ordinary WATCH walkthrough](walkthrough.md) follows the two separate
+halves of a reward: the minute-watch submission and the later points event.
+This map shows who owns each boundary and which way the Cargo dependencies
+point. Solid arrows are dependencies (the left side uses the right side);
+dotted arrows are the runtime data/control path for that walkthrough.
+It is the reward-path slice, not a replacement for the crate table above.
+
+```mermaid
+flowchart LR
+    A["tm-app<br/>watchers, transport tasks, effects"]
+    T["tm-twitch<br/>HTTP/GQL, playback, Spade"]
+    P["tm-pubsub<br/>WebSocket transports, parsing"]
+    E["tm-events<br/>transport-neutral MinerEvent"]
+    R["tm-runtime<br/>single actor, reducer, state"]
+    D["tm-domain<br/>pure shared types/logic"]
+
+    A -->|depends on| T
+    A -->|depends on| P
+    A -->|depends on| R
+    T -->|depends on| D
+    P -->|depends on| E
+    P -->|depends on| D
+    E -->|depends on| D
+    R -->|depends on| E
+    R -->|depends on| D
+
+    A -. "minute-watched POST" .-> T
+    P -. "validated PointsEarned" .-> A
+    A -. "apply command" .-> R
+    R -. "snapshot / effects" .-> A
+```
+
 ## Internal module layout
 
 The largest crates are decomposed behind stable crate facades:

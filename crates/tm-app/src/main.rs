@@ -1,10 +1,38 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
-//! Process composition for the miner.
+//! Process composition for the Twitch Miner binary.
 //!
-//! This crate owns CLI/bootstrap, task supervision, network-effect execution,
-//! health publication, and graceful shutdown. Domain state remains owned by
-//! `tm-runtime`; application tasks must not create a second mutable state owner
-//! or silently retry a points-changing Twitch mutation.
+//! `tm-app` is the executable boundary: it owns CLI modes, path/config loading,
+//! tracing and authentication setup, Twitch client construction, runtime
+//! bootstrap, background-task wiring, health/status publication, observability,
+//! and signal-driven shutdown. Domain rules live in `tm-domain`, while mutable
+//! mining state belongs to `tm-runtime`; transport and protocol details remain
+//! in `tm-twitch`, `tm-pubsub`, and `tm-irc`.
+//!
+//! The normal path in [`run_cli`] resolves paths and handles immediate
+//! health/status/config/support-bundle commands, then loads and validates the
+//! config, prepares the work directory, and initializes tracing. It creates the
+//! session/client, bootstraps streamer context, presence, and streak cache,
+//! starts the `tm-runtime` actor, spawns the background tasks, publishes ready
+//! health, and waits for a signal or task failure. `--canary`
+//! uses a config preview and a read-only canary instead of starting the miner.
+//!
+//! `tm-runtime` is the single writer for mutable mining state. `EventSub`, `PubSub`,
+//! polling, watcher, chat, and cache loops communicate through its handle and
+//! snapshots; reducers return typed effects rather than performing network I/O.
+//! [`runtime_effects`] executes those actor-approved effects (claims, raids,
+//! community goals, prediction work, and observability) at the application
+//! boundary, where point-changing mutations are not silently replayed.
+//!
+//! [`tasks::spawn_background_tasks`] registers and supervises `EventSub`, `PubSub`,
+//! presence fallback, context refresh, pending claims, minute watching, drops,
+//! chat, streak-cache, and optional streak-recovery loops. [`shutdown`] watches
+//! signals and task liveness, broadcasts stop, joins with a grace period, then
+//! shuts down the actor and records the session summary.
+//!
+//! For the next layer, read [`startup`] for state construction, [`tasks`] for
+//! task wiring, [`eventsub`] and [`pubsub`] for transport adapters,
+//! [`runtime_effects`] for effect execution, and `tm-runtime` for reducer and
+//! effect contracts. The workspace map is in `docs/architecture/README.md`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
