@@ -2,12 +2,15 @@
 
 ## Unreleased
 
-- Adds a newcomer architecture path: a source-linked ordinary WATCH walkthrough,
-  a compact ownership/dependency map, expanded `tm-app` crate documentation,
-  and a focused first-change tutorial. The README now uses the canonical
+- Adds a newcomer architecture path: source-linked walkthroughs for an ordinary
+  WATCH reward and the prediction actor/effect/mutation loop, a compact
+  ownership/dependency map, expanded `tm-app` crate documentation, and a
+  focused first-change tutorial. The README now uses the canonical
   architecture map and correctly distinguishes the ten-minute streak-priority
   budget from the 15-minute fair-rotation window. Operator guidance also records
-  the single-instance model and bounded persistent-write behavior.
+  the single-instance model and bounded persistent-write behavior. An obsolete
+  module-wide `dead_code` suppression was also removed from the active PubSub
+  task after all-target/all-feature checking proved it unnecessary.
 - Validates the Twitch login before auth-session path I/O, keeps valid cookie
   filenames unchanged, and rejects traversal, separators, control characters,
   overlong/non-ASCII logins, and Windows device-name collisions. The cookie

@@ -144,6 +144,10 @@ which therefore has no network work for this reward. Later session summaries
 compare the final balance with the startup snapshot and render the accumulated
 history.
 
+For the write side of the runtime — the actor → effect → network-mutation loop
+that a `WATCH` reward does not exercise — see the companion
+[prediction walkthrough](prediction-walkthrough.md).
+
 ## Where to read next
 
 - Minute submission: [`tm-app/src/minute_watcher.rs`](../../crates/tm-app/src/minute_watcher.rs)

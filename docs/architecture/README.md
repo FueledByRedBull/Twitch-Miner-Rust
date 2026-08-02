@@ -24,6 +24,9 @@ The project runs as a Cargo workspace with crate boundaries split by responsibil
 
 The [ordinary WATCH walkthrough](walkthrough.md) follows the two separate
 halves of a reward: the minute-watch submission and the later points event.
+The [prediction walkthrough](prediction-walkthrough.md) follows the write side —
+how a reducer effect becomes one `make_prediction` mutation and how settlement
+is accounted.
 This map shows who owns each boundary and which way the Cargo dependencies
 point. Solid arrows are dependencies (the left side uses the right side);
 dotted arrows are the runtime data/control path for that walkthrough.

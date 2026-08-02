@@ -169,6 +169,7 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
 - end-to-end WATCH walkthrough: [docs/architecture/walkthrough.md](docs/architecture/walkthrough.md)
+- end-to-end prediction (effect-loop) walkthrough: [docs/architecture/prediction-walkthrough.md](docs/architecture/prediction-walkthrough.md)
 - behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
 - release and rollback: [docs/release-process.md](docs/release-process.md)
