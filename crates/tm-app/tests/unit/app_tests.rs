@@ -633,9 +633,12 @@ mod tests {
 
     #[test]
     fn normalized_username_rejects_default_placeholder() {
-        assert!(normalized_username("").is_err());
-        assert!(normalized_username("   ").is_err());
-        assert!(normalized_username("your-twitch-username").is_err());
+        for username in ["", "   ", "your-twitch-username"] {
+            assert_eq!(
+                normalized_username(username).unwrap_err().to_string(),
+                "config.username must be set to a Twitch username"
+            );
+        }
         assert!(normalized_username("../alice").is_err());
         assert!(normalized_username("alice-bob").is_err());
         assert_eq!(normalized_username(" Alice ").unwrap(), "alice");
