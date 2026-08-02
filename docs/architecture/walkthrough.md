@@ -42,7 +42,7 @@ sequenceDiagram
     U->>A: apply_event_with_outcome(PointsEarned)
     A->>S: dedupe, apply_pubsub_gain, update history
     S-->>A: changed=true, effects=[]
-    A-->>O: updated state; log WATCH / optional Discord event
+    A-->>O: updated state, then log WATCH and optional Discord event
 ```
 
 The `user_id` in the topic is the authenticated viewer's ID. It is shown as a
