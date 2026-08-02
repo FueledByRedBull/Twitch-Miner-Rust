@@ -42,7 +42,7 @@ sequenceDiagram
     D-->>X: PredictionDecision { choice, outcome_id, amount }
     Note over X: skip on status, balance, no-outcome, filter, or amount < 10
     X->>T: make_prediction(event_id, outcome_id, amount)
-    Note over X,T: this is the network mutation; there is no automatic retry
+    Note over X,T: this is the network mutation, with no automatic retry
     T-->>X: Ok
     X->>A: record_prediction_placed(decision, deduct_stake)
     Note over A: bet_placed = true guards against double-betting
