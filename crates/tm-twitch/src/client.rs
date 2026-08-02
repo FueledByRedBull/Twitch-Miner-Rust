@@ -1069,7 +1069,7 @@ fn hardened_remote_client(allow_loopback_http: bool) -> Result<reqwest::Client, 
         .map_err(|_| ())
 }
 
-fn endpoints_include_loopback_http(endpoints: &TwitchEndpoints) -> bool {
+pub(crate) fn endpoints_include_loopback_http(endpoints: &TwitchEndpoints) -> bool {
     [
         endpoints.twitch_url.as_str(),
         endpoints.gql_url.as_str(),
@@ -1090,7 +1090,7 @@ fn parse_ip_literal(host: &str) -> Result<IpAddr, std::net::AddrParseError> {
     host.trim_start_matches('[').trim_end_matches(']').parse()
 }
 
-fn normalize_channel_login(channel_login: &str) -> Option<String> {
+pub(crate) fn normalize_channel_login(channel_login: &str) -> Option<String> {
     let channel_login = channel_login.trim().to_ascii_lowercase();
     (!channel_login.is_empty()
         && channel_login
@@ -1106,7 +1106,7 @@ fn is_public_ip(address: IpAddr) -> bool {
     }
 }
 
-fn is_public_ipv4(address: Ipv4Addr) -> bool {
+pub(crate) fn is_public_ipv4(address: Ipv4Addr) -> bool {
     let octets = address.octets();
     let first = octets[0];
     let second = octets[1];

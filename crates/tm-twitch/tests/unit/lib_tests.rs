@@ -1,5 +1,8 @@
 use super::*;
-use crate::client::{validate_remote_endpoint, validate_resolved_addresses};
+use crate::client::{
+    endpoints_include_loopback_http, is_public_ipv4, normalize_channel_login,
+    validate_remote_endpoint, validate_resolved_addresses,
+};
 use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
 use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
 use crate::responses::{
@@ -48,6 +51,7 @@ fn remote_document_endpoints_require_public_https_or_loopback_http() {
     for accepted in [
         "https://spade.example/submit",
         "https://usher.ttvnw.net/playlist.m3u8",
+        "https://8.8.8.8/playlist.m3u8",
     ] {
         let url = reqwest::Url::parse(accepted).unwrap();
         assert!(validate_remote_endpoint(&url, "test_url", false).is_ok());
@@ -64,6 +68,10 @@ fn remote_document_endpoints_require_public_https_or_loopback_http() {
         "http://localhost:8080/test",
         "http://miner.local/test",
         "https://user:password@spade.example/submit",
+        "https://user@spade.example/submit",
+        "https://:password@spade.example/submit",
+        "https://localhost:8080/test",
+        "https://miner.local/test",
         "https://192.168.1.10/test",
         "ftp://spade.example/test",
     ] {
@@ -72,6 +80,83 @@ fn remote_document_endpoints_require_public_https_or_loopback_http() {
             validate_remote_endpoint(&url, "test_url", false),
             Err(TwitchClientError::InvalidField("test_url"))
         ));
+    }
+}
+
+#[test]
+fn loopback_remote_endpoint_detection_requires_http_and_a_loopback_literal() {
+    let endpoints_for = |twitch_url: &str| TwitchEndpoints {
+        twitch_url: twitch_url.to_string(),
+        ..TwitchEndpoints::default()
+    };
+
+    assert!(endpoints_include_loopback_http(&endpoints_for(
+        "http://127.0.0.1:8080/test"
+    )));
+    assert!(!endpoints_include_loopback_http(&endpoints_for(
+        "http://8.8.8.8:8080/test"
+    )));
+    assert!(!endpoints_include_loopback_http(&endpoints_for(
+        "https://127.0.0.1:8080/test"
+    )));
+}
+
+#[test]
+fn channel_login_normalization_enforces_nonempty_ascii_identifier() {
+    assert_eq!(normalize_channel_login(""), None);
+    assert_eq!(normalize_channel_login("   "), None);
+    assert_eq!(
+        normalize_channel_login("Alice9"),
+        Some("alice9".to_string())
+    );
+    assert_eq!(
+        normalize_channel_login(" Alice_9 "),
+        Some("alice_9".to_string())
+    );
+    assert_eq!(normalize_channel_login("alice-9"), None);
+}
+
+#[test]
+fn ipv4_public_policy_rejects_special_ranges_and_accepts_nearby_addresses() {
+    for rejected in [
+        (192, 0, 0, 1),
+        (192, 0, 2, 1),
+        (198, 51, 100, 1),
+        (203, 0, 113, 1),
+        (198, 18, 0, 1),
+        (198, 19, 0, 1),
+        (100, 64, 0, 1),
+        (100, 127, 0, 1),
+        (192, 88, 99, 1),
+    ] {
+        assert!(
+            !is_public_ipv4(Ipv4Addr::new(
+                rejected.0, rejected.1, rejected.2, rejected.3
+            )),
+            "{rejected:?} must remain non-public"
+        );
+    }
+
+    for accepted in [
+        (192, 0, 1, 1),
+        (192, 0, 3, 1),
+        (198, 50, 100, 1),
+        (198, 51, 101, 1),
+        (203, 1, 113, 1),
+        (198, 17, 0, 1),
+        (198, 20, 0, 1),
+        (99, 64, 0, 1),
+        (100, 63, 0, 1),
+        (100, 128, 0, 1),
+        (192, 87, 99, 1),
+        (192, 88, 98, 1),
+    ] {
+        assert!(
+            is_public_ipv4(Ipv4Addr::new(
+                accepted.0, accepted.1, accepted.2, accepted.3
+            )),
+            "{accepted:?} must remain public"
+        );
     }
 }
 
