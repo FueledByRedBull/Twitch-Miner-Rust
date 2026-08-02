@@ -3,9 +3,9 @@
 ## Review scope
 
 - Baseline: `db4a45abf9bfacaa46da1a8cc662027117a12790` (`main`, PR #60).
-- Candidate: `harden/remote-endpoints-shared-ids` working tree; the final commit
-  hash is intentionally deferred until this report and all source changes are
-  frozen.
+- Functional candidate: `1403265c40fd923d5abb42db6ae868362aa78787` on
+  `harden/remote-endpoints-shared-ids`. This report's evidence-only follow-up
+  commit changes documentation, not the measured runtime source.
 - Repository scale: medium Rust workspace, 95 checked-in Rust source/test files.
 - Diff at review freeze: 27 existing files changed, approximately 1,025
   insertions and 156 deletions, plus this review artifact.
@@ -101,11 +101,11 @@ outcome's allocation.
   intermediate ID mismatches cannot escape detection.
 - **Verified — no semantic drift.** Contract, parser, runtime, replay, and JSON
   tests retain the same decision output and exact `i128` amount arithmetic.
-- **Development performance evidence.** The integrated dirty-tree measurement
-  reached 70.71 million Rust decisions/s versus 58.56 million Go decisions/s
-  with identical full-sequence checksums, a 7.248 ms median startup, and a
-  7,868,928-byte stripped Rust binary. This is direction evidence only; a clean
-  candidate report is required before promotion.
+- **Clean performance evidence.** Functional revision `1403265c40fd` measured
+  69.05 million Rust decisions/s versus 58.09 million Go decisions/s with
+  identical full-sequence checksum `eae8f061b8e4d2d5`, a 6.937 ms median
+  startup, and a 7,870,976-byte stripped Rust binary. Both source trees were
+  clean.
 
 ## Verification completed on the source candidate
 
@@ -124,6 +124,11 @@ outcome's allocation.
 - documentation, release-hygiene, and architecture scripts
 - Go baseline: 20 Go definitions, 19 active Rust definitions, three documented
   Go-only definitions, and two documented Rust-only definitions
+- clean five-process/ten-repetition replay at `1403265c40fd`: queue depth 64,
+  campaign pin retained, 200-streamer median throughput 615,440 commands/s,
+  and 1,000-streamer snapshot-clone p95 605 microseconds
+- two isolated reproducible release builds at `1403265c40fd` produced identical
+  executable SHA-256
 - independent security, performance/semantic, and differential reviews: READY
 
 No secrets, cookie contents, account identifiers, private configuration, raw
@@ -132,18 +137,17 @@ Twitch payloads, or signed URLs were inspected or recorded during this review.
 ## Required immutable-revision acceptance
 
 This source review is **conditionally approved**, not yet release-approved.
-The exact candidate revision must still pass:
+The exact PR head must still pass:
 
-1. clean-revision replay and Rust/Go comparison with identical semantic output;
-2. PR CI, dependency policy/audit, reproducibility, secret scan, docs, and
+1. PR CI, dependency policy/audit, reproducibility, secret scan, docs, and
    architecture checks;
-3. manual Deep Quality on pinned Linux: expanded branch coverage at or above
+2. manual Deep Quality on pinned Linux: expanded branch coverage at or above
    60%, every non-empty bounded mutation shard killed, both fuzz targets for
    120 seconds, and replay-regression comparison;
-4. the existing `db4a45a` immutable-image 72-hour gate without backdating;
-5. merge, verified multiarchitecture manifest/revision/SBOM/provenance, and an
+3. the existing `db4a45a` immutable-image 72-hour gate without backdating;
+4. merge, verified multiarchitecture manifest/revision/SBOM/provenance, and an
    exclusive Pi canary using the exact new digest;
-6. guarded deployment, normal-SIGTERM recovery, health/EventSub/PubSub,
+5. guarded deployment, normal-SIGTERM recovery, health/EventSub/PubSub,
    campaign/claim/prediction/point-acquisition evidence, rebuildable-artifact
    cleanup, and a fresh non-backdated soak baseline.
 

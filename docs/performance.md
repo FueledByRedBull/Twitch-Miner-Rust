@@ -188,6 +188,17 @@ and a 7,868,928-byte stripped binary. These numbers establish the design
 direction but remain dirty development evidence until repeated from the exact
 clean revision.
 
+The clean functional revision
+`1403265c40fd923d5abb42db6ae868362aa78787` then measured 69.05 million Rust
+versus 58.09 million Go decisions/s across five runs of five million decisions
+(an 18.9% Rust lead). Both implementations produced operation checksum
+`216168750000`, semantic checksum `eae8f061b8e4d2d5`, and the same final
+decision. Rust's 30-run median help startup was 6.937 ms and its stripped
+binary was 7,870,976 bytes; Go measured 6.549 ms and 7,486,976 bytes. The Rust
+worktree and Go `819a2354ccf4a24d648f5c915a44ee68bd46aaaf` checkout were both
+clean. This is the release's clean functional evidence; the following
+documentation-only evidence commit does not change the measured code path.
+
 Prediction decisions occur once per event, so either implementation remains
 millions of times beyond runtime demand. A 40-50 million decisions/s headline
 is not a product requirement and must not drive ownership, API, arithmetic, or

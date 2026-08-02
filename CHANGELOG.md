@@ -5,12 +5,14 @@
 - Validates the Twitch login before auth-session path I/O, keeps valid cookie
   filenames unchanged, and rejects traversal, separators, control characters,
   overlong/non-ASCII logins, and Windows device-name collisions. The cookie
-  JSON formats and device-login migration path are unchanged.
+  JSON formats and device-login migration path are unchanged, and
+  `--check-config` now applies the same login rules as startup.
 - Routes Twitch-supplied settings, HLS, segment, and Spade URLs through one
   persistent no-redirect/no-proxy client whose resolver rejects and pins mixed
   or non-public IPv4/IPv6 answers. Loopback HTTP is available only when code
   explicitly injects a loopback endpoint for local tests; the app's production
-  construction path cannot be redirected to localhost.
+  construction path cannot be redirected to localhost. URL credentials are
+  rejected and dynamic request errors retain only a sanitized failure class.
 - Shares immutable prediction outcome IDs with owned actor decisions through
   `Arc<str>`, removing the per-decision string allocation while preserving
   exact arithmetic, actor ownership, and string-identical JSON/wire fields.
