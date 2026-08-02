@@ -633,6 +633,8 @@ mod tests {
 
     #[test]
     fn normalized_username_rejects_default_placeholder() {
+        assert!(normalized_username("").is_err());
+        assert!(normalized_username("   ").is_err());
         assert!(normalized_username("your-twitch-username").is_err());
         assert!(normalized_username("../alice").is_err());
         assert!(normalized_username("alice-bob").is_err());

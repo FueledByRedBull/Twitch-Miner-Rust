@@ -23,11 +23,10 @@ jobs:
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # main
         with:
           tool: cargo-llvm-cov@0.8.7
-      - name: Measure critical-crate branch coverage
+      - name: Measure critical-core branch coverage
         run: >-
           cargo +nightly-2026-07-01 llvm-cov
           --branch
-          --package tm-app
           --package tm-auth
           --package tm-domain
           --package tm-pubsub
@@ -36,17 +35,34 @@ jobs:
           --all-features
           --locked
           --json
-          --output-path critical-branch-coverage.json
-      - name: Enforce critical-crate branch coverage
+          --output-path critical-core-branch-coverage.json
+      - name: Enforce critical-core branch coverage
         shell: pwsh
         run: >-
           ./scripts/verify-branch-coverage.ps1
-          -ReportPath critical-branch-coverage.json
+          -ReportPath critical-core-branch-coverage.json
           -MinimumPercent 60
+      - name: Measure application branch coverage
+        run: >-
+          cargo +nightly-2026-07-01 llvm-cov
+          --branch
+          --package tm-app
+          --all-features
+          --locked
+          --json
+          --output-path tm-app-branch-coverage.json
+      - name: Enforce application branch coverage
+        shell: pwsh
+        run: >-
+          ./scripts/verify-branch-coverage.ps1
+          -ReportPath tm-app-branch-coverage.json
+          -MinimumPercent 46
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: critical-branch-coverage
-          path: critical-branch-coverage.json
+          path: |
+            critical-core-branch-coverage.json
+            tm-app-branch-coverage.json
           if-no-files-found: error
 
   replay-regression:

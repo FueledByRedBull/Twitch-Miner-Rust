@@ -67,13 +67,18 @@ pub fn normalize_username(username: &str) -> Result<String, CookieStoreError> {
         return Err(CookieStoreError::InvalidUsername);
     }
     let normalized = trimmed.to_ascii_lowercase();
-    if normalized.is_empty() || normalized == "your-twitch-username" {
+    if normalized.is_empty() {
         return Err(CookieStoreError::InvalidUsername);
     }
-    if normalized.len() > MAX_TWITCH_USERNAME_LENGTH
-        || !normalized
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    if normalized == "your-twitch-username" {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+    if normalized.len() > MAX_TWITCH_USERNAME_LENGTH {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+    if !normalized
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     {
         return Err(CookieStoreError::InvalidUsername);
     }
@@ -98,26 +103,29 @@ pub fn cookie_file_path(
 }
 
 fn is_safe_cookie_file_name(file_name: &str, username: &str) -> bool {
-    // Rust's path parser is host-platform-specific.  Explicitly reject both
-    // separator spellings so a value accepted by a Unix test cannot become a
-    // nested path when the same config is used on Windows (or vice versa).
-    if file_name.is_empty()
-        || file_name == "."
-        || file_name == ".."
-        || file_name.contains('/')
-        || file_name.contains('\\')
-        || file_name.contains(':')
-        || file_name.chars().any(char::is_control)
-        || username.ends_with('.')
-    {
+    // Rust's path parser is host-platform-specific. Explicitly reject Windows
+    // separator and prefix spellings so a value accepted by a Unix test cannot
+    // become a nested or drive-relative path when moved to Windows.
+    if file_name.contains('\\') {
+        return false;
+    }
+    if file_name.contains(':') {
+        return false;
+    }
+    if file_name.chars().any(char::is_control) {
+        return false;
+    }
+    if username.ends_with('.') {
         return false;
     }
 
     let mut components = Path::new(file_name).components();
     if !matches!(components.next(), Some(Component::Normal(component))
         if component == OsStr::new(file_name))
-        || components.next().is_some()
     {
+        return false;
+    }
+    if components.next().is_some() {
         return false;
     }
 
@@ -430,6 +438,30 @@ mod tests {
             normalize_username("your-twitch-username"),
             Err(CookieStoreError::InvalidUsername)
         ));
+        assert!(matches!(
+            normalize_username("   "),
+            Err(CookieStoreError::InvalidUsername)
+        ));
+    }
+
+    #[test]
+    fn cookie_file_component_guard_rejects_each_escape_class() {
+        for (file_name, username) in [
+            ("", "alice"),
+            (".", "alice"),
+            ("..", "alice"),
+            ("alice/bob.json", "alice"),
+            ("alice\\bob.json", "alice"),
+            ("C:alice.json", "alice"),
+            ("alice\0.json", "alice"),
+            ("alice.json", "alice."),
+        ] {
+            assert!(
+                !is_safe_cookie_file_name(file_name, username),
+                "accepted unsafe cookie component {file_name:?}"
+            );
+        }
+        assert!(is_safe_cookie_file_name("alice.json", "alice"));
     }
 
     #[test]

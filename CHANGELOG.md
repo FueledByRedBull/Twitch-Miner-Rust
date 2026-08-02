@@ -19,7 +19,9 @@
   These crates are internal and unpublished; downstream serialized data does
   not change.
 - Extends branch coverage, bounded mutation, and structured-input fuzzing to
-  the new auth, endpoint-policy, and prediction-decision paths.
+  the new auth, endpoint-policy, prediction-decision, and application paths.
+  The existing 60% critical-core branch floor remains intact and `tm-app` now
+  has its own 46% ratchet instead of diluting the core aggregate.
 - Logs the sanitized concrete `EventSub` failure beside its stable error class
   and classifies a missed keepalive deadline as `keepalive-timeout` instead of
   conflating normal liveness recovery with a rejected protocol payload.
