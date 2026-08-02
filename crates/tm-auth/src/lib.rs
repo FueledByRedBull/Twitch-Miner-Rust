@@ -15,7 +15,7 @@ pub use client::{
 };
 pub use cookies::{
     cookie_file_path, cookies_dir, decode_cookie_store, encode_cookie_store,
-    ensure_session_cookies, normalized_cookie_domain, normalized_cookie_path,
+    ensure_session_cookies, normalize_username, normalized_cookie_domain, normalized_cookie_path,
     session_cookies_by_host, CookieStore, CookieStoreError, LoadedCookieStore, PersistedCookie,
     SessionCookie,
 };

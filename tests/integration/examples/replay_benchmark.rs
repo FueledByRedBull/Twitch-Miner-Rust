@@ -186,14 +186,14 @@ fn prediction_fixture(streamer: Streamer, index: usize) -> PredictionEvent {
         window_seconds: 30.0,
         outcomes: vec![
             PredictionOutcome {
-                id: format!("outcome-{index}-a"),
+                id: format!("outcome-{index}-a").into(),
                 title: String::from("A"),
                 total_points: 1_000,
                 total_users: 10,
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: format!("outcome-{index}-b"),
+                id: format!("outcome-{index}-b").into(),
                 title: String::from("B"),
                 total_points: 500,
                 total_users: 5,
@@ -243,7 +243,7 @@ async fn replay_predictions(
             .apply_event(
                 PubSubEvent::PredictionChannel {
                     kind: PredictionChannelKind::EventUpdated,
-                    winning_outcome_id: Some(event.outcomes[0].id.clone()),
+                    winning_outcome_id: Some(event.outcomes[0].id.to_string()),
                     event: Box::new(event),
                 },
                 timestamp(31),

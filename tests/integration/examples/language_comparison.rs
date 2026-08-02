@@ -33,7 +33,7 @@ fn benchmark_event() -> PredictionEvent {
         window_seconds: 120.0,
         outcomes: vec![
             PredictionOutcome {
-                id: String::from("alpha"),
+                id: "alpha".into(),
                 title: String::from("Alpha"),
                 total_users: 641,
                 total_points: 7_000_000,
@@ -41,7 +41,7 @@ fn benchmark_event() -> PredictionEvent {
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("bravo"),
+                id: "bravo".into(),
                 title: String::from("Bravo"),
                 total_users: 455,
                 total_points: 4_000_000,
@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "measurement": {
                 "build_profile": "cargo-release-opt-z-lto",
                 "percentage_math": "exact-i128-integer",
-                "outcome_id": "owned-string",
+                "outcome_id": "shared-owned-string",
                 "output_consumption": "complete-decision-black-box",
                 "semantic_verification": "all-decisions-separate-pass",
             },
@@ -178,7 +178,7 @@ mod tests {
     fn semantic_sequence_distinguishes_equal_length_intermediate_outcome_ids() {
         let final_decision = PredictionDecision {
             choice: Some(0),
-            outcome_id: String::from("final"),
+            outcome_id: "final".into(),
             amount: 100,
         };
         let first_sequence = update_semantic_checksum(
@@ -186,7 +186,7 @@ mod tests {
                 FNV_OFFSET,
                 &PredictionDecision {
                     choice: Some(1),
-                    outcome_id: String::from("alpha"),
+                    outcome_id: "alpha".into(),
                     amount: 50,
                 },
             ),
@@ -197,7 +197,7 @@ mod tests {
                 FNV_OFFSET,
                 &PredictionDecision {
                     choice: Some(1),
-                    outcome_id: String::from("bravo"),
+                    outcome_id: "bravo".into(),
                     amount: 50,
                 },
             ),

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -30,7 +31,8 @@ fn percentage_of_balance(balance: i64, percentage: u32) -> i64 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PredictionOutcome {
-    pub id: String,
+    /// Immutable identity shared with owned decisions sent across the runtime actor.
+    pub id: Arc<str>,
     pub title: String,
     pub color: String,
     pub total_users: i64,
@@ -44,7 +46,8 @@ pub struct PredictionOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PredictionDecision {
     pub choice: Option<usize>,
-    pub outcome_id: String,
+    /// Shares the selected outcome allocation while keeping the decision self-contained.
+    pub outcome_id: Arc<str>,
     pub amount: i64,
 }
 
@@ -138,13 +141,10 @@ impl PredictionEvent {
         }
         amount = amount.min(balance);
 
-        if amount < 10 {
-            amount = match settings.max_points {
-                Some(max_points) if max_points < 10 => i64::from(max_points).min(balance),
-                _ if balance >= 10 => 10,
-                _ => amount,
-            };
-        }
+        let minimum = settings
+            .max_points
+            .map_or(10, |max_points| i64::from(max_points).min(10));
+        amount = amount.max(minimum.min(balance));
 
         if settings.stealth_mode.unwrap_or(false) {
             let top_points = self.outcomes[choice].top_points;
@@ -158,7 +158,7 @@ impl PredictionEvent {
 
         let decision = PredictionDecision {
             choice: Some(choice),
-            outcome_id: self.outcomes[choice].id.clone(),
+            outcome_id: Arc::clone(&self.outcomes[choice].id),
             amount,
         };
         self.decision.clone_from(&decision);
@@ -297,7 +297,7 @@ impl PredictionEvent {
     #[must_use]
     pub fn decision_outcome_string(&self) -> String {
         self.decision_outcome()
-            .map_or_else(|| self.decision.outcome_id.clone(), ToString::to_string)
+            .map_or_else(|| self.decision.outcome_id.to_string(), ToString::to_string)
     }
 
     #[must_use]
@@ -307,7 +307,7 @@ impl PredictionEvent {
                 return String::new();
             }
             return self.decision.choice.map_or_else(
-                || self.decision.outcome_id.clone(),
+                || self.decision.outcome_id.to_string(),
                 |choice| format!("{}: {}", choice_label(choice), self.decision.outcome_id),
             );
         };
@@ -490,7 +490,7 @@ mod tests {
     fn prediction_strategy_ties_select_the_first_outcome() {
         let outcomes = vec![
             PredictionOutcome {
-                id: String::from("first"),
+                id: Arc::from("first"),
                 total_users: 10,
                 top_points: 20,
                 odds: 2.0,
@@ -499,7 +499,7 @@ mod tests {
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("second"),
+                id: Arc::from("second"),
                 total_users: 10,
                 top_points: 20,
                 odds: 2.0,
@@ -664,7 +664,7 @@ mod tests {
             window_seconds: 10.0,
             outcomes: vec![
                 PredictionOutcome {
-                    id: String::from("a"),
+                    id: Arc::from("a"),
                     total_users: 10,
                     total_points: 100,
                     odds: 2.0,
@@ -672,7 +672,7 @@ mod tests {
                     ..PredictionOutcome::default()
                 },
                 PredictionOutcome {
-                    id: String::from("b"),
+                    id: Arc::from("b"),
                     total_users: 20,
                     total_points: 50,
                     odds: 4.0,
@@ -691,8 +691,95 @@ mod tests {
         event.streamer.settings.bet.max_points = Some(500);
 
         let decision = event.decide(20_000);
-        assert_eq!(decision.outcome_id, "b");
+        assert_eq!(decision.outcome_id.as_ref(), "b");
         assert_eq!(decision.amount, 500);
+        assert!(Arc::ptr_eq(&decision.outcome_id, &event.outcomes[1].id));
+        assert!(Arc::ptr_eq(
+            &decision.outcome_id,
+            &event.decision.outcome_id
+        ));
+
+        let wire = serde_json::to_value(&decision).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"choice": 1, "outcome_id": "b", "amount": 500})
+        );
+        let decoded: PredictionDecision = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, decision);
+    }
+
+    #[test]
+    fn decide_preserves_minimum_bet_boundaries() {
+        let mut event = PredictionEvent {
+            streamer: Streamer::default(),
+            event_id: String::new(),
+            title: String::new(),
+            status: String::from("ACTIVE"),
+            created_at: datetime!(2026-03-27 06:00 UTC),
+            window_seconds: 10.0,
+            outcomes: vec![PredictionOutcome {
+                id: Arc::from("a"),
+                total_users: 1,
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        event.streamer.settings.bet.percentage = Some(1);
+
+        assert_eq!(event.decide(900).amount, 10);
+        assert_eq!(event.decide(9).amount, 9);
+
+        event.streamer.settings.bet.max_points = Some(500);
+        assert_eq!(event.decide(100).amount, 10);
+
+        event.streamer.settings.bet.max_points = Some(7);
+        assert_eq!(event.decide(100).amount, 7);
+        assert_eq!(event.decide(5).amount, 5);
+    }
+
+    #[test]
+    fn smart_strategy_observes_gap_boundaries_and_single_outcomes() {
+        let settings = BetSettings {
+            strategy: Strategy::Smart,
+            percentage_gap: Some(20),
+            ..BetSettings::default()
+        };
+        let only = PredictionOutcome {
+            total_users: 1,
+            odds: 1.0,
+            percentage_users: 100.0,
+            ..PredictionOutcome::default()
+        };
+        assert_eq!(
+            select_outcome(std::slice::from_ref(&only), &settings),
+            Some(0)
+        );
+
+        let mut outcomes = vec![
+            PredictionOutcome {
+                total_users: 100,
+                odds: 1.0,
+                percentage_users: 20.0,
+                ..PredictionOutcome::default()
+            },
+            PredictionOutcome {
+                total_users: 10,
+                odds: 5.0,
+                percentage_users: 1.0,
+                ..PredictionOutcome::default()
+            },
+        ];
+        assert_eq!(select_outcome(&outcomes, &settings), Some(1));
+
+        outcomes[0].percentage_users = 21.0;
+        assert_eq!(select_outcome(&outcomes, &settings), Some(0));
+
+        outcomes[0].percentage_users = 22.0;
+        assert_eq!(select_outcome(&outcomes, &settings), Some(0));
     }
 
     #[test]
@@ -706,7 +793,7 @@ mod tests {
             window_seconds: 10.0,
             outcomes: vec![
                 PredictionOutcome {
-                    id: String::from("a"),
+                    id: Arc::from("a"),
                     total_users: 10,
                     total_points: 100,
                     top_points: 150,
@@ -715,7 +802,7 @@ mod tests {
                     ..PredictionOutcome::default()
                 },
                 PredictionOutcome {
-                    id: String::from("b"),
+                    id: Arc::from("b"),
                     total_users: 20,
                     total_points: 50,
                     top_points: 80,
@@ -738,7 +825,7 @@ mod tests {
         for offset in MIN_STEALTH_OFFSET..=MAX_STEALTH_OFFSET {
             let mut event = event.clone();
             let decision = event.decide_with_stealth_offset(2_000, offset);
-            assert_eq!(decision.outcome_id, "b");
+            assert_eq!(decision.outcome_id.as_ref(), "b");
             assert_eq!(decision.amount, 80 - i64::from(offset));
         }
     }
@@ -753,7 +840,7 @@ mod tests {
             created_at: datetime!(2026-03-27 06:00 UTC),
             window_seconds: 10.0,
             outcomes: vec![PredictionOutcome {
-                id: String::from("a"),
+                id: Arc::from("a"),
                 total_users: 10,
                 top_points: 1,
                 ..PredictionOutcome::default()
@@ -804,14 +891,14 @@ mod tests {
             created_at: datetime!(2026-03-27 06:00 UTC),
             window_seconds: 10.0,
             outcomes: vec![PredictionOutcome {
-                id: String::from("a"),
+                id: Arc::from("a"),
                 title: String::from("Alpha"),
                 color: String::from("blue"),
                 ..PredictionOutcome::default()
             }],
             decision: PredictionDecision {
                 choice: Some(0),
-                outcome_id: String::from("a"),
+                outcome_id: Arc::from("a"),
                 amount: 125,
             },
             bet_placed: true,
@@ -831,17 +918,17 @@ mod tests {
     fn numbered_strategy_falls_back_to_high_odds_when_outcome_is_missing() {
         let outcomes = vec![
             PredictionOutcome {
-                id: String::from("a"),
+                id: Arc::from("a"),
                 odds: 1.5,
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("b"),
+                id: Arc::from("b"),
                 odds: 4.0,
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("c"),
+                id: Arc::from("c"),
                 odds: 2.0,
                 ..PredictionOutcome::default()
             },

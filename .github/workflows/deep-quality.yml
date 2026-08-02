@@ -23,27 +23,46 @@ jobs:
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # main
         with:
           tool: cargo-llvm-cov@0.8.7
-      - name: Measure critical-crate branch coverage
+      - name: Measure critical-core branch coverage
         run: >-
           cargo +nightly-2026-07-01 llvm-cov
           --branch
+          --package tm-auth
           --package tm-domain
           --package tm-pubsub
           --package tm-runtime
+          --package tm-twitch
           --all-features
           --locked
           --json
-          --output-path critical-branch-coverage.json
-      - name: Enforce critical-crate branch coverage
+          --output-path critical-core-branch-coverage.json
+      - name: Enforce critical-core branch coverage
         shell: pwsh
         run: >-
           ./scripts/verify-branch-coverage.ps1
-          -ReportPath critical-branch-coverage.json
+          -ReportPath critical-core-branch-coverage.json
           -MinimumPercent 60
+      - name: Measure application branch coverage
+        run: >-
+          cargo +nightly-2026-07-01 llvm-cov
+          --branch
+          --package tm-app
+          --all-features
+          --locked
+          --json
+          --output-path tm-app-branch-coverage.json
+      - name: Enforce application branch coverage
+        shell: pwsh
+        run: >-
+          ./scripts/verify-branch-coverage.ps1
+          -ReportPath tm-app-branch-coverage.json
+          -MinimumPercent 33.5
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: critical-branch-coverage
-          path: critical-branch-coverage.json
+          path: |
+            critical-core-branch-coverage.json
+            tm-app-branch-coverage.json
           if-no-files-found: error
 
   replay-regression:
@@ -106,6 +125,11 @@ jobs:
             filter: ' in (apply_pubsub_gain|update_history|build_prediction_settlement_effect|prediction_status_is_resolved|remember_mutation_id)$'
             # Equality still assigns the same boundary value, so these three mutants are equivalent.
             exclude: '(summary\.rs:(17:20: replace < with <=|20:35: replace < with (==|<=))| in RuntimeState::from_targets$)'
+          - name: domain-prediction-decision
+            package: tm-domain
+            file: crates/tm-domain/src/prediction.rs
+            filter: ' in (percentage_of_balance|select_outcome|PredictionEvent::decide_with_stealth_offset)$'
+            exclude: 'a^'
           - name: app-pubsub-retry
             package: tm-app
             file: crates/tm-app/src/pubsub.rs
@@ -120,6 +144,26 @@ jobs:
             package: tm-app
             file: crates/tm-app/src/bootstrap.rs
             filter: ' in saved_session_retry_delay$'
+            exclude: 'a^'
+          - name: app-bootstrap-validation
+            package: tm-app
+            file: crates/tm-app/src/bootstrap.rs
+            filter: ' in (build_http_client|normalized_username|validate_app_config)$'
+            exclude: 'a^'
+          - name: auth-cookie-path
+            package: tm-auth
+            file: crates/tm-auth/src/cookies.rs
+            filter: ' in (normalize_username|is_safe_cookie_file_name|is_windows_reserved_component)$'
+            exclude: 'a^'
+          - name: twitch-remote-endpoint
+            package: tm-twitch
+            file: crates/tm-twitch/src/client.rs
+            filter: ' in (validate_remote_endpoint|validate_resolved_addresses|endpoints_include_loopback_http|normalize_channel_login|is_public_ipv4|is_public_ipv6)$'
+            exclude: 'a^'
+          - name: twitch-cookie-origin
+            package: tm-twitch
+            file: crates/tm-twitch/src/cookies.rs
+            filter: ' in is_twitch_cookie_url$'
             exclude: 'a^'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

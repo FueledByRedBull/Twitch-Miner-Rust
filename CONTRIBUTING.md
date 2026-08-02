@@ -36,10 +36,10 @@ and retain the generated report only as review/release evidence:
 ```
 
 The manually dispatched/weekly `Deep Quality` workflow pins its nightly and
-analysis executables. It measures critical-crate branch coverage, runs bounded
-pure-parser fuzzing from the isolated `fuzz/` workspace, and mutates only the
-state-reduction, prediction, dedupe, and retry functions named in the workflow.
-Do not expand it to network effects or treat timing as a correctness gate.
+analysis executables. It preserves the 60% critical-core branch floor and a
+separate 33.5% `tm-app` ratchet, runs bounded pure-parser fuzzing from the isolated
+`fuzz/` workspace, and mutates only the functions named in the workflow. Do not
+expand it to network effects or treat timing as a correctness gate.
 
 Protocol changes need a sanitized fixture, parser test, and parity-matrix
 update. Run `tests/contract/tests/parser_robustness.rs` as part of the normal

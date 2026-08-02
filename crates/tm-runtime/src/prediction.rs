@@ -13,11 +13,11 @@ pub(crate) fn build_prediction_settlement_effect(
             if !event
                 .outcomes
                 .iter()
-                .any(|outcome| outcome.id == winning_outcome_id)
+                .any(|outcome| outcome.id.as_ref() == winning_outcome_id)
             {
                 return None;
             }
-            if event.decision.outcome_id == winning_outcome_id {
+            if event.decision.outcome_id.as_ref() == winning_outcome_id {
                 event.parse_result(
                     "WIN",
                     payout_for_outcome(&event.decision, &event.outcomes, winning_outcome_id),
@@ -47,7 +47,7 @@ fn payout_for_outcome(
     outcomes: &[tm_domain::PredictionOutcome],
     winning_outcome_id: &str,
 ) -> i64 {
-    if decision.amount <= 0 || decision.outcome_id != winning_outcome_id {
+    if decision.amount <= 0 || decision.outcome_id.as_ref() != winning_outcome_id {
         return 0;
     }
 
@@ -56,7 +56,7 @@ fn payout_for_outcome(
     });
     let winning_points = outcomes
         .iter()
-        .find(|outcome| outcome.id == winning_outcome_id)
+        .find(|outcome| outcome.id.as_ref() == winning_outcome_id)
         .map(|outcome| i128::from(outcome.total_points))
         .unwrap_or_default();
     if total_points <= 0 || winning_points <= 0 {
@@ -93,13 +93,13 @@ mod tests {
             window_seconds: 30.0,
             outcomes: vec![
                 PredictionOutcome {
-                    id: String::from("a"),
+                    id: "a".into(),
                     title: String::from("A"),
                     total_points: left_points,
                     ..PredictionOutcome::default()
                 },
                 PredictionOutcome {
-                    id: String::from("b"),
+                    id: "b".into(),
                     title: String::from("B"),
                     total_points: right_points,
                     ..PredictionOutcome::default()
@@ -107,7 +107,7 @@ mod tests {
             ],
             decision: PredictionDecision {
                 choice: Some(0),
-                outcome_id: String::from("a"),
+                outcome_id: "a".into(),
                 amount,
             },
             bet_placed: true,

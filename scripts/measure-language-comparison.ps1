@@ -180,7 +180,7 @@ try {
             not_equivalent = @(
                 'Rust is compiled with the production size-oriented opt-level=z/LTO profile; Go uses its default speed optimizer and stripped symbols',
                 'Rust uses exact i128 percentage arithmetic; Go uses float64 multiplication and truncation',
-                'Rust materializes owned outcome-ID strings; Go copies shallow immutable string headers',
+                'Rust shares immutable outcome-ID allocations through Arc<str>; Go copies shallow immutable string headers',
                 'No allocation-free kernel is reported because the Go selector is private and exposing or duplicating it would distort production interfaces',
                 'Rust actor replay: the Go baseline has no equivalent single-writer actor, bounded queue, or snapshot API',
                 'live Twitch mining: concurrent account sessions would interfere and are not a safe benchmark'

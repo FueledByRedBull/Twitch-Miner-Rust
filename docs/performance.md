@@ -121,8 +121,10 @@ differences:
   uses its default speed optimizer and stripped symbols.
 - Rust computes the percentage with exact overflow-safe `i128` arithmetic; Go
   multiplies through `float64` and truncates.
-- Rust materializes owned outcome-ID strings; Go copies immutable string
-  headers.
+- Rust decisions remain owned and self-contained while sharing immutable
+  outcome-ID allocations through `Arc<str>`; Go copies immutable string
+  headers. Rust therefore pays atomic reference-count operations instead of a
+  fresh allocation and byte copy for each decision.
 
 There is intentionally no synthetic "allocation-free kernel" score. The Go
 selector is private; duplicating it in a benchmark or adding a production test
@@ -168,6 +170,34 @@ prediction-path regression. Candidate median startup improved from 8.932 ms to
 8.515 ms and the stripped binary grew by 6,144 bytes. Both trees produced the
 same complete semantic checksum. The candidate report was intentionally dirty
 development evidence; clean revision evidence is still required after commit.
+
+On 2026-08-02, the clean `db4a45a` baseline measured 14.42 million Rust and
+56.07 million Go decisions/s. A semantics-preserving working-tree candidate
+then shared immutable outcome IDs between outcomes and owned decisions through
+`Arc<str>`, removing the repeated Rust allocation and byte copy without
+removing decision data or changing exact `i128` arithmetic, actor ownership, or
+JSON shape. It measured 65.76 million decisions/s in the full comparison script. An
+immediately adjacent ten-run sample of five million decisions per run measured
+66.62 million Rust versus 50.57 million Go decisions/s with identical operation
+and full-sequence semantic checksums. The stripped Rust binary grew by 3,584
+bytes. After integrating the next-release security changes, a five-run sample
+of five million decisions per run measured 70.71 million Rust versus 58.56
+million Go decisions/s (a 20.7% Rust lead), again with identical full-sequence
+semantic checksums. That integrated working tree had a 7.248 ms median startup
+and a 7,868,928-byte stripped binary. These numbers establish the design
+direction but remain dirty development evidence until repeated from the exact
+clean revision.
+
+The clean functional revision
+`1403265c40fd923d5abb42db6ae868362aa78787` then measured 69.05 million Rust
+versus 58.09 million Go decisions/s across five runs of five million decisions
+(an 18.9% Rust lead). Both implementations produced operation checksum
+`216168750000`, semantic checksum `eae8f061b8e4d2d5`, and the same final
+decision. Rust's 30-run median help startup was 6.937 ms and its stripped
+binary was 7,870,976 bytes; Go measured 6.549 ms and 7,486,976 bytes. The Rust
+worktree and Go `819a2354ccf4a24d648f5c915a44ee68bd46aaaf` checkout were both
+clean. This is the release's clean functional evidence; the following
+documentation-only evidence commit does not change the measured code path.
 
 Prediction decisions occur once per event, so either implementation remains
 millions of times beyond runtime demand. A 40-50 million decisions/s headline

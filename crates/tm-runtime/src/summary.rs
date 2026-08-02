@@ -183,7 +183,7 @@ fn prediction_summary(event: &PredictionEvent, anonymize: bool) -> PredictionSum
     let outcome_id = if anonymize {
         "[hidden]"
     } else {
-        event.decision.outcome_id.as_str()
+        event.decision.outcome_id.as_ref()
     };
     let amount = if anonymize {
         "[hidden]".to_string()

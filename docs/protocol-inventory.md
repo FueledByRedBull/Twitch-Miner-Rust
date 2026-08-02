@@ -60,11 +60,24 @@ failure class in the release notes; never record cookies, account IDs, raw
 payloads, or request headers.
 
 Every request target that Twitch supplies inside a document rather than one the
-miner compiles in is origin-checked before use: the playback master playlist,
-media playlist, and segment, and the spade endpoint extracted from the settings
-script. Each must be a public HTTPS origin, with loopback HTTP allowed only so
-tests can serve them locally. This matters most for spade, whose minute-watched
-payload carries the channel, broadcast, and account identifiers.
+miner compiles in is checked before use: the settings script, playback master
+playlist, selected media playlist, media segment, and the spade endpoint. The
+remote client disables redirects, requires HTTPS for public origins, and allows
+HTTP loopback only when an endpoint-override constructor explicitly injects a
+loopback HTTP base URL for local tests. The app's production construction path
+does not enable that allowance. Its resolver
+validates every address in each DNS answer (including later connection
+resolutions), rejects loopback, link-local, private, unspecified, multicast,
+documentation, reserved, and other non-public IPv4/IPv6 ranges, then returns
+that validated address set directly to the connector. This prevents a mixed
+answer or DNS rebinding from turning a public hostname into a private request;
+relative playlist URLs are checked again after resolution. This matters most
+for spade, whose minute-watched payload carries the channel, broadcast, and
+account identifiers. The policy follows the IANA
+[IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml)
+and [IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml)
+special-purpose registries; protocol-specific tunnel/anycast blocks are denied
+because the remote-endpoint contract admits only ordinary public CDN addresses.
 
 `CLIENT_ID` is the browser identity required consistently by device auth, GQL,
 and EventSub; it cannot be discovered safely at runtime. `Client-Version` is

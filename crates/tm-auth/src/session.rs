@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::cookies::{
     cookie_file_path, decode_cookie_store, encode_cookie_store, ensure_session_cookies,
-    loaded_cookie_store, normalized_cookie_domain, CookieStore, CookieStoreError,
+    loaded_cookie_store, normalize_username, normalized_cookie_domain, CookieStore,
+    CookieStoreError,
 };
 
 const SPECIAL_COOKIE_DOMAINS: [&str; 2] = ["twitch.tv", "id.twitch.tv"];
@@ -35,7 +36,10 @@ impl AuthSession {
     #[must_use]
     pub fn new(username: impl Into<String>, store: CookieStore) -> Self {
         Self {
-            username: username.into().trim().to_lowercase(),
+            // Preserve non-ASCII input so the path validator can reject it;
+            // Unicode case folding can otherwise turn invalid input such as
+            // U+212A into a valid ASCII cookie filename.
+            username: username.into().trim().to_ascii_lowercase(),
             store,
             scopes: BTreeSet::new(),
         }
@@ -49,13 +53,13 @@ impl AuthSession {
         base_dir: impl AsRef<Path>,
         username: impl Into<String>,
     ) -> Result<Self, AuthSessionError> {
-        let username = username.into().trim().to_lowercase();
-        let bytes = fs::read(cookie_file_path(base_dir, &username))?;
+        let username = normalize_username(&username.into())?;
+        let bytes = fs::read(cookie_file_path(base_dir, &username)?)?;
         Self::from_bytes(username, &bytes)
     }
 
     pub fn save_to_dir(&self, base_dir: impl AsRef<Path>) -> Result<(), AuthSessionError> {
-        let path = cookie_file_path(base_dir, &self.username);
+        let path = cookie_file_path(base_dir, &self.username)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -340,6 +344,36 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_username_is_rejected_before_auth_session_path_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = AuthSession::new("../escape", CookieStore::new());
+
+        assert!(matches!(
+            session.save_to_dir(dir.path()),
+            Err(AuthSessionError::CookieStore(
+                CookieStoreError::InvalidUsername
+            ))
+        ));
+        assert!(!dir.path().join("cookies").exists());
+        assert!(matches!(
+            AuthSession::load_from_dir(dir.path(), "C:\\escape"),
+            Err(AuthSessionError::CookieStore(
+                CookieStoreError::InvalidUsername
+            ))
+        ));
+
+        let kelvin_sign = char::from_u32(0x212a).unwrap().to_string();
+        let unicode_session = AuthSession::new(kelvin_sign, CookieStore::new());
+        assert!(matches!(
+            unicode_session.save_to_dir(dir.path()),
+            Err(AuthSessionError::CookieStore(
+                CookieStoreError::InvalidUsername
+            ))
+        ));
+        assert!(!dir.path().join("cookies").exists());
+    }
+
+    #[test]
     fn validated_scopes_are_normalized_and_remain_ephemeral() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = sample_session();
@@ -356,7 +390,7 @@ mod tests {
     #[test]
     fn cookie_atomic_write_replaces_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = cookie_file_path(dir.path(), "tester");
+        let path = cookie_file_path(dir.path(), "tester").unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"old").unwrap();
 
@@ -376,7 +410,7 @@ mod tests {
         session.set_auth_token("replacement-token");
         session.save_to_dir(dir.path()).unwrap();
 
-        let path = cookie_file_path(dir.path(), session.username());
+        let path = cookie_file_path(dir.path(), session.username()).unwrap();
         let backup =
             AuthSession::from_bytes("alice", &fs::read(path.with_extension("json.bak")).unwrap())
                 .unwrap();
@@ -398,7 +432,7 @@ mod tests {
         let session = sample_session();
         session.save_to_dir(dir.path()).unwrap();
 
-        let path = cookie_file_path(dir.path(), session.username());
+        let path = cookie_file_path(dir.path(), session.username()).unwrap();
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -412,7 +446,7 @@ mod tests {
         let session = sample_session();
         session.save_to_dir(dir.path()).unwrap();
 
-        let path = cookie_file_path(dir.path(), session.username());
+        let path = cookie_file_path(dir.path(), session.username()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         session.save_to_dir(dir.path()).unwrap();
 
@@ -431,7 +465,9 @@ mod tests {
         session.set_auth_token("replacement-token");
         session.save_to_dir(dir.path()).unwrap();
 
-        let path = cookie_file_path(dir.path(), session.username()).with_extension("json.bak");
+        let path = cookie_file_path(dir.path(), session.username())
+            .unwrap()
+            .with_extension("json.bak");
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -481,7 +517,7 @@ mod tests {
     #[test]
     fn corrupted_cookie_file_is_reported_without_fallback_data() {
         let dir = tempfile::tempdir().unwrap();
-        let path = cookie_file_path(dir.path(), "tester");
+        let path = cookie_file_path(dir.path(), "tester").unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"{\"auth-token\":").unwrap();
         assert!(matches!(

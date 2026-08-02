@@ -28,6 +28,11 @@ pub enum TwitchClientError {
         context: &'static str,
         failure: TwitchFailureClass,
     },
+    #[error("remote request failed for {context}: {failure:?}")]
+    RemoteRequest {
+        context: &'static str,
+        failure: TwitchFailureClass,
+    },
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("protocol response decode failed for {context}: {detail} ({shape})")]
@@ -80,7 +85,7 @@ impl TwitchClientError {
             Self::Http(error) if error.is_connect() || error.is_request() => {
                 TwitchFailureClass::ConnectionReset
             }
-            Self::PlaybackRequest { failure, .. } => *failure,
+            Self::PlaybackRequest { failure, .. } | Self::RemoteRequest { failure, .. } => *failure,
             _ => TwitchFailureClass::Other,
         }
     }

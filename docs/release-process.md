@@ -46,8 +46,9 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
    a clean-revision `scripts/measure-language-comparison.ps1` report when shared
    prediction/selection behavior or performance changed. Also require
    a successful Deep Quality run for the exact revision. Deep Quality must pass
-   bounded parser fuzzing and mutation, the ratcheted critical-crate branch
-   coverage floor, and the noise-tolerant replay comparison. Then push the
+   bounded parser fuzzing and mutation, the ratcheted 60% critical-core and
+   33.5% application branch-coverage floors, and the noise-tolerant replay
+   comparison. Then push the
    candidate commit to `main`. The multiarch workflow builds the three platform
    images, SBOM/provenance attestations, the manifest, and the immutable
    `sha-<40-character-commit>` tag.

@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_COOKIE_DOMAIN: &str = ".twitch.tv";
 pub const DEFAULT_COOKIE_PATH: &str = "/";
+const MAX_TWITCH_USERNAME_LENGTH: usize = 25;
 
 pub type CookieStore = BTreeMap<String, PersistedCookie>;
 
@@ -48,14 +50,109 @@ pub struct LoadedCookieStore {
 pub enum CookieStoreError {
     #[error("invalid cookie store: {0}")]
     InvalidStore(#[from] serde_json::Error),
+    #[error("invalid Twitch username for auth-session cookie path")]
+    InvalidUsername,
 }
 
-#[must_use]
-pub fn cookie_file_path(base_dir: impl AsRef<Path>, username: &str) -> PathBuf {
-    base_dir
+/// Normalize and validate the account login used by auth-session persistence.
+///
+/// The login contract trims surrounding whitespace, lowercases the login,
+/// accepts ASCII letters, digits, and underscores up to Twitch's 25-character
+/// maximum, and rejects the built-in placeholder.  Cookie paths add a
+/// platform-independent filename containment check so the normalized login
+/// remains one ordinary path component on both Unix and Windows.
+pub fn normalize_username(username: &str) -> Result<String, CookieStoreError> {
+    let trimmed = username.trim();
+    if !trimmed.is_ascii() {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+    if normalized == "your-twitch-username" {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+    if normalized.len() > MAX_TWITCH_USERNAME_LENGTH {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+    if !normalized
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+
+    let file_name = format!("{normalized}.json");
+    if !is_safe_cookie_file_name(&file_name, &normalized) {
+        return Err(CookieStoreError::InvalidUsername);
+    }
+
+    Ok(normalized)
+}
+
+pub fn cookie_file_path(
+    base_dir: impl AsRef<Path>,
+    username: &str,
+) -> Result<PathBuf, CookieStoreError> {
+    let username = normalize_username(username)?;
+    Ok(base_dir
         .as_ref()
         .join("cookies")
-        .join(format!("{username}.json"))
+        .join(format!("{username}.json")))
+}
+
+fn is_safe_cookie_file_name(file_name: &str, username: &str) -> bool {
+    // Rust's path parser is host-platform-specific. Explicitly reject Windows
+    // separator and prefix spellings so a value accepted by a Unix test cannot
+    // become a nested or drive-relative path when moved to Windows.
+    if file_name.contains('\\') {
+        return false;
+    }
+    if file_name.contains(':') {
+        return false;
+    }
+    if file_name.chars().any(char::is_control) {
+        return false;
+    }
+    if username.ends_with('.') {
+        return false;
+    }
+
+    let mut components = Path::new(file_name).components();
+    if !matches!(components.next(), Some(Component::Normal(component))
+        if component == OsStr::new(file_name))
+    {
+        return false;
+    }
+    if components.next().is_some() {
+        return false;
+    }
+
+    !is_windows_reserved_component(username)
+}
+
+fn is_windows_reserved_component(username: &str) -> bool {
+    // Windows strips trailing dots/spaces and treats device names as reserved
+    // even when an extension is present (for example, CON.json).  Reject the
+    // collision forms on every platform so a config can move safely between
+    // Unix and Windows without changing its cookie identity.
+    let candidate = username.trim_end_matches(['.', ' ']);
+    let stem = candidate.split('.').next().unwrap_or_default();
+    let stem = stem.to_ascii_lowercase();
+    if matches!(stem.as_str(), "con" | "prn" | "aux" | "nul") {
+        return true;
+    }
+
+    for prefix in ["com", "lpt"] {
+        let Some(suffix) = stem.strip_prefix(prefix) else {
+            continue;
+        };
+        if suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_digit() {
+            return suffix.as_bytes()[0] != b'0';
+        }
+    }
+    false
 }
 
 #[must_use]
@@ -323,10 +420,124 @@ mod tests {
     fn cookie_paths_are_scoped_to_username() {
         let base = Path::new("C:/work");
         assert_eq!(
-            cookie_file_path(base, "alice"),
+            cookie_file_path(base, "alice").unwrap(),
             PathBuf::from("C:/work/cookies/alice.json")
         );
         assert_eq!(cookies_dir(base), PathBuf::from("C:/work/cookies"));
+    }
+
+    #[test]
+    fn cookie_paths_keep_the_existing_username_normalization() {
+        let base = Path::new("C:/work");
+        assert_eq!(normalize_username(" Alice ").unwrap(), "alice");
+        assert_eq!(
+            cookie_file_path(base, " Alice ").unwrap(),
+            PathBuf::from("C:/work/cookies/alice.json")
+        );
+        assert!(matches!(
+            normalize_username("your-twitch-username"),
+            Err(CookieStoreError::InvalidUsername)
+        ));
+        assert!(matches!(
+            normalize_username("   "),
+            Err(CookieStoreError::InvalidUsername)
+        ));
+    }
+
+    #[test]
+    fn cookie_file_component_guard_rejects_each_escape_class() {
+        for (file_name, username) in [
+            ("", "alice"),
+            (".", "alice"),
+            ("..", "alice"),
+            ("alice/bob.json", "alice"),
+            ("alice\\bob.json", "alice"),
+            ("C:alice.json", "alice"),
+            ("alice\0.json", "alice"),
+            ("alice.json", "alice."),
+        ] {
+            assert!(
+                !is_safe_cookie_file_name(file_name, username),
+                "accepted unsafe cookie component {file_name:?}"
+            );
+        }
+        assert!(is_safe_cookie_file_name("alice.json", "alice"));
+    }
+
+    #[test]
+    fn username_contract_accepts_short_logins_and_twenty_five_characters() {
+        assert_eq!(normalize_username("A").unwrap(), "a");
+        let longest = "a".repeat(MAX_TWITCH_USERNAME_LENGTH);
+        assert_eq!(normalize_username(&longest).unwrap(), longest);
+        assert!(matches!(
+            normalize_username(&"a".repeat(MAX_TWITCH_USERNAME_LENGTH + 1)),
+            Err(CookieStoreError::InvalidUsername)
+        ));
+    }
+
+    #[test]
+    fn username_contract_rejects_non_ascii_and_punctuation() {
+        for username in [
+            "alice bob",
+            "alice-bob",
+            "alice.name",
+            "élise",
+            "alice!",
+            "a/b",
+        ] {
+            assert!(
+                matches!(
+                    normalize_username(username),
+                    Err(CookieStoreError::InvalidUsername)
+                ),
+                "accepted invalid login {username:?}"
+            );
+        }
+        let kelvin = char::from_u32(0x212A).map_or_else(String::new, |value| value.to_string());
+        assert!(matches!(
+            normalize_username(&kelvin),
+            Err(CookieStoreError::InvalidUsername)
+        ));
+    }
+
+    #[test]
+    fn cookie_paths_reject_unix_and_windows_escape_forms() {
+        for username in [
+            "../alice",
+            "..\\alice",
+            "/tmp",
+            "\\\\server\\share",
+            "C:alice",
+            "C:\\alice",
+            "alice\0",
+            "alice.",
+        ] {
+            assert!(
+                matches!(
+                    cookie_file_path("data", username),
+                    Err(CookieStoreError::InvalidUsername)
+                ),
+                "accepted unsafe username {username:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_paths_reject_windows_device_name_collisions() {
+        for username in [
+            "con", "CON.txt", "prn", "aux", "nul", "com1", "com9", "lpt1", "LPT9",
+        ] {
+            assert!(
+                matches!(
+                    cookie_file_path("data", username),
+                    Err(CookieStoreError::InvalidUsername)
+                ),
+                "accepted reserved username {username:?}"
+            );
+        }
+
+        assert!(cookie_file_path("data", "com0").is_ok());
+        assert!(cookie_file_path("data", "com10").is_ok());
     }
 
     #[test]

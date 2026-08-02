@@ -1,6 +1,9 @@
-use std::sync::Mutex;
+use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use time::format_description::well_known::Rfc2822;
@@ -33,6 +36,7 @@ use crate::{operations, CLIENT_ID};
 const MAX_READ_ATTEMPTS: usize = 3;
 const READ_RETRY_BASE: Duration = Duration::from_millis(250);
 const MAX_READ_RETRY_DELAY: Duration = Duration::from_secs(30);
+const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Typed Twitch client with bounded read retries and non-replayed mutations.
 ///
@@ -41,6 +45,11 @@ const MAX_READ_RETRY_DELAY: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub struct TwitchClient {
     client: reqwest::Client,
+    /// Client for URLs supplied by Twitch documents. Its resolver validates
+    /// every address returned by DNS and its redirect policy is disabled so a
+    /// response cannot silently move a credential-bearing request elsewhere.
+    remote_client: Result<reqwest::Client, ()>,
+    allow_loopback_remote_endpoints: bool,
     auth_token: String,
     default_cookie_header: Option<String>,
     client_session: String,
@@ -64,6 +73,7 @@ impl TwitchClient {
     ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self::with_client(client, auth_token, user_agent))
     }
@@ -119,8 +129,12 @@ impl TwitchClient {
         default_cookie_header: Option<String>,
         endpoints: TwitchEndpoints,
     ) -> Self {
+        let allow_loopback_remote_endpoints = endpoints_include_loopback_http(&endpoints);
+        let remote_client = hardened_remote_client(allow_loopback_remote_endpoints);
         Self {
             client,
+            remote_client,
+            allow_loopback_remote_endpoints,
             auth_token: auth_token.into().trim().to_string(),
             default_cookie_header: default_cookie_header
                 .map(|value| value.trim().to_string())
@@ -208,12 +222,19 @@ impl TwitchClient {
         &self,
         page_url: &str,
     ) -> Result<String, TwitchClientError> {
+        let parsed_page_url = reqwest::Url::parse(page_url)
+            .map_err(|_| TwitchClientError::InvalidField("settings page URL"))?;
+        validate_remote_endpoint(
+            &parsed_page_url,
+            "settings page URL",
+            self.allow_loopback_remote_endpoints,
+        )?;
+        let remote_client = self.remote_client("settings page")?;
         let cookie = self.request_cookie_header(page_url, None);
         let response = self
             .send_read_request(
                 || {
-                    let mut request = self
-                        .client
+                    let mut request = remote_client
                         .get(page_url)
                         .header("User-Agent", self.user_agent());
                     if let Some(cookie) = cookie.as_deref() {
@@ -234,18 +255,27 @@ impl TwitchClient {
     }
 
     pub async fn fetch_spade_url(&self, channel_login: &str) -> Result<String, TwitchClientError> {
+        let channel_login = normalize_channel_login(channel_login)
+            .ok_or(TwitchClientError::InvalidField("channel_login"))?;
         let page_url = format!(
             "{}/{}",
             self.endpoints.twitch_url.trim_end_matches('/'),
-            channel_login.trim().to_lowercase()
+            channel_login
         );
         let settings_url = self.fetch_settings_script_url(&page_url).await?;
+        let parsed_settings_url = reqwest::Url::parse(&settings_url)
+            .map_err(|_| TwitchClientError::InvalidField("settings script URL"))?;
+        validate_remote_endpoint(
+            &parsed_settings_url,
+            "settings script URL",
+            self.allow_loopback_remote_endpoints,
+        )?;
+        let remote_client = self.remote_client("settings script")?;
         let cookie = self.request_cookie_header(&settings_url, None);
         let response = self
             .send_read_request(
                 || {
-                    let mut request = self
-                        .client
+                    let mut request = remote_client
                         .get(&settings_url)
                         .header("User-Agent", self.user_agent());
                     if let Some(cookie) = cookie.as_deref() {
@@ -263,12 +293,12 @@ impl TwitchClient {
             });
         }
         let spade_url = extract_spade_url(&response.text().await?)?;
-        // The settings script is fetched over TLS from a pinned Twitch host, but
-        // the spade value inside it is unconstrained text and the payload we post
-        // to it carries account identifiers. Hold it to the same bar as playback.
+        // The settings script is fetched over TLS through the validated resolver,
+        // but the spade value inside it is still unconstrained text and the
+        // payload carries account identifiers. Hold it to the same bar as playback.
         let parsed = reqwest::Url::parse(&spade_url)
             .map_err(|_| TwitchClientError::InvalidField("spade_url"))?;
-        validate_remote_endpoint(&parsed, "spade_url")?;
+        validate_remote_endpoint(&parsed, "spade_url", self.allow_loopback_remote_endpoints)?;
         Ok(spade_url)
     }
 
@@ -352,14 +382,8 @@ impl TwitchClient {
     }
 
     pub async fn prime_live_playback(&self, channel_login: &str) -> Result<(), TwitchClientError> {
-        let channel_login = channel_login.trim().to_ascii_lowercase();
-        if channel_login.is_empty()
-            || !channel_login
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err(TwitchClientError::InvalidField("channel_login"));
-        }
+        let channel_login = normalize_channel_login(channel_login)
+            .ok_or(TwitchClientError::InvalidField("channel_login"))?;
 
         let response: PlaybackAccessTokenData = self
             .post_gql_typed(&operations::playback_access_token(&channel_login))
@@ -384,10 +408,14 @@ impl TwitchClient {
             .query_pairs_mut()
             .append_pair("sig", &token.signature)
             .append_pair("token", &token.value);
-        validate_remote_endpoint(&master_url, "playback_url")?;
+        validate_remote_endpoint(
+            &master_url,
+            "playback_url",
+            self.allow_loopback_remote_endpoints,
+        )?;
+        let remote_client = self.remote_client("master playlist")?;
 
-        let master = self
-            .client
+        let master = remote_client
             .get(master_url)
             .header("User-Agent", self.user_agent())
             .send()
@@ -405,10 +433,13 @@ impl TwitchClient {
             .await
             .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
         let variant_url = lowest_bandwidth_variant_url(&master_url, &master_body)?;
-        validate_remote_endpoint(&variant_url, "master playlist")?;
+        validate_remote_endpoint(
+            &variant_url,
+            "master playlist",
+            self.allow_loopback_remote_endpoints,
+        )?;
 
-        let variant = self
-            .client
+        let variant = remote_client
             .get(variant_url)
             .header("User-Agent", self.user_agent())
             .send()
@@ -426,10 +457,13 @@ impl TwitchClient {
             .await
             .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
         let segment_url = media_segment_url(&variant_url, &variant_body)?;
-        validate_remote_endpoint(&segment_url, "media playlist")?;
+        validate_remote_endpoint(
+            &segment_url,
+            "media playlist",
+            self.allow_loopback_remote_endpoints,
+        )?;
 
-        let segment = self
-            .client
+        let segment = remote_client
             .head(segment_url)
             .header("User-Agent", self.user_agent())
             .send()
@@ -672,14 +706,22 @@ impl TwitchClient {
         stream: &Stream,
     ) -> Result<StatusCode, TwitchClientError> {
         let request = minute_watched_request(self.user_agent(), spade_url, stream)?;
-        let response = self
-            .client
-            .post(request.url)
+        let parsed_url = reqwest::Url::parse(&request.url)
+            .map_err(|_| TwitchClientError::InvalidField("spade_url"))?;
+        validate_remote_endpoint(
+            &parsed_url,
+            "spade_url",
+            self.allow_loopback_remote_endpoints,
+        )?;
+        let remote_client = self.remote_client("spade")?;
+        let response = remote_client
+            .post(parsed_url)
             .header("Content-Type", request.content_type)
             .header("User-Agent", request.user_agent)
             .body(request.body)
             .send()
-            .await?;
+            .await
+            .map_err(|error| sanitize_playback_error(&error, "spade"))?;
         Ok(response.status())
     }
 
@@ -834,7 +876,10 @@ impl TwitchClient {
                 }
                 Err(error) => {
                     if !is_retryable_read_error(&error) || attempt + 1 == MAX_READ_ATTEMPTS {
-                        return Err(TwitchClientError::Http(error));
+                        // Remote-document URLs can contain signed query data supplied by
+                        // Twitch. Preserve the failure class without retaining the
+                        // reqwest error, whose source chain can include the full URL.
+                        return Err(sanitize_remote_error(&error, context));
                     }
                     tokio::time::sleep(read_backoff(attempt)).await;
                 }
@@ -851,6 +896,15 @@ impl TwitchClient {
             .then_some(self.default_cookie_header.as_deref())
             .flatten();
         merge_cookie_headers(default_cookie, cookie)
+    }
+
+    fn remote_client(&self, context: &'static str) -> Result<&reqwest::Client, TwitchClientError> {
+        self.remote_client
+            .as_ref()
+            .map_err(|()| TwitchClientError::PlaybackRequest {
+                context,
+                failure: crate::types::TwitchFailureClass::Other,
+            })
     }
 }
 
@@ -886,38 +940,246 @@ fn operation_is_read_only(operation_name: &str) -> bool {
 }
 
 /// Guards every request target that Twitch hands us inside a document rather
-/// than one we compile in: playback playlists/segments and the spade endpoint.
-/// Loopback HTTP stays allowed so tests can serve these locally.
+/// than one we compile in: settings scripts, playback playlists/segments, and
+/// the spade endpoint. DNS addresses are checked again by
+/// [`ValidatedDnsResolver`] immediately before a connection is opened.
+/// Loopback HTTP stays allowed only for an explicit loopback IP literal so
+/// tests can serve these locally without turning a public hostname into an
+/// SSRF escape hatch.
 pub(crate) fn validate_remote_endpoint(
     url: &reqwest::Url,
     field: &'static str,
+    allow_loopback_http: bool,
 ) -> Result<(), TwitchClientError> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(TwitchClientError::InvalidField(field));
+    }
     let host = url
         .host_str()
         .ok_or(TwitchClientError::InvalidField(field))?;
-    let address = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>();
-    let is_loopback = address.as_ref().is_ok_and(std::net::IpAddr::is_loopback);
-    let is_public_domain = address.is_err()
-        && !host.eq_ignore_ascii_case("localhost")
-        && !host.to_ascii_lowercase().ends_with(".local");
-    if (url.scheme() == "https" && is_public_domain) || (url.scheme() == "http" && is_loopback) {
-        return Ok(());
+    let address = parse_ip_literal(host);
+    let is_loopback_literal = address.as_ref().is_ok_and(IpAddr::is_loopback);
+    let is_hostname = address.is_err();
+    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+    let is_local_hostname = normalized_host
+        .rsplit_once('.')
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("local"));
+
+    let accepted = match url.scheme() {
+        "https" if is_hostname => {
+            !normalized_host.is_empty() && normalized_host != "localhost" && !is_local_hostname
+        }
+        "https" => address.is_ok_and(is_public_ip),
+        "http" => allow_loopback_http && is_loopback_literal,
+        _ => false,
+    };
+
+    accepted
+        .then_some(())
+        .ok_or(TwitchClientError::InvalidField(field))
+}
+
+/// Checks the complete result of one DNS lookup. A hostname is accepted only
+/// when every address is public; accepting the first public address would let
+/// a mixed DNS response (or a rebinding response) reach a private destination.
+pub(crate) fn validate_resolved_addresses(
+    host: &str,
+    addresses: &[SocketAddr],
+    allow_loopback_http: bool,
+) -> Result<(), DnsPolicyError> {
+    if addresses.is_empty() {
+        return Err(DnsPolicyError::NoAddresses);
     }
-    Err(TwitchClientError::InvalidField(field))
+
+    let loopback_literal = parse_ip_literal(host).is_ok_and(|address| address.is_loopback());
+    if allow_loopback_http && loopback_literal {
+        return addresses
+            .iter()
+            .all(|address| address.ip().is_loopback())
+            .then_some(())
+            .ok_or(DnsPolicyError::LoopbackOnly);
+    }
+
+    addresses
+        .iter()
+        .all(|address| is_public_ip(address.ip()))
+        .then_some(())
+        .ok_or(DnsPolicyError::NonPublicAddress)
+}
+
+/// A reqwest resolver that validates and then pins the exact address set
+/// returned for this connection. Hyper uses the returned iterator directly,
+/// so a second resolution cannot silently bypass the policy between checking
+/// and connecting.
+#[derive(Debug, Default)]
+pub(crate) struct ValidatedDnsResolver {
+    pub(crate) allow_loopback_http: bool,
+}
+
+impl Resolve for ValidatedDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().trim_end_matches('.').to_owned();
+        let allow_loopback_http = self.allow_loopback_http;
+        Box::pin(async move {
+            let addresses = if let Ok(address) = parse_ip_literal(&host) {
+                vec![SocketAddr::new(address, 0)]
+            } else {
+                tokio::net::lookup_host((host.as_str(), 0))
+                    .await
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+                    .collect::<Vec<_>>()
+            };
+            validate_resolved_addresses(&host, &addresses, allow_loopback_http)
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            let addrs: Addrs = Box::new(addresses.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DnsPolicyError {
+    NoAddresses,
+    LoopbackOnly,
+    NonPublicAddress,
+}
+
+impl fmt::Display for DnsPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::NoAddresses => "DNS returned no addresses",
+            Self::LoopbackOnly => "loopback test endpoint resolved to a non-loopback address",
+            Self::NonPublicAddress => "remote endpoint resolved to a non-public address",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for DnsPolicyError {}
+
+fn hardened_remote_client(allow_loopback_http: bool) -> Result<reqwest::Client, ()> {
+    reqwest::Client::builder()
+        .timeout(REMOTE_REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(Arc::new(ValidatedDnsResolver {
+            allow_loopback_http,
+        }))
+        .build()
+        .map_err(|_| ())
+}
+
+pub(crate) fn endpoints_include_loopback_http(endpoints: &TwitchEndpoints) -> bool {
+    [
+        endpoints.twitch_url.as_str(),
+        endpoints.gql_url.as_str(),
+        endpoints.playback_url.as_str(),
+    ]
+    .into_iter()
+    .filter_map(|value| reqwest::Url::parse(value).ok())
+    .any(|url| {
+        url.scheme() == "http"
+            && url
+                .host_str()
+                .and_then(|host| parse_ip_literal(host).ok())
+                .is_some_and(|address| address.is_loopback())
+    })
+}
+
+fn parse_ip_literal(host: &str) -> Result<IpAddr, std::net::AddrParseError> {
+    host.trim_start_matches('[').trim_end_matches(']').parse()
+}
+
+pub(crate) fn normalize_channel_login(channel_login: &str) -> Option<String> {
+    let channel_login = channel_login.trim().to_ascii_lowercase();
+    (!channel_login.is_empty()
+        && channel_login
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then_some(channel_login)
+}
+
+fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
+}
+
+pub(crate) fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    let first = octets[0];
+    let second = octets[1];
+    let third = octets[2];
+    let is_documentation = (first == 192 && second == 0 && (third == 0 || third == 2))
+        || (first == 198 && second == 51 && third == 100)
+        || (first == 203 && second == 0 && third == 113);
+    let is_benchmarking = first == 198 && (18..=19).contains(&second);
+    let is_shared = first == 100 && (64..=127).contains(&second);
+    let is_deprecated_6to4_relay = first == 192 && second == 88 && third == 99;
+    let is_reserved = first >= 240;
+
+    first != 0
+        && !address.is_private()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_unspecified()
+        && !address.is_broadcast()
+        && !address.is_multicast()
+        && !is_documentation
+        && !is_benchmarking
+        && !is_shared
+        && !is_deprecated_6to4_relay
+        && !is_reserved
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    let first = segments[0];
+    let second = segments[1];
+    let is_global_unicast = (0x2000..=0x3fff).contains(&first);
+    // IANA marks 2001::/23 non-global except for narrow protocol-specific
+    // allocations. This endpoint policy does not admit protocol-specific
+    // anycast/tunnel ranges, so deny the parent block rather than maintaining a
+    // permissive exception list that can age into an SSRF bypass.
+    let is_ietf_protocol_assignment = first == 0x2001 && second <= 0x01ff;
+    let is_documentation =
+        (first == 0x2001 && second == 0x0db8) || (first == 0x3fff && (second & 0xf000) == 0);
+    let is_6to4 = first == 0x2002;
+
+    is_global_unicast
+        && !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_unique_local()
+        && !address.is_unicast_link_local()
+        && !address.is_multicast()
+        && !is_ietf_protocol_assignment
+        && !is_documentation
+        && !is_6to4
 }
 
 fn sanitize_playback_error(error: &reqwest::Error, context: &'static str) -> TwitchClientError {
-    let failure = if error.is_timeout() {
+    TwitchClientError::PlaybackRequest {
+        context,
+        failure: request_failure_class(error),
+    }
+}
+
+fn sanitize_remote_error(error: &reqwest::Error, context: &'static str) -> TwitchClientError {
+    TwitchClientError::RemoteRequest {
+        context,
+        failure: request_failure_class(error),
+    }
+}
+
+fn request_failure_class(error: &reqwest::Error) -> crate::types::TwitchFailureClass {
+    if error.is_timeout() {
         crate::types::TwitchFailureClass::Timeout
     } else if error.is_connect() || error.is_request() {
         crate::types::TwitchFailureClass::ConnectionReset
     } else {
         crate::types::TwitchFailureClass::Other
-    };
-    TwitchClientError::PlaybackRequest { context, failure }
+    }
 }
 
 fn is_retryable_read_error(error: &reqwest::Error) -> bool {

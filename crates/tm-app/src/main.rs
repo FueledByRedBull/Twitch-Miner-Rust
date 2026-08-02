@@ -38,7 +38,7 @@ mod watching;
 
 use bootstrap::{
     build_http_client, has_override, load_config_with_fallback, load_or_login_session,
-    log_timezone_validation, prepare_work_dir, preview_config_with_fallback,
+    log_timezone_validation, prepare_work_dir, preview_config_with_fallback, validate_app_config,
     validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
 };
 use drops::claim_startup_drops_if_enabled;
@@ -136,7 +136,7 @@ fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
 
 fn check_config(path: &std::path::Path, json: bool) -> Result<()> {
     let result = tm_config::preview_config(path).and_then(|preview| {
-        tm_config::validate_config(&preview.config)?;
+        validate_app_config(&preview.config)?;
         Ok(preview)
     });
     let preview = match result {

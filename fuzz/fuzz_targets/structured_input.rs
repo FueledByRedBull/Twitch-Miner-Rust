@@ -4,6 +4,9 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let _ = tm_auth::decode_cookie_store(data);
+    if let Ok(username) = std::str::from_utf8(data) {
+        let _ = tm_auth::normalize_username(username);
+    }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
         return;
     };
