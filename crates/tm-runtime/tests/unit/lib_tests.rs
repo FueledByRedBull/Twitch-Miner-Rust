@@ -176,14 +176,14 @@ fn session_summary_hides_points_in_privacy_mode() {
         created_at: ts(1),
         window_seconds: 30.0,
         outcomes: vec![PredictionOutcome {
-            id: String::from("private-outcome-id"),
+            id: "private-outcome-id".into(),
             title: String::from("Private outcome"),
             color: String::from("blue"),
             ..PredictionOutcome::default()
         }],
         decision: PredictionDecision {
             choice: Some(0),
-            outcome_id: String::from("private-outcome-id"),
+            outcome_id: "private-outcome-id".into(),
             amount: 100,
         },
         bet_placed: true,
@@ -1032,13 +1032,13 @@ fn unknown_channel_winner_does_not_fabricate_a_loss() {
         window_seconds: 30.0,
         outcomes: vec![
             PredictionOutcome {
-                id: String::from("a"),
+                id: "a".into(),
                 title: String::from("Yes"),
                 total_points: 100,
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("b"),
+                id: "b".into(),
                 title: String::from("No"),
                 total_points: 100,
                 ..PredictionOutcome::default()
@@ -1046,7 +1046,7 @@ fn unknown_channel_winner_does_not_fabricate_a_loss() {
         ],
         decision: PredictionDecision {
             choice: Some(0),
-            outcome_id: String::from("a"),
+            outcome_id: "a".into(),
             amount: 100,
         },
         bet_placed: true,
@@ -1095,13 +1095,13 @@ fn partial_settlement_update_keeps_connection_flow_for_viewer_result() {
         window_seconds: 30.0,
         outcomes: vec![
             PredictionOutcome {
-                id: String::from("a"),
+                id: "a".into(),
                 title: String::from("Yes"),
                 total_points: 100,
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("b"),
+                id: "b".into(),
                 title: String::from("No"),
                 total_points: 100,
                 ..PredictionOutcome::default()
@@ -1109,7 +1109,7 @@ fn partial_settlement_update_keeps_connection_flow_for_viewer_result() {
         ],
         decision: PredictionDecision {
             choice: Some(0),
-            outcome_id: String::from("a"),
+            outcome_id: "a".into(),
             amount: 100,
         },
         bet_placed: true,
@@ -1183,14 +1183,14 @@ fn partial_cancellation_update_refunds_placed_bet() {
         created_at: ts(1),
         window_seconds: 30.0,
         outcomes: vec![PredictionOutcome {
-            id: String::from("a"),
+            id: "a".into(),
             title: String::from("Yes"),
             total_points: 100,
             ..PredictionOutcome::default()
         }],
         decision: PredictionDecision {
             choice: Some(0),
-            outcome_id: String::from("a"),
+            outcome_id: "a".into(),
             amount: 100,
         },
         bet_placed: true,
@@ -1235,13 +1235,13 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
         window_seconds: 30.0,
         outcomes: vec![
             PredictionOutcome {
-                id: String::from("a"),
+                id: "a".into(),
                 title: String::from("Yes"),
                 total_points: 100,
                 ..PredictionOutcome::default()
             },
             PredictionOutcome {
-                id: String::from("b"),
+                id: "b".into(),
                 title: String::from("No"),
                 total_points: 100,
                 ..PredictionOutcome::default()
@@ -1249,7 +1249,7 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
         ],
         decision: PredictionDecision {
             choice: Some(0),
-            outcome_id: String::from("a"),
+            outcome_id: "a".into(),
             amount: 100,
         },
         bet_placed: true,

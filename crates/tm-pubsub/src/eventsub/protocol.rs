@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -103,7 +104,10 @@ struct PredictionEventWire {
 
 #[derive(Debug, Deserialize)]
 struct PredictionOutcomeWire {
-    id: String,
+    // Deserialize directly into the domain's shared immutable ID. Keeping a
+    // temporary `String` here would allocate and copy every outcome ID again
+    // when constructing `PredictionOutcome` below.
+    id: Arc<str>,
     title: String,
     color: String,
     users: i64,
@@ -312,7 +316,7 @@ fn prediction_event_from_wire(
             .outcomes
             .iter()
             .map(|outcome| PredictionOutcome {
-                id: outcome.id.clone(),
+                id: Arc::clone(&outcome.id),
                 title: outcome.title.clone(),
                 color: outcome.color.clone(),
                 total_users: outcome.users,
@@ -383,10 +387,12 @@ fn validate_prediction_wire(
             ));
         }
         if status == "RESOLVED"
-            && !value
-                .winning_outcome_id
-                .as_ref()
-                .is_some_and(|winner| value.outcomes.iter().any(|outcome| outcome.id == *winner))
+            && !value.winning_outcome_id.as_ref().is_some_and(|winner| {
+                value
+                    .outcomes
+                    .iter()
+                    .any(|outcome| outcome.id.as_ref() == winner)
+            })
         {
             return Err(EventSubError::Protocol(
                 "resolved prediction winner is missing or unknown",

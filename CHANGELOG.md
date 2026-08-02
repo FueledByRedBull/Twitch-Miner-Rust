@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Validates the Twitch login before auth-session path I/O, keeps valid cookie
+  filenames unchanged, and rejects traversal, separators, control characters,
+  overlong/non-ASCII logins, and Windows device-name collisions. The cookie
+  JSON formats and device-login migration path are unchanged.
+- Routes Twitch-supplied settings, HLS, segment, and Spade URLs through one
+  persistent no-redirect/no-proxy client whose resolver rejects and pins mixed
+  or non-public IPv4/IPv6 answers. Loopback HTTP is available only when code
+  explicitly injects a loopback endpoint for local tests; the app's production
+  construction path cannot be redirected to localhost.
+- Shares immutable prediction outcome IDs with owned actor decisions through
+  `Arc<str>`, removing the per-decision string allocation while preserving
+  exact arithmetic, actor ownership, and string-identical JSON/wire fields.
+  These crates are internal and unpublished; downstream serialized data does
+  not change.
+- Extends branch coverage, bounded mutation, and structured-input fuzzing to
+  the new auth, endpoint-policy, and prediction-decision paths.
 - Logs the sanitized concrete `EventSub` failure beside its stable error class
   and classifies a missed keepalive deadline as `keepalive-timeout` instead of
   conflating normal liveness recovery with a rejected protocol payload.
@@ -39,7 +55,8 @@
 - Holds the spade endpoint to the same origin rules as playback. The URL is
   extracted from an unconstrained field inside Twitch's settings script and the
   minute-watched payload carries account identifiers, so it must now parse as a
-  public HTTPS origin (or loopback HTTP for tests) before any request is sent.
+  public HTTPS origin (or an explicitly injected loopback HTTP test endpoint)
+  before any request is sent.
 - Ignores `EventSub` message types and subscription types this build does not
   model, rather than treating them as protocol violations. An additive Twitch
   change previously dropped the socket, and because each reconnect re-derives

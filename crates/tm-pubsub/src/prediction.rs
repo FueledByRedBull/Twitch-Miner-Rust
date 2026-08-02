@@ -123,7 +123,7 @@ fn parse_prediction_outcome(raw: &Value) -> Result<PredictionOutcome, &'static s
     let total_points = nonnegative_alias(raw, "total_points", "channel_points")
         .ok_or("prediction outcome points are missing or invalid")?;
     Ok(PredictionOutcome {
-        id: required_text(raw, "id", "prediction outcome id is missing")?.to_string(),
+        id: required_text(raw, "id", "prediction outcome id is missing")?.into(),
         title: required_text(raw, "title", "prediction outcome title is missing")?.to_string(),
         color: required_text(raw, "color", "prediction outcome color is missing")?.to_string(),
         total_users,

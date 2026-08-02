@@ -16,7 +16,8 @@ mod tests {
         env_has_value, has_override, load_config_with_fallback_using,
         load_or_login_session_with_auth_client, load_or_login_session_with_auth_client_and_retry,
         normalized_username, preview_config_with_fallback, should_fallback_to_user_config,
-        validate_timezone_override, TimezoneValidation, READ_ONLY_FILE_SYSTEM_ERROR,
+        validate_app_config, validate_timezone_override, TimezoneValidation,
+        READ_ONLY_FILE_SYSTEM_ERROR,
     };
     use crate::context::{
         collect_context_refresh_results, record_context_refresh_health, refresh_snapshot_streamers,
@@ -633,7 +634,26 @@ mod tests {
     #[test]
     fn normalized_username_rejects_default_placeholder() {
         assert!(normalized_username("your-twitch-username").is_err());
+        assert!(normalized_username("../alice").is_err());
+        assert!(normalized_username("alice-bob").is_err());
         assert_eq!(normalized_username(" Alice ").unwrap(), "alice");
+    }
+
+    #[test]
+    fn app_config_validation_matches_startup_username_rules() {
+        for username in ["alice-bob", "../alice", "CON", "a:b", "álîçé"] {
+            let config = ConfigFile {
+                username: username.to_string(),
+                ..ConfigFile::default()
+            };
+            assert!(validate_app_config(&config).is_err(), "accepted {username}");
+        }
+
+        let config = ConfigFile {
+            username: String::from(" Alice_123 "),
+            ..ConfigFile::default()
+        };
+        assert!(validate_app_config(&config).is_ok());
     }
 
     #[test]
@@ -2450,7 +2470,7 @@ mod tests {
                 created_at: ts(0),
                 window_seconds: 30.0,
                 outcomes: vec![PredictionOutcome {
-                    id: String::from("a"),
+                    id: "a".into(),
                     title: String::from("Alpha"),
                     color: String::from("blue"),
                     ..PredictionOutcome::default()
@@ -2469,7 +2489,7 @@ mod tests {
                 "event-1",
                 PredictionDecision {
                     choice: Some(0),
-                    outcome_id: String::from("a"),
+                    outcome_id: "a".into(),
                     amount: 250,
                 },
                 false,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::client::validate_remote_endpoint;
+use crate::client::{validate_remote_endpoint, validate_resolved_addresses};
 use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
 use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
 use crate::responses::{
@@ -7,9 +7,11 @@ use crate::responses::{
     channel_points_context_from_typed, inventory_snapshot_from_typed, recent_clips_from_typed,
     user_contributions_from_typed, watch_streak_milestone_from_typed,
 };
+use reqwest::dns::Resolve;
 use reqwest::StatusCode;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -46,26 +48,112 @@ fn remote_document_endpoints_require_public_https_or_loopback_http() {
     for accepted in [
         "https://spade.example/submit",
         "https://usher.ttvnw.net/playlist.m3u8",
-        "http://127.0.0.1:8080/test",
-        "http://[::1]:8080/test",
     ] {
         let url = reqwest::Url::parse(accepted).unwrap();
-        assert!(validate_remote_endpoint(&url, "test_url").is_ok());
+        assert!(validate_remote_endpoint(&url, "test_url", false).is_ok());
+    }
+
+    for loopback in ["http://127.0.0.1:8080/test", "http://[::1]:8080/test"] {
+        let url = reqwest::Url::parse(loopback).unwrap();
+        assert!(validate_remote_endpoint(&url, "test_url", true).is_ok());
+        assert!(validate_remote_endpoint(&url, "test_url", false).is_err());
     }
 
     for rejected in [
         "http://spade.example/submit",
         "http://localhost:8080/test",
         "http://miner.local/test",
+        "https://user:password@spade.example/submit",
         "https://192.168.1.10/test",
         "ftp://spade.example/test",
     ] {
         let url = reqwest::Url::parse(rejected).unwrap();
         assert!(matches!(
-            validate_remote_endpoint(&url, "test_url"),
+            validate_remote_endpoint(&url, "test_url", false),
             Err(TwitchClientError::InvalidField("test_url"))
         ));
     }
+}
+
+#[test]
+fn resolved_remote_endpoints_reject_private_mixed_and_reserved_addresses() {
+    let public = SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 443);
+    let public_v6 = SocketAddr::new(
+        "2001:4860:4860::8888".parse::<Ipv6Addr>().unwrap().into(),
+        443,
+    );
+    assert!(validate_resolved_addresses("cdn.example", &[public], false).is_ok());
+    assert!(validate_resolved_addresses("cdn.example", &[public_v6], false).is_ok());
+    assert!(validate_resolved_addresses(
+        "cdn.example",
+        &[SocketAddr::new(Ipv4Addr::new(192, 0, 42, 1).into(), 443)],
+        false,
+    )
+    .is_ok());
+    assert!(validate_resolved_addresses(
+        "cdn.example",
+        &[SocketAddr::new(
+            "2001:200::1".parse::<Ipv6Addr>().unwrap().into(),
+            443,
+        )],
+        false,
+    )
+    .is_ok());
+
+    let private = SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 443);
+    for address in [
+        private,
+        SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 443),
+        SocketAddr::new(Ipv4Addr::new(169, 254, 1, 1).into(), 443),
+        SocketAddr::new(Ipv4Addr::new(192, 0, 2, 1).into(), 443),
+        SocketAddr::new(Ipv4Addr::new(192, 88, 99, 1).into(), 443),
+        SocketAddr::new("fd00::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("2001::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("2001:1ff::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("2001:db8::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("2001:10::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("2001:20::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("2002:0808:0808::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("3fff::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+        SocketAddr::new("ff02::1".parse::<Ipv6Addr>().unwrap().into(), 443),
+    ] {
+        assert!(validate_resolved_addresses("cdn.example", &[address], false).is_err());
+    }
+
+    assert!(validate_resolved_addresses("cdn.example", &[public, private], false).is_err());
+    assert!(validate_resolved_addresses("cdn.example", &[], false).is_err());
+}
+
+#[tokio::test]
+async fn validated_resolver_pins_and_validates_each_resolution_result() {
+    let resolver = crate::client::ValidatedDnsResolver {
+        allow_loopback_http: true,
+    };
+    let name = reqwest::dns::Name::from_str("127.0.0.1").unwrap();
+    let addresses = (resolver.resolve(name).await.unwrap()).collect::<Vec<_>>();
+    assert_eq!(
+        addresses,
+        vec![SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)]
+    );
+
+    // A later DNS answer is evaluated independently; it cannot inherit the
+    // first answer's trust decision (the deterministic rebinding model).
+    let public = SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 443);
+    let private = SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 443);
+    assert!(validate_resolved_addresses("cdn.example", &[public], false).is_ok());
+    assert!(validate_resolved_addresses("cdn.example", &[private], false).is_err());
+}
+
+#[test]
+fn loopback_resolution_is_allowed_only_for_loopback_literals() {
+    let loopback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080);
+    let loopback_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 8080);
+    let public = SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 8080);
+    assert!(validate_resolved_addresses("127.0.0.1", &[loopback], true).is_ok());
+    assert!(validate_resolved_addresses("[::1]", &[loopback_v6], true).is_ok());
+    assert!(validate_resolved_addresses("127.0.0.1", &[loopback], false).is_err());
+    assert!(validate_resolved_addresses("127.0.0.1", &[loopback, public], true).is_err());
+    assert!(validate_resolved_addresses("public.example", &[loopback], true).is_err());
 }
 
 #[test]
@@ -268,6 +356,7 @@ fn merges_default_and_explicit_cookie_headers() {
 fn cookie_urls_match_twitch_hosts_only() {
     assert!(is_twitch_cookie_url("https://gql.twitch.tv/gql"));
     assert!(is_twitch_cookie_url("https://www.twitch.tv/some-channel"));
+    assert!(!is_twitch_cookie_url("http://gql.twitch.tv/gql"));
     assert!(!is_twitch_cookie_url(
         "https://static.twitchcdn.net/config/settings.js"
     ));
@@ -701,6 +790,107 @@ async fn playback_network_errors_do_not_expose_tokenized_urls() {
 }
 
 #[tokio::test]
+async fn spade_network_errors_do_not_expose_tokenized_urls() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let base_url = format!("http://{address}");
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            playback_url: format!("{base_url}/hls/"),
+        },
+    );
+    let stream = Stream {
+        payload: vec![serde_json::json!({
+            "event": "minute-watched",
+            "properties": { "broadcast_id": "123" }
+        })],
+        ..Stream::default()
+    };
+
+    let error = client
+        .send_minute_watched(&format!("{base_url}/minute?sig=secret-token"), &stream)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(matches!(error, TwitchClientError::PlaybackRequest { .. }));
+    assert!(!message.contains("secret-token"));
+    assert!(!message.contains(&base_url));
+}
+
+#[tokio::test]
+async fn remote_document_network_errors_do_not_expose_tokenized_urls() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let page_url = format!("http://{address}/settings?sig=secret-token");
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: format!("http://{address}"),
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let error = client
+        .fetch_settings_script_url(&page_url)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, TwitchClientError::RemoteRequest { .. }),
+        "unexpected sanitized error: {error:?}"
+    );
+    assert!(!message.contains("secret-token"));
+    assert!(!message.contains(&address.to_string()));
+}
+
+#[tokio::test]
+async fn remote_document_redirects_are_rejected_without_following_escape_target() {
+    let (base_url, requests, server) = spawn_redirect_server();
+    let page_url = base_url.clone();
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url,
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let error = client
+        .fetch_settings_script_url(&page_url)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TwitchClientError::UnexpectedStatus {
+            status: StatusCode::FOUND,
+            ..
+        }
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    server.join().unwrap();
+}
+
+#[tokio::test]
 async fn playback_priming_repeats_all_four_requests_on_every_tick() {
     let (endpoints, requests, server) = spawn_playback_server(2);
     let client = TwitchClient::with_client_and_endpoints(
@@ -1007,6 +1197,24 @@ fn spawn_http_server<const N: usize>(
                 );
             stream.write_all(response.as_bytes()).unwrap();
         }
+    });
+    (format!("http://{address}"), requests, server)
+}
+
+fn spawn_redirect_server() -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let request_count = Arc::clone(&requests);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_http_request(&mut stream);
+        request_count.fetch_add(1, Ordering::SeqCst);
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            address.port()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
     });
     (format!("http://{address}"), requests, server)
 }

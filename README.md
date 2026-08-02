@@ -56,6 +56,12 @@ On first launch:
 4. Enter the device code shown in the terminal.
 5. Wait for cookies to be written to `data/cookies/<username>.json`.
 
+`username` is a Twitch login, not a display name: ASCII letters, digits, and
+underscores only, with a maximum of 25 characters. It is normalized to
+lowercase before the cookie filename is created. Windows device basenames such
+as `CON`, `AUX`, `COM1`, and `LPT1` are rejected on every platform so the same
+data directory remains portable.
+
 ### Docker
 
 ```powershell
@@ -211,10 +217,14 @@ independently; bounded GQL polling covers EventSub presence overflow/outage.
 - Use a dedicated Twitch account if that risk matters to you.
 - Do not commit `data/` or cookie files.
 - Cookie files contain authentication material; treat them like credentials.
+- On Windows, keep the data directory under a user-private profile directory;
+  the app relies on inherited Windows ACLs rather than changing them.
 - The app uses device-code login and does not need your Twitch password.
 - TLS certificate verification is always enforced; insecure certificate bypass
   is not supported. Optional IRC uses verified TLS on port 6697 and never sends
   the OAuth token over plaintext IRC.
+- Requests to Twitch-supplied playback and telemetry URLs intentionally bypass
+  system proxies so redirect and DNS-address validation cannot be bypassed.
 - Run `tm-app --canary --data-dir ./data` on a dedicated account before publishing a release.
 - The repo ignores runtime data and logs by default.
 - This project is unofficial and not affiliated with Twitch.

@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use tm_auth::{AuthClientError, AuthSession, AuthSessionError, LoginValidation, TwitchAuthClient};
+use tm_auth::{
+    normalize_username, AuthClientError, AuthSession, AuthSessionError, LoginValidation,
+    TwitchAuthClient,
+};
 use tm_config::{
     default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
     ConfigError, ConfigFile,
@@ -81,7 +84,7 @@ where
 {
     match load(&paths.config_path) {
         Ok(config) => {
-            validate_config(&config)?;
+            validate_app_config(&config)?;
             Ok(LoadedConfig {
                 config,
                 active_paths: paths.clone(),
@@ -92,7 +95,7 @@ where
             std::fs::create_dir_all(&fallback_dir)?;
             let fallback_path = fallback_dir.join("config.json");
             let config = load(&fallback_path)?;
-            validate_config(&config)?;
+            validate_app_config(&config)?;
             Ok(LoadedConfig {
                 config,
                 active_paths: AppPaths {
@@ -103,6 +106,16 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+pub(crate) fn validate_app_config(config: &ConfigFile) -> Result<(), ConfigError> {
+    validate_config(config)?;
+    normalize_username(&config.username).map_err(|_| {
+        ConfigError::Validation(String::from(
+            "config.username must be a valid Twitch username",
+        ))
+    })?;
+    Ok(())
 }
 
 pub(crate) fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
@@ -119,6 +132,7 @@ pub(crate) fn build_http_client(disable_ssl_cert_verification: bool) -> Result<r
     }
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")
 }
@@ -357,11 +371,12 @@ fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
 }
 
 pub(crate) fn normalized_username(username: &str) -> Result<String> {
-    let username = username.trim().to_lowercase();
-    if username.is_empty() || username == "your-twitch-username" {
+    let candidate = username.trim().to_ascii_lowercase();
+    if candidate.is_empty() || candidate == "your-twitch-username" {
         return Err(anyhow!("config.username must be set to a Twitch username"));
     }
-    Ok(username)
+    normalize_username(username)
+        .map_err(|_| anyhow!("config.username must be a valid Twitch username"))
 }
 
 pub(crate) fn validate_timezone_override(raw: Option<&str>) -> Option<TimezoneValidation> {
@@ -396,6 +411,9 @@ pub(crate) fn should_fallback_to_user_config(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
     use std::time::Duration;
 
     use super::{
@@ -415,6 +433,34 @@ mod tests {
     #[test]
     fn build_http_client_accepts_secure_default() {
         assert!(build_http_client(false).is_ok());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "isolated loopback fixture must fail the test on setup or I/O failure"
+    )]
+    async fn build_http_client_does_not_follow_redirects() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{address}/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let response = build_http_client(false)
+            .unwrap()
+            .get(format!("http://{address}/start"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        server.join().unwrap();
     }
 
     #[test]

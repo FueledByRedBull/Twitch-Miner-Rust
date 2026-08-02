@@ -144,7 +144,7 @@ fn normalized_prediction_contract_matches_expected() {
         .unwrap()
         .iter()
         .map(|outcome| PredictionOutcome {
-            id: outcome["id"].as_str().unwrap().to_string(),
+            id: outcome["id"].as_str().unwrap().into(),
             title: outcome["title"].as_str().unwrap().to_string(),
             color: outcome["color"].as_str().unwrap().to_string(),
             total_users: outcome["total_users"].as_i64().unwrap(),
@@ -180,7 +180,7 @@ fn normalized_prediction_contract_matches_expected() {
         Some(expected["choice"].as_u64().unwrap() as usize)
     );
     assert_eq!(
-        decision.outcome_id,
+        decision.outcome_id.as_ref(),
         expected["outcome_id"].as_str().unwrap()
     );
     assert_eq!(decision.amount, expected["amount"].as_i64().unwrap());
@@ -221,7 +221,7 @@ fn normalized_prediction_tie_contract_selects_first_outcome() {
         .unwrap()
         .iter()
         .map(|outcome| PredictionOutcome {
-            id: outcome["id"].as_str().unwrap().to_string(),
+            id: outcome["id"].as_str().unwrap().into(),
             title: outcome["title"].as_str().unwrap().to_string(),
             color: outcome["color"].as_str().unwrap().to_string(),
             total_users: outcome["total_users"].as_i64().unwrap(),
@@ -252,7 +252,7 @@ fn normalized_prediction_tie_contract_selects_first_outcome() {
         Some(expected["choice"].as_u64().unwrap() as usize)
     );
     assert_eq!(
-        decision.outcome_id,
+        decision.outcome_id.as_ref(),
         expected["outcome_id"].as_str().unwrap()
     );
 }

@@ -12,6 +12,7 @@ pub fn claim_bonus_cookie_header(auth_token: &str, user_id: &str) -> Option<Stri
 pub(crate) fn is_twitch_cookie_url(url: &str) -> bool {
     reqwest::Url::parse(url)
         .ok()
+        .filter(|parsed| parsed.scheme() == "https")
         .and_then(|parsed| parsed.host_str().map(is_twitch_cookie_host))
         .unwrap_or(false)
 }
