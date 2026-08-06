@@ -1298,6 +1298,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_saved_session_falls_back_to_device_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("expired-token");
+        stored.save_to_dir(directory.path()).unwrap();
+
+        let responses = vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"device_code":"device-code","user_code":"ABCD","interval":0,"expires_in":60}"#,
+            ),
+            http_response(
+                "400 Bad Request",
+                r#"{"status":400,"message":"authorization_pending"}"#,
+            ),
+            http_response("200 OK", r#"{"access_token":"fresh-token"}"#),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","scopes":["channel:read:predictions"]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            betting_make_predictions: true,
+            ..ConfigFile::default()
+        };
+
+        let session = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+        assert_eq!(session.user_id(), Some("user-456"));
+        assert!(session.has_scope("channel:read:predictions"));
+        assert_eq!(requests.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
     async fn refresh_snapshot_streamers_updates_runtime_context() {
         let (endpoints, requests, server) = spawn_twitch_server(3);
         let twitch = Arc::new(TwitchClient::with_client_and_endpoints(

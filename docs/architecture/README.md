@@ -18,6 +18,10 @@ The project runs as a Cargo workspace with crate boundaries split by responsibil
 - `tm-runtime` owns the single-writer runtime state model.
 - `tm-observability` owns logging, privacy helpers, and Discord webhook payloads.
 
+Discord is the sole built-in outbound notifier. Generic notifier backends and
+analytics exporters are intentionally out of scope unless a concrete operator
+requirement justifies adding them.
+
 `tm-runtime` owns the single-writer runtime state model, and `tm-app` owns bootstrap, process lifecycle, and top-level scheduling glue that drives it.
 
 ## One-screen ownership map

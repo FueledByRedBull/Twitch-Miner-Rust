@@ -466,6 +466,7 @@ fn eventsub_reconnect_delay(failure_attempt: u32) -> Duration {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -577,6 +578,123 @@ mod tests {
             classify_eventsub_error(&EventSubError::Protocol("test")),
             "protocol"
         );
+    }
+
+    #[test]
+    fn every_eventsub_failure_class_has_a_stable_redacted_label() {
+        let http_error = reqwest::Client::new()
+            .get("http://[::1")
+            .build()
+            .expect_err("malformed loopback URL should produce a request error");
+        let json_error = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let cases = [
+            (
+                EventSubError::HttpStatus {
+                    status: StatusCode::UNAUTHORIZED,
+                    context: "test",
+                },
+                "unauthorized",
+            ),
+            (
+                EventSubError::HttpStatus {
+                    status: StatusCode::FORBIDDEN,
+                    context: "test",
+                },
+                "unauthorized",
+            ),
+            (
+                EventSubError::HttpStatus {
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    context: "test",
+                },
+                "rate-limited",
+            ),
+            (
+                EventSubError::HttpStatus {
+                    status: StatusCode::BAD_GATEWAY,
+                    context: "test",
+                },
+                "server-error",
+            ),
+            (
+                EventSubError::HttpStatus {
+                    status: StatusCode::BAD_REQUEST,
+                    context: "test",
+                },
+                "http-status",
+            ),
+            (EventSubError::Http(http_error), "http-error"),
+            (EventSubError::Timeout("test"), "timeout"),
+            (EventSubError::KeepaliveTimeout, "keepalive-timeout"),
+            (
+                EventSubError::Revoked {
+                    reason: String::from("test"),
+                },
+                "revoked",
+            ),
+            (
+                EventSubError::ReconnectRequested {
+                    reconnect_url: String::from("wss://test"),
+                },
+                "reconnect",
+            ),
+            (EventSubError::Json(json_error), "protocol"),
+            (EventSubError::Protocol("test"), "protocol"),
+            (EventSubError::Timestamp, "protocol"),
+            (EventSubError::NoSubscriptions, "no-subscriptions"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(classify_eventsub_error(&error), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_results_record_each_recovery_class_and_stop_cancellation() {
+        let health = HealthTracker::default();
+        health.register("eventsub", Duration::from_secs(60));
+
+        let mut failure_attempt = 0;
+        assert!(record_connection_result(
+            Ok(Ok(())),
+            &health,
+            &mut failure_attempt
+        ));
+        assert_eq!(failure_attempt, 1);
+        assert_eq!(health.task_consecutive_failures("eventsub"), Some(1));
+
+        assert!(record_connection_result(
+            Ok(Err(EventSubError::Revoked {
+                reason: String::from("test"),
+            })),
+            &health,
+            &mut failure_attempt,
+        ));
+        assert_eq!(health.task_consecutive_failures("eventsub"), Some(2));
+
+        assert!(record_connection_result(
+            Ok(Err(EventSubError::NoSubscriptions)),
+            &health,
+            &mut failure_attempt,
+        ));
+        assert!(record_connection_result(
+            Err(tokio::spawn(async { panic!("synthetic eventsub failure") })
+                .await
+                .expect_err("panic should be represented as a join error")),
+            &health,
+            &mut failure_attempt,
+        ));
+
+        let cancelled_task = tokio::spawn(std::future::pending::<()>());
+        cancelled_task.abort();
+        let cancelled = cancelled_task
+            .await
+            .expect_err("aborted task should be represented as a join error");
+        assert!(!record_connection_result(
+            Err(cancelled),
+            &health,
+            &mut failure_attempt,
+        ));
     }
 
     #[test]

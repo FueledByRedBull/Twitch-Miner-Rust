@@ -2,18 +2,30 @@
 
 ## Local Run
 
-Use the workspace root and point the app at the checked-in data directory:
+`config.example.json` is a credential-free tracked template. The runtime
+configuration belongs in the ignored `data/` directory, so a fresh clone must
+copy the template before starting the app:
 
 ```powershell
 cd Twitch-Miner-Rust
+New-Item -ItemType Directory -Force ./data | Out-Null
+Copy-Item ./config.example.json ./data/config.json
+notepad ./data/config.json
+cargo run -p tm-app -- --config ./data/config.json --data-dir ./data --check-config
 cargo run -p tm-app -- --config ./data/config.json --data-dir ./data
 ```
+
+Replace `your_twitch_login` and `your_twitch_streamer` in the copied file
+before running the validation command. `--check-config` is local and
+network-free; the final command performs device-code login when no saved
+session exists.
 
 If you want to watch logs in the foreground, run the command directly in the terminal. If you want a background process, redirect `stdout` and `stderr` to `run.out.log` and `run.err.log` and tail them with `Get-Content -Wait`.
 
 ## First-Time Login
 
-- Set `username` in `data/config.json`.
+- Set `username` and the initial `streamers` list in the copied
+  `data/config.json`; both are placeholders in the tracked example.
 - `auto_update` was removed. A legacy `false` value is migrated away and `true`
   is rejected.
 - Remove `password` from older configs; device-code login does not use it.
@@ -55,6 +67,22 @@ The repo ships two compose examples:
 - `docker-compose.yml` for a bind-mount layout at `./data`.
 - `deploy/docker-compose.volume.yml` for a named-volume layout.
 - `deploy/docker-compose.rpi.yml` for a Raspberry Pi bind-mount layout that runs as the host user.
+
+For the bind-mount example, prepare the ignored data directory from the
+tracked template before starting the service, then validate Compose without
+starting a container:
+
+```powershell
+New-Item -ItemType Directory -Force ./data | Out-Null
+Copy-Item ./config.example.json ./data/config.json
+notepad ./data/config.json
+docker compose config --quiet
+docker compose up --build
+```
+
+Run the local `tm-app --check-config` command above after editing the copied
+file when you want config validation as well. Neither check contacts Twitch or
+requires an authenticated session.
 
 Run only one active miner instance per Twitch account. Concurrent instances are
 not a supported high-availability mode: they duplicate transport subscriptions,

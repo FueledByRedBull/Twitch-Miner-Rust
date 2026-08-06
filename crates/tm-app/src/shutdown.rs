@@ -127,6 +127,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_waiter_contains_a_task_failure() {
+        let failed = tokio::spawn(async { panic!("synthetic shutdown failure") });
+        await_shutdown_task("failed", failed).await;
+    }
+
+    #[tokio::test]
     async fn shutdown_waiter_aborts_a_stuck_active_operation() {
         let started = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));
