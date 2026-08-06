@@ -199,3 +199,34 @@ image evidence.
   within one second; the conservative non-backdated baseline is
   `2026-08-02T21:53:29Z`, making the 72-hour checkpoint
   `2026-08-05T21:53:29Z`.
+- The exact non-backdated 72-hour window completed with no new session or
+  shutdown marker. It recorded 1,421 ordinary WATCH rewards / 14,568 points
+  against 1,406.95 availability-adjusted opportunities (101.00%), no reward
+  while zero channels were online, exact claim-action/CLAIM-reward parity at
+  471/471, 14 successful drop claims, and zero prediction placements/results.
+  Sixteen configured channels were online during the window; fifteen earned a
+  WATCH reward, while the remaining channel was selected twice and both Twitch
+  playback preflights failed before its raid ended the broadcast. That is live
+  selection evidence rather than fair-rotation starvation. The comparable
+  `watch-request` class was 36/72 hours (0.500/h), below the preserved old-image
+  observation of 48/72 hours (0.667/h); this is recorded as an observation, not
+  attributed to snapshot reuse because the failures are HLS preflights.
+- Cloudflare and Google HTTPS `Date` sources agreed exactly at
+  `2026-08-06T16:24:32Z`, 18.517 hours after the checkpoint. The Pi clock was
+  414 seconds slow, so external time proves the duration without silently
+  crediting the host clock. All warning/error classes in the timed window had
+  later WATCH rewards; the latest class still had 35 subsequent rewards.
+- The Pi rebooted at about `2026-08-06T05:23Z`, after the completed gate. The
+  same immutable image/container returned to schema 5 readiness with ten clean
+  tasks, EventSub 10/10, PubSub 53/53, zero restart count, eight claimed current
+  drop records, 72/72 post-boot claim parity, and 102.2% availability-adjusted
+  WATCH yield. The prior-boot journal is unavailable, so the reboot is not
+  claimed as graceful; the separately evidenced deployment-time normal-SIGTERM
+  recovery remains the release acceptance proof.
+- Final mapped cleanup removed 7,295 rebuildable local Cargo files (4.0 GiB),
+  empty fuzz-artifact/release-evidence directories, and the unreferenced
+  superseded Pi image `1731354e`. Reinspection proved the accepted `36b40d7b`
+  image plus protected `9c38b58e` and `f1523451` rollback images remained
+  available; the live service stayed ready and healthy with EventSub 10/10 and
+  PubSub acknowledgements 53/53. No container, volume, runtime data, private
+  configuration, cookie, streak cache, or Compose backup was removed.
