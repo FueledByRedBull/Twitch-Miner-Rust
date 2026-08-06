@@ -31,6 +31,14 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --locked --quiet
 
+      - name: Validate tracked example configuration
+        shell: pwsh
+        run: |
+          $preview = cargo run --quiet -p tm-app --locked -- --config ./config.example.json --data-dir "${{ runner.temp }}/twitch-miner-example" --check-config --json | ConvertFrom-Json
+          if (-not $preview.valid -or $preview.schema_version -ne 1 -or $preview.migration_required) {
+            throw 'The tracked example configuration is invalid, stale, or requires migration.'
+          }
+
       - name: Run deterministic replay benchmark
         env:
           BUILD_REVISION: ${{ github.sha }}

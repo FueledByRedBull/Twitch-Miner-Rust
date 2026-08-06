@@ -592,11 +592,74 @@ pub(crate) async fn log_pubsub_event(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
     use super::{
-        classify_pubsub_connection_result, failed_pubsub_setup_report, PubSubConnectionOutcome,
+        classify_pubsub_connection_result, configured_pubsub_classes, failed_pubsub_setup_report,
+        handle_pubsub_message, pubsub_error_class, pubsub_event_topic_class,
+        PubSubConnectionOutcome, SupervisedPubSubEvent,
     };
+    use tm_pubsub::{
+        CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
+    };
+
+    use crate::observability::{AppObservability, AppObservabilitySettings};
+    use crate::status::HealthTracker;
+
+    fn test_observability() -> AppObservability {
+        AppObservability::new(
+            None,
+            tm_observability::DiscordClient::new(Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings::default(),
+        )
+    }
+
+    fn test_runtime() -> tm_runtime::RuntimeHandle {
+        tm_runtime::spawn_runtime_state(tm_runtime::RuntimeState::from_targets(
+            &tm_config::ConfigFile::default(),
+            &[],
+            tm_domain::OffsetDateTime::UNIX_EPOCH,
+        ))
+    }
+
+    fn error_cases() -> Vec<(tm_pubsub::PubSubError, &'static str)> {
+        vec![
+            (tm_pubsub::PubSubError::MissingUserId, "configuration"),
+            (
+                tm_pubsub::PubSubError::CapacityExceeded {
+                    configured: 501,
+                    maximum: 500,
+                },
+                "capacity",
+            ),
+            (
+                tm_pubsub::PubSubError::InvalidPayload(
+                    serde_json::from_str::<serde_json::Value>("not-json").unwrap_err(),
+                ),
+                "protocol",
+            ),
+            (
+                tm_pubsub::PubSubError::InvalidText(String::from_utf8(vec![0xff]).unwrap_err()),
+                "protocol",
+            ),
+            (tm_pubsub::PubSubError::Protocol("test"), "protocol"),
+            (
+                tm_pubsub::PubSubError::EventChannelClosed,
+                "event-channel-closed",
+            ),
+            (tm_pubsub::PubSubError::ReconnectRequested, "reconnect"),
+            (
+                tm_pubsub::PubSubError::BadAuth {
+                    cookie_file: String::from("private-cookie"),
+                },
+                "bad-auth",
+            ),
+            (tm_pubsub::PubSubError::PongTimeout, "pong-timeout"),
+        ]
+    }
 
     #[test]
     fn requested_reconnect_is_counted_until_fresh_listen_acknowledgement() {
@@ -621,6 +684,251 @@ mod tests {
         assert_eq!(
             report.capabilities[0].failure_class.as_deref(),
             Some("capacity")
+        );
+    }
+
+    #[test]
+    fn pubsub_error_classes_are_stable_and_payload_free() {
+        for (error, expected) in error_cases() {
+            assert_eq!(pubsub_error_class(&error), expected);
+        }
+    }
+
+    #[test]
+    fn configured_topics_collapse_to_sorted_capability_classes() {
+        let topics = vec![
+            String::from("raid.100"),
+            String::from("video-playback-by-id.100"),
+            String::from("raid.101"),
+            String::from("community-points-user-v1.user"),
+        ];
+        assert_eq!(
+            configured_pubsub_classes(&topics),
+            vec![
+                String::from("points-user"),
+                String::from("presence"),
+                String::from("raid"),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_transport_event_maps_to_its_health_topic_class() {
+        let prediction = tm_domain::PredictionEvent {
+            streamer: tm_domain::Streamer::default(),
+            event_id: String::from("event"),
+            title: String::from("test"),
+            status: String::from("ACTIVE"),
+            created_at: tm_domain::OffsetDateTime::UNIX_EPOCH,
+            window_seconds: 30.0,
+            outcomes: Vec::new(),
+            decision: tm_domain::PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        let events = [
+            (
+                MinerEvent::PointsEarned {
+                    channel_id: String::from("100"),
+                    earned: 1,
+                    reason: String::from("watch"),
+                    balance: 2,
+                },
+                "points-user",
+            ),
+            (
+                MinerEvent::ClaimAvailable {
+                    channel_id: String::from("100"),
+                    claim_id: String::from("claim"),
+                },
+                "points-user",
+            ),
+            (
+                MinerEvent::Playback {
+                    channel_id: String::from("100"),
+                    kind: PlaybackType::StreamUp,
+                },
+                "presence",
+            ),
+            (
+                MinerEvent::Raid {
+                    channel_id: String::from("100"),
+                    raid_id: String::from("raid"),
+                    target_login: String::from("target"),
+                },
+                "raid",
+            ),
+            (
+                MinerEvent::Moment {
+                    channel_id: String::from("100"),
+                    moment_id: String::from("moment"),
+                },
+                "moments",
+            ),
+            (
+                MinerEvent::PredictionChannel {
+                    kind: PredictionChannelKind::EventCreated,
+                    event: Box::new(prediction.clone()),
+                    winning_outcome_id: None,
+                },
+                "prediction-channel",
+            ),
+            (
+                MinerEvent::PredictionUser {
+                    event_id: String::from("event"),
+                    kind: PredictionUserKind::PredictionMade,
+                    result: None,
+                },
+                "prediction-user",
+            ),
+            (
+                MinerEvent::CommunityGoal {
+                    channel_id: String::from("100"),
+                    kind: CommunityGoalKind::Created,
+                    goal: None,
+                    goal_id: None,
+                },
+                "community-goals",
+            ),
+        ];
+
+        for (event, expected) in events {
+            assert_eq!(pubsub_event_topic_class(&event), expected);
+        }
+    }
+
+    #[test]
+    fn failed_setup_report_preserves_non_capacity_failure_shape() {
+        let report = failed_pubsub_setup_report(&tm_pubsub::PubSubError::MissingUserId);
+        assert_eq!(report.total_topics, 0);
+        assert_eq!(report.capabilities.len(), 1);
+        assert_eq!(report.capabilities[0].configured_topics, 1);
+        assert_eq!(
+            report.capabilities[0].failure_class.as_deref(),
+            Some("configuration")
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_outcomes_distinguish_exit_and_reconnect_paths() {
+        let topics = vec![String::from("raid.100")];
+        let reconnect = classify_pubsub_connection_result(
+            &Ok(Err(tm_pubsub::PubSubError::ReconnectRequested)),
+            1,
+            &topics,
+            1,
+        );
+        assert!(matches!(reconnect, PubSubConnectionOutcome::Reconnect(_)));
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let cancelled_task = task.await.expect_err("abort should produce a join error");
+        assert!(matches!(
+            classify_pubsub_connection_result(&Err(cancelled_task), 1, &topics, 1),
+            PubSubConnectionOutcome::Exit
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_loss_and_listen_ack_restore_pubsub_health_by_class() {
+        let runtime = test_runtime();
+        let observability = test_observability();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        health.record_pubsub_setup(tm_pubsub::PubSubSetupReport {
+            connection_count: 1,
+            total_topics: 2,
+            capabilities: vec![
+                tm_pubsub::PubSubCapabilityStatus {
+                    topic_class: String::from("points-user"),
+                    configured_topics: 1,
+                    acknowledged_topics: 1,
+                    last_message_unix: None,
+                    reconnects: 0,
+                    failure_class: None,
+                },
+                tm_pubsub::PubSubCapabilityStatus {
+                    topic_class: String::from("raid"),
+                    configured_topics: 1,
+                    acknowledged_topics: 1,
+                    last_message_unix: None,
+                    reconnects: 0,
+                    failure_class: None,
+                },
+            ],
+        });
+        let (effect_sender, _effects) = tokio::sync::mpsc::channel(1);
+
+        assert!(
+            !handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::ConnectionLost {
+                    acknowledged_by_class: HashMap::from([(String::from("points-user"), 1)]),
+                    configured_classes: vec![String::from("points-user"), String::from("raid")],
+                    failure_class: "connection-reset",
+                },
+            )
+            .await
+        );
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(1));
+        assert!(!health.pubsub_ready());
+
+        assert!(
+            !handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(
+                    tm_pubsub::PubSubConnectionEvent::ListenAcknowledged {
+                        topic_class: String::from("points-user"),
+                    },
+                ),
+            )
+            .await
+        );
+        assert!(!health.pubsub_ready());
+        assert!(
+            !handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(
+                    tm_pubsub::PubSubConnectionEvent::ListenAcknowledged {
+                        topic_class: String::from("raid"),
+                    },
+                ),
+            )
+            .await
+        );
+        assert!(health.pubsub_ready());
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(0));
+
+        assert!(
+            !handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(tm_pubsub::PubSubConnectionEvent::ResponseError {
+                    nonce: Some(String::from("nonce")),
+                    topic_class: Some(String::from("raid")),
+                }),
+            )
+            .await
+        );
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(1));
+        assert_eq!(
+            health.pubsub_snapshot().unwrap().capabilities[1]
+                .failure_class
+                .as_deref(),
+            Some("listen-rejected")
         );
     }
 }

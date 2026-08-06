@@ -230,3 +230,66 @@ image evidence.
   available; the live service stayed ready and healthy with EventSub 10/10 and
   PubSub acknowledgements 53/53. No container, volume, runtime data, private
   configuration, cookie, streak cache, or Compose backup was removed.
+
+## Assurance-only follow-up differential review — 2026-08-06
+
+### Executive summary
+
+| Severity | Findings |
+| --- | ---: |
+| Critical | 0 |
+| High | 0 |
+| Medium | 0 |
+| Low | 0 |
+
+**Overall risk:** low. **Recommendation:** conditional approval pending the
+exact-head CI and manually dispatched Deep Quality results.
+
+This follow-up adds a credential-free current-schema example configuration,
+repairs the fresh-clone instructions, reconciles final live raid/Drop evidence,
+declares Discord as the sole built-in notifier, and adds focused `tm-app` tests
+for authentication fallback, task wiring, transport recovery/classification,
+and shutdown containment. The Rust additions are confined to existing
+`#[cfg(test)]` modules or the external app test suite; no production function,
+type, dependency, manifest, Dockerfile, persisted format, external request, or
+runtime state path changes.
+
+### Scope and blast radius
+
+- Baseline: `b33ef7a4e9ed72b440861c047cef8952d2710c76` on `main`.
+- Codebase class: medium (95 checked-in Rust source/test files), using a focused
+  one-hop review of every changed test module and its production subject.
+- Production blast radius: zero callers and zero runtime branches changed.
+- CI blast radius: the reusable Rust QA job now fails when
+  `config.example.json` is invalid, stale, or requires migration. Existing
+  Compose validation remains authoritative on Linux.
+- Secret surface: the example contains placeholders and an empty webhook; no
+  cookie, token, account identifier, private configuration, or signed URL was
+  read or added.
+
+Git history shows that the touched orchestration modules came from the earlier
+architecture/runtime hardening series. This diff removes no validation,
+authorization, TLS, retry, health, state, or mutation code and does not restore
+a previously removed production pattern. Expected panics and unwraps occur only
+inside tests covered by explicit test-module Clippy allowances.
+
+### Test and review evidence
+
+- The example passes both plain and JSON `--check-config`; the JSON result is
+  valid on schema 1 with `migration_required=false`.
+- All 114 `tm-app` unit tests and its device-flow integration test pass.
+- Workspace formatting, all-target/all-feature check and tests, ordinary strict
+  Clippy, production no-panic/no-unwrap/no-expect Clippy, rustdoc, documentation,
+  architecture-boundary, release-hygiene, and diff checks pass locally.
+- Numeric application branch coverage is intentionally not estimated on the
+  Windows host because the pinned `cargo-llvm-cov` tool is absent. The exact PR
+  head must be measured by the pinned Linux Deep Quality job before the 33.5%
+  ratchet is changed.
+- Because production code and build inputs are unchanged, this is not a new
+  runtime candidate. Final acceptance must still prove release-binary
+  equivalence; if that proof holds, the accepted `36b40d7b` image remains in
+  service and no deployment or soak is warranted.
+
+**Confidence:** high for the changed source and documentation; conditional for
+the numeric coverage improvement and binary-equivalence claims until the
+immutable CI evidence is recorded.

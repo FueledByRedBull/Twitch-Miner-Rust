@@ -42,7 +42,7 @@ sequenceDiagram
     U->>A: apply_event_with_outcome(PointsEarned)
     A->>S: dedupe, apply_pubsub_gain, update history
     S-->>A: changed=true, effects=[]
-    A-->>O: updated state, then log WATCH and optional Discord event
+    A-->>O: updated state, then log WATCH and optional built-in Discord event
 ```
 
 The `user_id` in the topic is the authenticated viewer's ID. It is shown as a
@@ -138,9 +138,11 @@ network mutation. (`WATCH_STREAK` has an additional streak-resolution branch;
 ordinary `WATCH` does not.)
 
 The actor notifies state subscribers after a changed event. The PubSub handler
-then logs the updated streamer and maps `WATCH` to the optional Discord
-`GainForWatch` event. It sends the empty effects list to the effect executor,
-which therefore has no network work for this reward. Later session summaries
+then logs the updated streamer and maps `WATCH` to the optional built-in Discord
+`GainForWatch` event. Discord is the only built-in outbound notifier; generic
+notifier and analytics integrations are intentionally out of scope. It sends
+the empty effects list to the effect executor, which therefore has no network
+work for this reward. Later session summaries
 compare the final balance with the startup snapshot and render the accumulated
 history.
 

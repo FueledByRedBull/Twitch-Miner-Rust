@@ -170,6 +170,14 @@ mutation/reconciliation path. Twitch currently supports
 Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` through
 Rustls with WebPKI roots; the OAuth token is never sent over plaintext IRC.
 
+The completed live release evidence validates this hybrid boundary rather than
+claiming an EventSub-only viewer contract: it records 20 successful
+post-mutation `update_raid` logs, with 19 matching RAID rewards observed within
+15 minutes, and 14 live Drop progress/claim pairs. The Drop evidence validates
+the claim path but does not assert exact campaign pin/unpin telemetry. Discord
+is the sole built-in outbound notifier; generic notifier backends and analytics
+exporters remain out of scope absent a concrete operator requirement.
+
 ## Typing policy
 
 The runtime uses typed models for IDs, live state, stream metadata, followers,
