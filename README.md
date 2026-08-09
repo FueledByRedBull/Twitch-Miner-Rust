@@ -43,14 +43,28 @@ flowchart LR
 
 ### Local
 
+The repository includes a credential-free, tracked template at
+[`config.example.json`](config.example.json). The runtime config belongs under
+`data/`, which is intentionally ignored so cookies and local settings cannot be
+committed. Start from a clean clone with this copy/edit/validate/run sequence:
+
 ```powershell
 cd Twitch-Miner-Rust
+New-Item -ItemType Directory -Force ./data | Out-Null
+Copy-Item ./config.example.json ./data/config.json
+notepad ./data/config.json
+cargo run -p tm-app -- --config ./data/config.json --data-dir ./data --check-config
 cargo run -p tm-app -- --config ./data/config.json --data-dir ./data
 ```
 
-On first launch:
+Replace both placeholder logins (`your_twitch_login` and
+`your_twitch_streamer`) before the validation command. `--check-config` only
+loads and validates the file; it does not contact Twitch or require cookies.
+The final command starts the miner and therefore performs the normal device-code
+login when no saved session exists. On first launch:
 
-1. Set `username` in `data/config.json`.
+1. Confirm the `username` and `streamers` values in `data/config.json` are real
+   Twitch logins.
 2. Start the app.
 3. Open `https://www.twitch.tv/activate`.
 4. Enter the device code shown in the terminal.
@@ -66,8 +80,16 @@ data directory remains portable.
 
 ```powershell
 cd Twitch-Miner-Rust
+New-Item -ItemType Directory -Force ./data | Out-Null
+Copy-Item ./config.example.json ./data/config.json
+notepad ./data/config.json
+docker compose config --quiet
 docker compose up --build
 ```
+
+Use the same placeholder replacement and `--check-config` validation shown in
+the local sequence before starting the container. Compose validation parses the
+checked-in service definition without starting a container or contacting Twitch.
 
 The container layout is centered on `/data`:
 

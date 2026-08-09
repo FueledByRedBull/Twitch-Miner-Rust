@@ -230,3 +230,80 @@ image evidence.
   available; the live service stayed ready and healthy with EventSub 10/10 and
   PubSub acknowledgements 53/53. No container, volume, runtime data, private
   configuration, cookie, streak cache, or Compose backup was removed.
+
+## Assurance-only follow-up differential review — 2026-08-06
+
+### Executive summary
+
+| Severity | Findings |
+| --- | ---: |
+| Critical | 0 |
+| High | 0 |
+| Medium | 0 |
+| Low | 0 |
+
+**Overall risk:** low. **Recommendation:** approve after PR #62's final
+evidence-only head repeats the required check suites. The PR check rollup is
+the authoritative promotion record.
+
+This follow-up adds a credential-free current-schema example configuration,
+repairs the fresh-clone instructions, reconciles final live raid/Drop evidence,
+declares Discord as the sole built-in notifier, and adds focused `tm-app` tests
+for authentication fallback, task wiring, transport recovery/classification,
+and shutdown containment. The Rust additions are confined to existing
+`#[cfg(test)]` modules or the external app test suite; no production function,
+type, dependency, manifest, Dockerfile, persisted format, external request, or
+runtime state path changes.
+
+### Scope and blast radius
+
+- Baseline: `b33ef7a4e9ed72b440861c047cef8952d2710c76` on `main`.
+- Codebase class: medium (95 checked-in Rust source/test files), using a focused
+  one-hop review of every changed test module and its production subject.
+- Production blast radius: zero callers and zero runtime branches changed.
+- CI blast radius: the reusable Rust QA job now fails when
+  `config.example.json` is invalid, stale, or requires migration. Existing
+  Compose validation remains authoritative on Linux.
+- Secret surface: the example contains placeholders and an empty webhook; no
+  cookie, token, account identifier, private configuration, or signed URL was
+  read or added.
+
+Git history shows that the touched orchestration modules came from the earlier
+architecture/runtime hardening series. This diff removes no validation,
+authorization, TLS, retry, health, state, or mutation code and does not restore
+a previously removed production pattern. Expected panics and unwraps occur only
+inside tests covered by explicit test-module Clippy allowances.
+
+### Test and review evidence
+
+- The example passes both plain and JSON `--check-config`; the JSON result is
+  valid on schema 1 with `migration_required=false`.
+- All 114 `tm-app` unit tests and its device-flow integration test pass.
+- Workspace formatting, all-target/all-feature check and tests, ordinary strict
+  Clippy, production no-panic/no-unwrap/no-expect Clippy, rustdoc, documentation,
+  architecture-boundary, release-hygiene, and diff checks pass locally.
+- PR head `827462016bdce870b201bd0bd31b7e802b6d4eea` passed CI run
+  `31122632185` attempt 2 and Deep Quality run `31122618578` attempt 2. The
+  latter includes branch coverage, replay regression, both 120-second Linux
+  fuzz targets, and every bounded mutation partition.
+- Pinned Linux application branch coverage rose from 252/751 (33.56%) to
+  295/751 (39.28%) with the denominator unchanged. The 39.0% ratchet therefore
+  retains a two-branch stability margin. The focused source changes were:
+  bootstrap 29/46 to 30/46, EventSub 18/64 to 25/64, PubSub 3/64 to 15/64,
+  shutdown 2/8 to 6/8, and task wiring 2/6 to 5/6. The external test file is
+  absent from the report, so this is exercised production branching rather
+  than test-code inflation.
+- Baseline `b33ef7a` and PR head `8274620`, built in one checkout with identical
+  fixed revision/time metadata, disabled incrementality, reproducible linker
+  flags, and one target directory, produced identical release SHA-256
+  `C235D7F24A551B19A255249737DDFEBDBB2BF2ABA2EB71B698E94B49929915B2`.
+  This proves the follow-up does not create a different production binary.
+- The retained Pi image remains the accepted manifest `36b40d7b` at revision
+  `a9817e7`, with restart count zero, schema 5, all ten tasks clean, EventSub
+  10/10, PubSub 53/53, six current Drop milestones claimed, and exact recent
+  claim-action/reward parity. Across 357 same-channel reward intervals, the
+  median, p90, and p95 were all six minutes and 97.48% landed within six
+  minutes. No deployment or new soak is warranted.
+
+**Confidence:** high. No security finding, runtime change, public-contract
+change, production-binary drift, or live-mining regression was found.

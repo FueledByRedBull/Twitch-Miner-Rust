@@ -263,8 +263,19 @@ fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> T
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
-    use super::BackgroundTasks;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tm_observability::DiscordClient;
+    use tm_twitch::{TwitchClient, TwitchEndpoints};
+
+    use super::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
+    use crate::observability::{AppObservability, AppObservabilitySettings};
+    use crate::shutdown::shutdown_background_tasks;
+    use crate::status::HealthTracker;
+    use crate::streak_cache::StreakCache;
 
     fn empty_tasks() -> BackgroundTasks {
         BackgroundTasks {
@@ -334,5 +345,124 @@ mod tests {
         }
 
         assert_eq!(tasks.unexpectedly_finished(), vec!["minute"]);
+    }
+
+    fn test_observability() -> AppObservability {
+        AppObservability::new(
+            None,
+            DiscordClient::new(Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings::default(),
+        )
+    }
+
+    fn test_twitch() -> Arc<TwitchClient> {
+        Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "user-agent",
+            TwitchEndpoints::default(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn task_wiring_respects_authenticated_and_optional_feature_boundaries() {
+        let config = tm_config::ConfigFile {
+            username: String::from("tester"),
+            ..tm_config::ConfigFile::default()
+        };
+        let twitch = test_twitch();
+        let runtime = tm_runtime::spawn_runtime_state(tm_runtime::RuntimeState::from_targets(
+            &config,
+            &[],
+            tm_domain::OffsetDateTime::UNIX_EPOCH,
+        ));
+        let observability = test_observability();
+        let cache = StreakCache::default();
+        let directory = tempfile::tempdir().unwrap();
+
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(true);
+        let health = HealthTracker::default();
+        let tasks = spawn_background_tasks(&BackgroundTaskParams {
+            config: &config,
+            stop_rx,
+            runtime: &runtime,
+            twitch: &twitch,
+            auth_token: "token",
+            user_id: None,
+            prediction_eventsub_authorized: false,
+            initial_streamers: &[],
+            observability: &observability,
+            health: &health,
+            streak_cache: &cache,
+            work_dir: directory.path(),
+        })
+        .unwrap();
+        assert!(tasks.eventsub.is_none());
+        assert!(tasks.pubsub.is_none());
+        assert!(tasks.presence_poll.is_none());
+        assert!(tasks.context.is_none());
+        assert!(tasks.pending_claims.is_none());
+        assert!(tasks.minute.is_none());
+        assert!(tasks.drop.is_none());
+        assert!(tasks.streak_recovery.is_none());
+        assert!(tasks.chat.is_some());
+        assert!(tasks.streak_cache.is_some());
+        assert_eq!(health.task_consecutive_failures("chat"), Some(0));
+        assert_eq!(health.task_consecutive_failures("streak-cache"), Some(0));
+        shutdown_background_tasks(stop_tx, tasks).await;
+
+        let streamer = tm_domain::Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            settings: tm_domain::StreamerSettings {
+                claim_drops: true,
+                watch_streak: true,
+                watch_streak_vod_recovery: true,
+                ..tm_domain::StreamerSettings::default()
+            },
+            ..tm_domain::Streamer::default()
+        };
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(true);
+        let health = HealthTracker::default();
+        let tasks = spawn_background_tasks(&BackgroundTaskParams {
+            config: &config,
+            stop_rx,
+            runtime: &runtime,
+            twitch: &twitch,
+            auth_token: "token",
+            user_id: Some(&String::from("user-1")),
+            prediction_eventsub_authorized: true,
+            initial_streamers: std::slice::from_ref(&streamer),
+            observability: &observability,
+            health: &health,
+            streak_cache: &cache,
+            work_dir: directory.path(),
+        })
+        .unwrap();
+        assert!(tasks.eventsub.is_some());
+        assert!(tasks.pubsub.is_some());
+        assert!(tasks.presence_poll.is_some());
+        assert!(tasks.context.is_some());
+        assert!(tasks.pending_claims.is_some());
+        assert!(tasks.minute.is_some());
+        assert!(tasks.drop.is_some());
+        assert!(tasks.streak_recovery.is_some());
+        assert!(tasks.chat.is_some());
+        assert!(tasks.streak_cache.is_some());
+        for task in [
+            "eventsub",
+            "pubsub",
+            "presence-poll",
+            "context",
+            "pending-claims",
+            "minute",
+            "drop",
+            "chat",
+            "streak-cache",
+            "streak-recovery",
+        ] {
+            assert_eq!(health.task_consecutive_failures(task), Some(0), "{task}");
+        }
+        shutdown_background_tasks(stop_tx, tasks).await;
     }
 }

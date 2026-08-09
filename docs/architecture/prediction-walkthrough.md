@@ -51,7 +51,7 @@ sequenceDiagram
     U->>A: apply_event_with_outcome(PredictionUser/PredictionResult)
     A->>S: parse_result, then remember completed
     S-->>A: changed=true, effects=[PredictionSettled]
-    A-->>X: execute PredictionSettled for logging and optional Discord only
+    A-->>X: execute PredictionSettled for logging and optional built-in Discord only
 ```
 
 `channel_id` is the broadcaster; `user_id` is the authenticated viewer. Channel
@@ -155,7 +155,7 @@ The reducer then emits `RuntimeEffect::PredictionSettled { event_id,
 streamer_username, title, decision_label, result_type, result_string }` and
 remembers the completed prediction (so a duplicate result is idempotent). The
 effect executor logs the settlement under the `make_predictions` operation and
-maps it to the optional Discord notification. **No network mutation runs for
+maps it to the optional built-in Discord notification. **No network mutation runs for
 settlement** — unlike placement, the accounting stays local.
 
 ## Why this differs from WATCH
