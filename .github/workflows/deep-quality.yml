@@ -145,10 +145,10 @@ jobs:
             file: crates/tm-app/src/eventsub.rs
             filter: ' in eventsub_reconnect_delay$'
             exclude: 'a^'
-          - name: pubsub-eventsub-timeout-classes
+          - name: pubsub-eventsub-setup-deadlines
             package: tm-pubsub
             file: crates/tm-pubsub/src/eventsub.rs
-            filter: ' in EventSubTimeoutStage::failure_class$'
+            filter: ' in EventSubClient::connect_and_listen_with_deadlines$'
             exclude: 'a^'
           - name: app-session-retry
             package: tm-app

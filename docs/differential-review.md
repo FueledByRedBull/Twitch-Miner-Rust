@@ -429,7 +429,7 @@ retains degraded health; only a real setup/heartbeat records success.
 | `tm-pubsub/eventsub.rs` | Typed timeout stages and nested Welcome/setup deadlines | ordinary setup, reconnect inheritance, subscription capacity, established keepalive, local WebSocket/HTTP fixtures |
 | `tm-app/eventsub.rs` | Attempt activity and stage-to-health classification | retry/backoff, polling fallback, shutdown cancellation, redacted warnings |
 | `tm-app/status.rs` | Activity-only health update | strict health, silent-task supervision, failure counters and last error class |
-| Deep Quality CI | One bounded timeout-class mutation shard | non-empty selection and all-mutant kill requirement |
+| Deep Quality CI | One bounded session-deadline mutation shard | non-empty selection and all-mutant kill requirement |
 
 History inspection traced the unbounded pre-Welcome read to the original
 EventSub runtime work in `92db087`, reconnect inheritance to `3a9c30c`, and the
@@ -476,7 +476,7 @@ cover a connected
 peer that never sends Welcome and a subscription setup that exceeds its outer
 budget. Existing tests also cover ordinary setup, reconnect inheritance,
 keepalive grace, recovery classification, polling fallback, and shutdown
-cancellation. The timeout-class mutation shard is pinned in Deep Quality;
+cancellation. The session-deadline mutation shard is pinned in Deep Quality;
 `cargo-mutants` is not installed locally, so the non-empty/all-killed CI result
 is mandatory rather than inferred. Local `cargo audit` could not parse the
 user-level advisory checkout because it contains a duplicate upstream advisory
