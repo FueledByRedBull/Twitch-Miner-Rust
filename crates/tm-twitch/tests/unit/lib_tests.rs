@@ -359,7 +359,7 @@ fn hls_parsers_resolve_absolute_and_relative_segment_urls() {
     assert_eq!(
         media_segment_url(
             &media_base,
-            "#EXTM3U\n# comment\n#EXTINF:2.0,\n  segments/first.ts  \n#EXTINF:2.0,\nhttps://cdn.example/second.ts\n#EXT-X-ENDLIST\n",
+            "#EXTM3U\n\n# comment\n#EXTINF:2.0,\n  segments/first.ts  \n#EXTINF:2.0,\nhttps://cdn.example/second.ts\n#EXT-X-ENDLIST\n",
         )
         .unwrap()
         .as_str(),
@@ -368,7 +368,7 @@ fn hls_parsers_resolve_absolute_and_relative_segment_urls() {
     assert_eq!(
         media_segment_url(
             &media_base,
-            "#EXTM3U\n#EXTINF:2.0,\nhttps://cdn.example/absolute.ts\n",
+            "#EXTM3U\n#EXTINF:0.0,\nhttps://cdn.example/absolute.ts\n",
         )
         .unwrap()
         .as_str(),
@@ -403,6 +403,14 @@ fn hls_parsers_reject_empty_audio_only_and_malformed_playlists() {
     ));
     assert!(matches!(
         media_segment_url(&base, "#EXTM3U\n#EXTINF:not-a-duration,\nsegment.ts\n"),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:-0.1,\nsegment.ts\n"),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:inf,\nsegment.ts\n"),
         Err(TwitchClientError::InvalidField("media playlist"))
     ));
     assert!(matches!(
