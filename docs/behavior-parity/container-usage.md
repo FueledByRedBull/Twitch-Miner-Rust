@@ -6,7 +6,12 @@ Recommended layout:
 - Keep `config.json` in that directory.
 - Let the app create `cookies/` and `log/` under the same root.
 
-The published image is a static Rust binary in a `scratch` runtime. It has no shell, package manager, or OS certificate bundle, so operational debugging should use logs, mounted `/data` files, and the host Docker tooling rather than `docker exec` shell sessions.
+The published image is a static Rust binary in a `scratch` runtime. It has no
+shell, package manager, or OS certificate bundle. Direct `docker exec` of the
+binary still works for diagnostics, for example
+`docker exec twitch-miner /twitch-miner --status --data-dir /data`; an exec of
+`sh` or `bash` cannot work, so use logs, mounted `/data` files, and host Docker
+tooling for interactive inspection.
 
 Example:
 

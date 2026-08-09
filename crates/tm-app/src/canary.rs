@@ -486,6 +486,28 @@ fn canary_failure_class(error: &anyhow::Error) -> &'static str {
 mod tests {
     use super::*;
 
+    fn verified_eventsub_report() -> EventSubSetupReport {
+        EventSubSetupReport {
+            planned_subscriptions: 1,
+            active_subscriptions: 1,
+            failed_subscriptions: 0,
+            overflow_streamers: 0,
+            total_cost: 1,
+            max_total_cost: 10,
+            verified: true,
+            capabilities: vec![tm_pubsub::EventSubStreamerCapability {
+                streamer_index: 0,
+                presence_source: String::from("eventsub+gql-polling"),
+                prediction_source: String::from("pubsub-compatibility"),
+                raid_source: String::from("disabled"),
+                planned_subscription_types: vec![String::from("stream.online")],
+                active_subscription_types: vec![String::from("stream.online")],
+                skipped_subscription_types: Vec::new(),
+                failure_class: None,
+            }],
+        }
+    }
+
     #[test]
     fn canary_failure_message_keeps_only_fixed_stage_and_failure_class() {
         let error = CanaryCheckError::new(
@@ -497,6 +519,126 @@ mod tests {
 
         assert_eq!(message, "inventory:contract-or-shape");
         assert!(!message.contains("sensitive-response-field"));
+    }
+
+    #[test]
+    fn canary_failure_classes_are_stable_and_privacy_safe() {
+        for (failure, expected) in [
+            (TwitchFailureClass::Unauthorized, "unauthorized"),
+            (TwitchFailureClass::RateLimited, "rate-limited"),
+            (TwitchFailureClass::ServerError, "server-error"),
+            (TwitchFailureClass::Timeout, "timeout"),
+            (TwitchFailureClass::ConnectionReset, "connection-reset"),
+            (TwitchFailureClass::Other, "contract-or-shape"),
+        ] {
+            let error = anyhow::Error::new(TwitchClientError::RemoteRequest {
+                context: "canary-test",
+                failure,
+            });
+            assert_eq!(canary_failure_class(&error), expected);
+        }
+
+        let auth = anyhow::Error::new(tm_auth::AuthClientError::MissingAccessToken);
+        assert_eq!(canary_failure_class(&auth), "auth");
+        assert_eq!(
+            canary_failure_class(&anyhow!("local failure")),
+            "canary-check"
+        );
+    }
+
+    #[test]
+    fn canary_target_and_prediction_scope_follow_operator_configuration() {
+        let mut config = ConfigFile {
+            username: String::from("primary"),
+            ..ConfigFile::default()
+        };
+        assert_eq!(canary_target(&config), "primary");
+        config.streamers = vec![String::from("first"), String::from("second")];
+        assert_eq!(canary_target(&config), "first");
+
+        let mut session = tm_auth::AuthSession::new("primary", tm_auth::CookieStore::new());
+        assert!(!prediction_eventsub_authorized(&session));
+        session.set_scopes(["channel:read:predictions"]);
+        assert!(prediction_eventsub_authorized(&session));
+        session.set_scopes(["channel:manage:predictions"]);
+        assert!(prediction_eventsub_authorized(&session));
+    }
+
+    #[tokio::test]
+    async fn canary_streamer_resolution_normalizes_deduplicates_and_rejects_empty_input() {
+        let twitch = TwitchClient::with_client(reqwest::Client::new(), "token", "canary-test");
+        let base_settings = tm_domain::StreamerSettings {
+            farm_drops: true,
+            ..tm_domain::StreamerSettings::default()
+        };
+        let override_settings = tm_domain::StreamerSettings {
+            claim_moments: true,
+            ..tm_domain::StreamerSettings::default()
+        };
+        let overrides =
+            std::collections::HashMap::from([(String::from("primary"), override_settings.clone())]);
+        let config = ConfigFile {
+            username: String::from("Primary"),
+            streamers: vec![
+                String::from(" Primary "),
+                String::from("primary"),
+                String::new(),
+            ],
+            ..ConfigFile::default()
+        };
+
+        let resolved = resolve_canary_streamers(
+            &config,
+            &twitch,
+            "primary",
+            "42",
+            &base_settings,
+            &overrides,
+        )
+        .await;
+        assert!(resolved.is_ok());
+        let resolved = resolved.unwrap_or_default();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].channel_id, "42");
+        assert_eq!(resolved[0].settings, override_settings);
+
+        let fallback_config = ConfigFile {
+            username: String::from("Primary"),
+            streamers: Vec::new(),
+            ..ConfigFile::default()
+        };
+        let fallback = resolve_canary_streamers(
+            &fallback_config,
+            &twitch,
+            "primary",
+            "42",
+            &base_settings,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert!(fallback.is_ok());
+        let fallback = fallback.unwrap_or_default();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].settings, base_settings);
+
+        let empty_config = ConfigFile {
+            username: String::from("Primary"),
+            streamers: vec![String::new(), String::from("   ")],
+            ..ConfigFile::default()
+        };
+        let error = resolve_canary_streamers(
+            &empty_config,
+            &twitch,
+            "primary",
+            "42",
+            &base_settings,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert_eq!(
+            error.err().map(|error| error.stage),
+            Some("tracked-streamers")
+        );
     }
 
     #[tokio::test]
@@ -524,32 +666,22 @@ mod tests {
 
     #[test]
     fn eventsub_canary_requires_complete_verified_setup() {
-        let capability = tm_pubsub::EventSubStreamerCapability {
-            streamer_index: 0,
-            presence_source: String::from("eventsub+gql-polling"),
-            prediction_source: String::from("pubsub-compatibility"),
-            raid_source: String::from("disabled"),
-            planned_subscription_types: vec![String::from("stream.online")],
-            active_subscription_types: vec![String::from("stream.online")],
-            skipped_subscription_types: Vec::new(),
-            failure_class: None,
-        };
-        let mut report = EventSubSetupReport {
-            planned_subscriptions: 1,
-            active_subscriptions: 1,
-            failed_subscriptions: 0,
-            overflow_streamers: 0,
-            total_cost: 1,
-            max_total_cost: 10,
-            verified: true,
-            capabilities: vec![capability],
-        };
+        let mut report = verified_eventsub_report();
 
         assert!(validate_eventsub_canary_report(&report).is_ok());
+        report.planned_subscriptions = 0;
+        assert!(validate_eventsub_canary_report(&report).is_err());
+        report = verified_eventsub_report();
+        report.active_subscriptions = 0;
+        assert!(validate_eventsub_canary_report(&report).is_err());
+        report = verified_eventsub_report();
         report.failed_subscriptions = 1;
         assert!(validate_eventsub_canary_report(&report).is_err());
-        report.failed_subscriptions = 0;
+        report = verified_eventsub_report();
         report.verified = false;
+        assert!(validate_eventsub_canary_report(&report).is_err());
+        report = verified_eventsub_report();
+        report.capabilities[0].active_subscription_types.clear();
         assert!(validate_eventsub_canary_report(&report).is_err());
     }
 }

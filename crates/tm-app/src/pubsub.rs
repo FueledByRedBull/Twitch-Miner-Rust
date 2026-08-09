@@ -595,18 +595,20 @@ pub(crate) async fn log_pubsub_event(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::{
         classify_pubsub_connection_result, configured_pubsub_classes, failed_pubsub_setup_report,
-        handle_pubsub_message, pubsub_error_class, pubsub_event_topic_class,
-        PubSubConnectionOutcome, SupervisedPubSubEvent,
+        handle_pubsub_message, pubsub_error_class, pubsub_event_topic_class, spawn_pubsub_loop,
+        PubSubConnectionOutcome, PubSubTaskContext, SupervisedPubSubEvent,
     };
     use tm_pubsub::{
         CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
     };
 
     use crate::observability::{AppObservability, AppObservabilitySettings};
+    use crate::runtime_effects::RuntimeEffectContext;
     use crate::status::HealthTracker;
 
     fn test_observability() -> AppObservability {
@@ -623,6 +625,24 @@ mod tests {
             &[],
             tm_domain::OffsetDateTime::UNIX_EPOCH,
         ))
+    }
+
+    fn test_effects(
+        runtime: tm_runtime::RuntimeHandle,
+        health: &HealthTracker,
+    ) -> RuntimeEffectContext {
+        RuntimeEffectContext::new(
+            runtime,
+            Arc::new(tm_twitch::TwitchClient::with_client_and_endpoints(
+                reqwest::Client::new(),
+                "token",
+                "user-agent",
+                tm_twitch::TwitchEndpoints::default(),
+            )),
+            String::from("viewer-1"),
+            test_observability(),
+            health.clone(),
+        )
     }
 
     fn error_cases() -> Vec<(tm_pubsub::PubSubError, &'static str)> {
@@ -929,6 +949,160 @@ mod tests {
                 .failure_class
                 .as_deref(),
             Some("listen-rejected")
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_failure_records_configuration_classification_and_report() {
+        let runtime = test_runtime();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        let context = PubSubTaskContext {
+            effects: test_effects(runtime, &health),
+            auth_token: String::from("token"),
+            user_id: String::new(),
+            username: String::from("tester"),
+            tracked_streamers: Vec::new(),
+        };
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(true);
+
+        spawn_pubsub_loop(stop_rx, context)
+            .await
+            .expect("setup failure should be handled by the supervised task");
+
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(1));
+        let report = health
+            .pubsub_snapshot()
+            .expect("setup report should be recorded");
+        assert_eq!(report.connection_count, 0);
+        assert_eq!(report.total_topics, 0);
+        assert_eq!(report.capabilities.len(), 1);
+        assert_eq!(report.capabilities[0].configured_topics, 1);
+        assert_eq!(
+            report.capabilities[0].failure_class.as_deref(),
+            Some("configuration")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_setup_records_capabilities_before_stop_shutdown() {
+        let runtime = test_runtime();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        let context = PubSubTaskContext {
+            effects: test_effects(runtime, &health),
+            auth_token: String::from("token"),
+            user_id: String::from("viewer-1"),
+            username: String::from("tester"),
+            tracked_streamers: Vec::new(),
+        };
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(true);
+
+        spawn_pubsub_loop(stop_rx, context)
+            .await
+            .expect("a pre-stopped transport should shut down cleanly");
+
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(0));
+        let report = health
+            .pubsub_snapshot()
+            .expect("setup report should be recorded");
+        assert_eq!(report.connection_count, 1);
+        assert_eq!(report.total_topics, 1);
+        assert_eq!(report.capabilities.len(), 1);
+        assert_eq!(report.capabilities[0].topic_class, "points-user");
+        assert_eq!(report.capabilities[0].configured_topics, 1);
+        assert_eq!(report.capabilities[0].acknowledged_topics, 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_only_marks_ready_pubsub_healthy_and_closed_effect_queue_stops_task() {
+        let runtime = test_runtime();
+        let observability = test_observability();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        health.record_pubsub_setup(tm_pubsub::PubSubSetupReport {
+            connection_count: 1,
+            total_topics: 1,
+            capabilities: vec![tm_pubsub::PubSubCapabilityStatus {
+                topic_class: String::from("points-user"),
+                configured_topics: 1,
+                acknowledged_topics: 1,
+                last_message_unix: None,
+                reconnects: 0,
+                failure_class: None,
+            }],
+        });
+        let (effect_sender, effect_receiver) = tokio::sync::mpsc::channel(1);
+        drop(effect_receiver);
+
+        assert!(
+            !handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(tm_pubsub::PubSubConnectionEvent::Heartbeat),
+            )
+            .await
+        );
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(0));
+
+        assert!(
+            handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(tm_pubsub::PubSubConnectionEvent::Event(
+                    Box::new(MinerEvent::ClaimAvailable {
+                        channel_id: String::from("unknown"),
+                        claim_id: String::from("claim"),
+                    },)
+                )),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn response_error_without_topic_class_degrades_transport_without_capability_mutation() {
+        let runtime = test_runtime();
+        let observability = test_observability();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        health.record_pubsub_setup(tm_pubsub::PubSubSetupReport {
+            connection_count: 1,
+            total_topics: 1,
+            capabilities: vec![tm_pubsub::PubSubCapabilityStatus {
+                topic_class: String::from("points-user"),
+                configured_topics: 1,
+                acknowledged_topics: 0,
+                last_message_unix: None,
+                reconnects: 0,
+                failure_class: None,
+            }],
+        });
+        let (effect_sender, _effects) = tokio::sync::mpsc::channel(1);
+
+        assert!(
+            !handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(tm_pubsub::PubSubConnectionEvent::ResponseError {
+                    nonce: None,
+                    topic_class: None,
+                }),
+            )
+            .await
+        );
+        assert_eq!(health.task_consecutive_failures("pubsub"), Some(1));
+        assert_eq!(
+            health.pubsub_snapshot().unwrap().capabilities[0]
+                .failure_class
+                .as_deref(),
+            None
         );
     }
 }

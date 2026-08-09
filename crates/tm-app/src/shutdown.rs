@@ -107,7 +107,8 @@ mod tests {
         Arc,
     };
 
-    use super::{await_shutdown_task, await_shutdown_task_with_grace};
+    use super::{await_shutdown_task, await_shutdown_task_with_grace, shutdown_background_tasks};
+    use crate::BackgroundTasks;
 
     struct DropProbe(Arc<AtomicBool>);
 
@@ -150,5 +151,39 @@ mod tests {
         await_shutdown_task_with_grace("active-operation", &mut task, std::time::Duration::ZERO)
             .await;
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_orchestrator_signals_and_drains_mixed_task_outcomes() {
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let observed_stop = Arc::new(AtomicBool::new(false));
+        let observed_stop_task = Arc::clone(&observed_stop);
+        let stopping = tokio::spawn(async move {
+            if stop_rx.changed().await.is_ok() && *stop_rx.borrow() {
+                observed_stop_task.store(true, Ordering::SeqCst);
+            }
+        });
+        let aborted = tokio::spawn(async { std::future::pending::<()>().await });
+        aborted.abort();
+        let completed = tokio::spawn(async {});
+
+        shutdown_background_tasks(
+            stop_tx,
+            BackgroundTasks {
+                eventsub: Some(stopping),
+                pubsub: Some(aborted),
+                presence_poll: Some(completed),
+                context: None,
+                pending_claims: None,
+                minute: None,
+                drop: None,
+                chat: None,
+                streak_cache: None,
+                streak_recovery: None,
+            },
+        )
+        .await;
+
+        assert!(observed_stop.load(Ordering::SeqCst));
     }
 }

@@ -474,7 +474,8 @@ mod tests {
 
     use super::{
         classify_eventsub_error, eventsub_reconnect_delay, poll_presence_fallback,
-        record_connection_result, update_presence_fallback,
+        process_eventsub_message, record_connection_result, update_presence_fallback,
+        EventSubTaskContext,
     };
     use reqwest::StatusCode;
     use tm_domain::Streamer;
@@ -487,6 +488,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use crate::observability::{AppObservability, AppObservabilitySettings};
+    use crate::runtime_effects::RuntimeEffectContext;
     use crate::status::HealthTracker;
 
     struct TestWriter(Arc<Mutex<Vec<u8>>>);
@@ -764,6 +766,76 @@ mod tests {
         update_presence_fallback(&sender, &message);
 
         assert_eq!(*receiver.borrow(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn setup_and_heartbeat_restore_eventsub_health_and_fallback_state() -> anyhow::Result<()>
+    {
+        let config = tm_config::ConfigFile {
+            streamers: vec![String::from("alice")],
+            ..tm_config::ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(
+            &config,
+            &config.streamers,
+            tm_domain::OffsetDateTime::UNIX_EPOCH,
+        );
+        state.streamers[0].channel_id = String::from("100");
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let health = HealthTracker::default();
+        health.register("eventsub", Duration::from_secs(60));
+        health.failure("eventsub", "connection-reset");
+        let (fallback_tx, fallback_rx) = tokio::sync::watch::channel(vec![0]);
+        let context = EventSubTaskContext {
+            effects: RuntimeEffectContext::new(
+                runtime,
+                Arc::new(TwitchClient::with_client_and_endpoints(
+                    reqwest::Client::new(),
+                    "token",
+                    "user-agent",
+                    TwitchEndpoints::default(),
+                )),
+                String::from("viewer-1"),
+                test_observability()?,
+                health.clone(),
+            ),
+            auth_token: String::from("token"),
+            tracked_streamers: vec![Streamer {
+                username: String::from("alice"),
+                channel_id: String::from("100"),
+                ..Streamer::default()
+            }],
+            prediction_eventsub_authorized: false,
+            fallback_tx,
+        };
+
+        let setup = EventSubConnectionEvent::Setup(Box::new(EventSubSetupReport {
+            planned_subscriptions: 1,
+            active_subscriptions: 1,
+            failed_subscriptions: 0,
+            overflow_streamers: 0,
+            total_cost: 1,
+            max_total_cost: 10,
+            verified: true,
+            capabilities: vec![EventSubStreamerCapability {
+                streamer_index: 0,
+                presence_source: String::from("eventsub+gql-polling"),
+                prediction_source: String::from("disabled"),
+                raid_source: String::from("disabled"),
+                planned_subscription_types: vec![String::from("stream.online")],
+                active_subscription_types: vec![String::from("stream.online")],
+                skipped_subscription_types: Vec::new(),
+                failure_class: None,
+            }],
+        }));
+        assert!(!process_eventsub_message(&context, setup).await);
+        assert_eq!(*fallback_rx.borrow(), Vec::<usize>::new());
+        assert_eq!(health.task_consecutive_failures("eventsub"), Some(0));
+
+        health.failure("eventsub", "keepalive-timeout");
+        assert!(!process_eventsub_message(&context, EventSubConnectionEvent::Heartbeat).await);
+        assert_eq!(health.task_consecutive_failures("eventsub"), Some(0));
+        Ok(())
     }
 
     #[tokio::test]

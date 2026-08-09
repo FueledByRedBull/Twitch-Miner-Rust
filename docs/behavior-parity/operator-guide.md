@@ -20,6 +20,12 @@ before running the validation command. `--check-config` is local and
 network-free; the final command performs device-code login when no saved
 session exists.
 
+The app can also create a missing config from built-in defaults and extend an
+existing file during migration. Treat that as a runtime fallback, not a second
+starter template: use the tracked `config.example.json` when you want a
+reproducible manual setup, then inspect generated or migrated values with
+`--check-config`.
+
 If you want to watch logs in the foreground, run the command directly in the terminal. If you want a background process, redirect `stdout` and `stderr` to `run.out.log` and `run.err.log` and tail them with `Get-Content -Wait`.
 
 ## First-Time Login
@@ -49,6 +55,9 @@ If you want to watch logs in the foreground, run the command directly in the ter
   playback events are progress evidence only; the miner requires a newer typed
   streak milestone before it reports recovery. The private
   `data/streak-cache.json` stores only bounded channel/streak metadata.
+- `betting(make_predictions)` is the historical Go/Python field name retained
+  for config compatibility. The tracked template leaves it `false`; set it to
+  `true` only when prediction betting is intended. Do not rename the key.
 - `LONGEST_STREAK` and `EXPIRING_STREAK` may be used in `watch_priority`; both
   stay inside the evidence-based ten-minute live-streak budget. The budget is
   internal policy, not an operator setting; campaign pinning and the 15-minute
@@ -100,6 +109,9 @@ docker exec twitch-miner /twitch-miner --check-config --json --data-dir /data
 docker exec twitch-miner /twitch-miner --status --data-dir /data
 docker exec twitch-miner /twitch-miner --health --data-dir /data
 ```
+
+The image is `scratch`: direct `docker exec` of `/twitch-miner` works, but
+there is no `sh` or `bash` to start for an interactive shell.
 
 `--status` prints only the sanitized runtime-status document. It includes each
 task's last successful work and last activity, bounded
@@ -168,6 +180,11 @@ test package. `scripts/verify-go-baseline.ps1` temporarily copies the matching
 Go test harness into the pinned baseline checkout, runs the same vectors, and
 removes the generated files before returning. The gate fails if either
 implementation diverges; it does not read credentials or live Twitch data.
+
+For behavior-level differences and limits, including the typed
+playback-token/HLS preflight before minute-watch submission, see the
+[parity matrix](parity-matrix.md). This guide keeps the operational steps
+without duplicating that comparison.
 
 ## Transport health
 
