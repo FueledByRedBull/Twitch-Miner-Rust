@@ -35,7 +35,8 @@ mod tests {
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
     use crate::runtime_effects::{
-        evaluate_prediction, stealth_offset_from_entropy, RuntimeEffectContext,
+        evaluate_prediction, maybe_skip_prediction_for_balance, stealth_offset_from_entropy,
+        RuntimeEffectContext,
     };
     use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
     use crate::status::HealthTracker;
@@ -2814,5 +2815,57 @@ mod tests {
         for event_id in ["low-amount", "minimum-skip", "filter-skip"] {
             assert!(!snapshot.predictions.contains_key(event_id));
         }
+    }
+
+    #[tokio::test]
+    async fn prediction_minimum_balance_boundary_is_strictly_greater_than() {
+        let settings = tm_domain::StreamerSettings {
+            bet: BetSettings {
+                minimum_points: Some(100),
+                ..BetSettings::default()
+            },
+            ..tm_domain::StreamerSettings::default()
+        };
+        let above = Streamer {
+            username: String::from("above"),
+            channel_id: String::from("500"),
+            channel_points: 101,
+            settings: settings.clone(),
+            ..Streamer::default()
+        };
+        let equal = Streamer {
+            username: String::from("equal"),
+            channel_id: String::from("600"),
+            channel_points: 100,
+            settings,
+            ..Streamer::default()
+        };
+        let above_event = prediction_fixture("above-minimum", above.clone());
+        let equal_event = prediction_fixture("equal-minimum", equal.clone());
+        let (runtime, context) = prediction_effect_context(
+            vec![above.clone(), equal.clone()],
+            vec![above_event, equal_event],
+        );
+
+        assert!(!maybe_skip_prediction_for_balance(
+            &runtime,
+            "above-minimum",
+            &above,
+            &context.observability,
+        )
+        .await
+        .unwrap());
+        assert!(maybe_skip_prediction_for_balance(
+            &runtime,
+            "equal-minimum",
+            &equal,
+            &context.observability,
+        )
+        .await
+        .unwrap());
+
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert!(snapshot.predictions.contains_key("above-minimum"));
+        assert!(!snapshot.predictions.contains_key("equal-minimum"));
     }
 }
