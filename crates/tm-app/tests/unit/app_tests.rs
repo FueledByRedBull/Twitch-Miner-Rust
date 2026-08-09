@@ -34,7 +34,9 @@ mod tests {
     };
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
-    use crate::runtime_effects::stealth_offset_from_entropy;
+    use crate::runtime_effects::{
+        evaluate_prediction, stealth_offset_from_entropy, RuntimeEffectContext,
+    };
     use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
     use crate::status::HealthTracker;
     use crate::utilities::new_session_id;
@@ -45,14 +47,67 @@ mod tests {
     use tm_auth::{AuthEndpoints, AuthSession, CookieStore, TwitchAuthClient};
     use tm_config::{AppPaths, ConfigError, ConfigFile};
     use tm_domain::{
-        BetSettings, DelayMode, Game, OffsetDateTime, PredictionDecision, PredictionEvent,
-        PredictionOutcome, Streamer,
+        BetSettings, Condition, DelayMode, FilterCondition, Game, OffsetDateTime, OutcomeKey,
+        PredictionDecision, PredictionEvent, PredictionOutcome, Streamer,
     };
     use tm_observability::DiscordClient;
     use tm_twitch::{InventoryDrop, TwitchClient, TwitchEndpoints};
 
     fn ts(seconds: i64) -> tm_runtime::RuntimeTime {
         OffsetDateTime::from_unix_timestamp(seconds).unwrap()
+    }
+
+    fn prediction_fixture(event_id: &str, streamer: Streamer) -> PredictionEvent {
+        PredictionEvent {
+            streamer,
+            event_id: event_id.to_string(),
+            title: String::from("Prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(0),
+            window_seconds: 30.0,
+            outcomes: vec![PredictionOutcome {
+                id: "outcome-1".into(),
+                title: String::from("Outcome"),
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        }
+    }
+
+    fn prediction_effect_context(
+        streamers: Vec<Streamer>,
+        predictions: Vec<PredictionEvent>,
+    ) -> (tm_runtime::RuntimeHandle, RuntimeEffectContext) {
+        let mut state = tm_runtime::RuntimeState::from_targets(&ConfigFile::default(), &[], ts(0));
+        state.streamers = streamers;
+        state.predictions.extend(
+            predictions
+                .into_iter()
+                .map(|event| (event.event_id.clone(), event)),
+        );
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let context = RuntimeEffectContext::new(
+            runtime.clone(),
+            Arc::new(TwitchClient::with_client(
+                reqwest::Client::new(),
+                "token",
+                "ua",
+            )),
+            String::from("user-1"),
+            test_observability(),
+            HealthTracker::default(),
+        );
+        (runtime, context)
+    }
+
+    async fn evaluate_prediction_ids(context: &RuntimeEffectContext, event_ids: &[&str]) {
+        for event_id in event_ids {
+            evaluate_prediction(context, event_id).await.unwrap();
+        }
     }
 
     fn unique_temp_dir() -> PathBuf {
@@ -1352,6 +1407,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_session_without_auth_token_falls_back_to_device_login() {
+        let directory = tempfile::tempdir().unwrap();
+        AuthSession::new("tester", CookieStore::new())
+            .save_to_dir(directory.path())
+            .unwrap();
+
+        let (auth_endpoints, auth_server) = spawn_auth_server();
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            auth_endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session =
+            load_or_login_session_with_auth_client(&config, directory.path(), &auth_client)
+                .await
+                .unwrap();
+
+        auth_server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("token-123"));
+        assert_eq!(session.user_id(), Some("user-123"));
+    }
+
+    #[tokio::test]
+    async fn corrupted_saved_session_falls_back_to_device_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let cookies_dir = directory.path().join("cookies");
+        fs::create_dir_all(&cookies_dir).unwrap();
+        fs::write(cookies_dir.join("tester.json"), b"{not-json").unwrap();
+
+        let (auth_endpoints, auth_server) = spawn_auth_server();
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            auth_endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session =
+            load_or_login_session_with_auth_client(&config, directory.path(), &auth_client)
+                .await
+                .unwrap();
+
+        auth_server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("token-123"));
+        assert_eq!(session.user_id(), Some("user-123"));
+    }
+
+    #[tokio::test]
+    async fn expired_device_code_stops_before_polling_for_access_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoints, requests, server) = spawn_auth_validation_server(vec![http_response(
+            "200 OK",
+            r#"{"device_code":"device-code","user_code":"ABCD","interval":0,"expires_in":0}"#,
+        )]);
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let error = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(error
+            .to_string()
+            .contains("device code expired before authorization"));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn refresh_snapshot_streamers_updates_runtime_context() {
         let (endpoints, requests, server) = spawn_twitch_server(3);
         let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
@@ -2559,5 +2710,109 @@ mod tests {
         let snapshot = runtime.state_snapshot().await.unwrap();
         assert_eq!(snapshot.streamers[0].channel_points, 1_000);
         assert_eq!(snapshot.predictions["event-1"].decision.amount, 250);
+    }
+
+    #[tokio::test]
+    async fn prediction_evaluation_handles_terminal_and_structural_skip_cases() {
+        let mut settings = tm_domain::StreamerSettings::default();
+        settings.bet.minimum_points = None;
+        let active = Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            channel_points: 1_000,
+            settings,
+            ..Streamer::default()
+        };
+        let mut terminal = prediction_fixture("terminal", active.clone());
+        terminal.bet_placed = true;
+        let mut settled = prediction_fixture("settled", active.clone());
+        settled.result_type = String::from("WIN");
+        let mut inactive = prediction_fixture("inactive", active.clone());
+        inactive.status = String::from("RESOLVED");
+        let missing_streamer = prediction_fixture(
+            "missing-streamer",
+            Streamer {
+                channel_id: String::from("999"),
+                ..Streamer::default()
+            },
+        );
+        let mut no_outcome = prediction_fixture("no-outcome", active.clone());
+        no_outcome.outcomes.clear();
+        let (runtime, context) = prediction_effect_context(
+            vec![active],
+            vec![terminal, settled, inactive, missing_streamer, no_outcome],
+        );
+
+        evaluate_prediction_ids(
+            &context,
+            &[
+                "unknown",
+                "terminal",
+                "settled",
+                "inactive",
+                "missing-streamer",
+                "no-outcome",
+            ],
+        )
+        .await;
+
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert!(snapshot.predictions.contains_key("terminal"));
+        assert!(snapshot.predictions.contains_key("settled"));
+        for event_id in ["inactive", "missing-streamer", "no-outcome"] {
+            assert!(!snapshot.predictions.contains_key(event_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn prediction_evaluation_removes_safe_financial_and_filter_skips() {
+        let low_balance = Streamer {
+            username: String::from("low-balance"),
+            channel_id: String::from("200"),
+            channel_points: 1,
+            ..Streamer::default()
+        };
+        let minimum = Streamer {
+            username: String::from("minimum"),
+            channel_id: String::from("300"),
+            channel_points: 50,
+            settings: tm_domain::StreamerSettings {
+                bet: BetSettings {
+                    minimum_points: Some(100),
+                    ..BetSettings::default()
+                },
+                ..tm_domain::StreamerSettings::default()
+            },
+            ..Streamer::default()
+        };
+        let mut filtered_settings = tm_domain::StreamerSettings::default();
+        filtered_settings.bet.minimum_points = None;
+        filtered_settings.bet.filter_condition = Some(FilterCondition {
+            by: OutcomeKey::TotalUsers,
+            condition: Condition::Gt,
+            value: Some(1.0),
+        });
+        let filtered = Streamer {
+            username: String::from("filtered"),
+            channel_id: String::from("400"),
+            channel_points: 1_000,
+            settings: filtered_settings,
+            ..Streamer::default()
+        };
+        let (runtime, context) = prediction_effect_context(
+            vec![low_balance.clone(), minimum.clone(), filtered.clone()],
+            vec![
+                prediction_fixture("low-amount", low_balance),
+                prediction_fixture("minimum-skip", minimum),
+                prediction_fixture("filter-skip", filtered),
+            ],
+        );
+
+        evaluate_prediction_ids(&context, &["low-amount", "minimum-skip", "filter-skip"]).await;
+
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        for event_id in ["low-amount", "minimum-skip", "filter-skip"] {
+            assert!(!snapshot.predictions.contains_key(event_id));
+        }
     }
 }

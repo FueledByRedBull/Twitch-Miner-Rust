@@ -1,4 +1,13 @@
-# Go-To-Rust Data Migration
+# Go/Python-to-Rust Data Migration
+
+This guide covers migration from both the Go and Python miners. Rust can reuse
+the supported Go configuration and cookie layouts in place; Python cookie jars
+are intentionally kept outside the active Rust data directory and are not
+auto-converted.
+
+For behavior-level differences from Go, including Rust's typed
+playback-token/HLS preflight before minute-watch submission, see the
+[behavior-parity matrix](behavior-parity/parity-matrix.md).
 
 The Rust miner can reuse the Go layout when its data directory is mounted at
 `/data`, including a legacy host directory named `twitch-miner-go`. The name is

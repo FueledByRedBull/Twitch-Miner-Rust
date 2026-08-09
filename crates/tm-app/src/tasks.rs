@@ -465,4 +465,71 @@ mod tests {
         }
         shutdown_background_tasks(stop_tx, tasks).await;
     }
+
+    #[tokio::test]
+    async fn authenticated_wiring_keeps_core_loops_without_optional_feature_tasks() {
+        let config = tm_config::ConfigFile {
+            username: String::from("tester"),
+            ..tm_config::ConfigFile::default()
+        };
+        let streamer = tm_domain::Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            ..tm_domain::Streamer::default()
+        };
+        let twitch = test_twitch();
+        let runtime = tm_runtime::spawn_runtime_state(tm_runtime::RuntimeState::from_targets(
+            &config,
+            std::slice::from_ref(&streamer.username),
+            tm_domain::OffsetDateTime::UNIX_EPOCH,
+        ));
+        let observability = test_observability();
+        let cache = StreakCache::default();
+        let directory = tempfile::tempdir().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(true);
+        let health = HealthTracker::default();
+
+        let tasks = spawn_background_tasks(&BackgroundTaskParams {
+            config: &config,
+            stop_rx,
+            runtime: &runtime,
+            twitch: &twitch,
+            auth_token: "token",
+            user_id: Some(&String::from("user-1")),
+            prediction_eventsub_authorized: false,
+            initial_streamers: std::slice::from_ref(&streamer),
+            observability: &observability,
+            health: &health,
+            streak_cache: &cache,
+            work_dir: directory.path(),
+        })
+        .unwrap();
+
+        assert!(tasks.eventsub.is_some());
+        assert!(tasks.pubsub.is_some());
+        assert!(tasks.presence_poll.is_some());
+        assert!(tasks.context.is_some());
+        assert!(tasks.pending_claims.is_some());
+        assert!(tasks.minute.is_some());
+        assert!(tasks.drop.is_none());
+        assert!(tasks.streak_recovery.is_none());
+        assert!(tasks.chat.is_some());
+        assert!(tasks.streak_cache.is_some());
+        for task in [
+            "eventsub",
+            "pubsub",
+            "presence-poll",
+            "context",
+            "pending-claims",
+            "minute",
+            "chat",
+            "streak-cache",
+        ] {
+            assert_eq!(health.task_consecutive_failures(task), Some(0), "{task}");
+        }
+        assert_eq!(health.task_consecutive_failures("drop"), None);
+        assert_eq!(health.task_consecutive_failures("streak-recovery"), None);
+
+        shutdown_background_tasks(stop_tx, tasks).await;
+    }
 }

@@ -97,7 +97,7 @@ The container layout is centered on `/data`:
 - `/data/cookies/<username>.json`
 - `/data/log/*.log`
 
-Published images are static Rust binaries in a `scratch` runtime. The image has no shell, package manager, or OS certificate bundle; TLS trust comes from the Rust dependencies configured in the app. The runtime contract stays centered on `/data` with `TCPM_DATA_DIR=/data`, `TCPM_CONFIG=/data/config.json`, and `SIGTERM` shutdown.
+Published images are static Rust binaries in a `scratch` runtime. The image has no shell, package manager, or OS certificate bundle; TLS trust comes from the Rust dependencies configured in the app. `docker exec` still works when it invokes `/twitch-miner` directly, but `docker exec ... sh` or `bash` cannot work in `scratch`. The runtime contract stays centered on `/data` with `TCPM_DATA_DIR=/data`, `TCPM_CONFIG=/data/config.json`, and `SIGTERM` shutdown.
 
 There is also a named-volume variant in [deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml).
 
@@ -114,25 +114,19 @@ Deploy published images by immutable digest. See [docs/release-process.md](docs/
 
 ## Configuration
 
-The miner will create and extend its config automatically, but a minimal manual setup looks like this:
+For manual setup, use the credential-free tracked
+[`config.example.json`](config.example.json) as the canonical template. Copy
+it to `data/config.json`, replace both login placeholders, and run the
+network-free `--check-config` command from [Quick start](#quick-start).
 
-```json
-{
-  "username": "your-twitch-username",
-  "streamers": ["StreamerHouse"],
-  "farm_drops": true,
-  "claim_drops": true,
-  "claim_drops_startup": true,
-  "watch_one_stream_when_drops_active": true,
-  "claim_moments": true,
-  "watch_streak_vod_recovery": false,
-  "followers_order": "DESC",
-  "community_goals": false,
-  "privacy": {
-    "anonymize_logs": false
-  }
-}
-```
+When the configured file does not exist, the app can create one from its
+built-in defaults and extend existing files during migration. That generated
+fallback is not a second starter template: values can differ from the tracked
+example (the historical `betting(make_predictions)` field, for example, is
+enabled by the built-in default but disabled in the safe template). The field
+name is retained for Go/Python lineage and config compatibility; set it to
+`true` only when prediction betting is intended, and keep the spelling when
+editing the file.
 
 Notes:
 
@@ -192,12 +186,13 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
 - end-to-end WATCH walkthrough: [docs/architecture/walkthrough.md](docs/architecture/walkthrough.md)
 - end-to-end prediction (effect-loop) walkthrough: [docs/architecture/prediction-walkthrough.md](docs/architecture/prediction-walkthrough.md)
-- behavior parity and limitations: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
+- behavioral differences and limits, including typed playback-token/HLS
+  preflight: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)
 - release and rollback: [docs/release-process.md](docs/release-process.md)
 - signed release evidence template: [docs/release-record-template.md](docs/release-record-template.md)
 - performance measurement: [docs/performance.md](docs/performance.md)
-- Go-to-Rust migration: [docs/migration.md](docs/migration.md)
+- Go/Python-to-Rust data migration: [docs/migration.md](docs/migration.md)
 
 ## Validation
 
