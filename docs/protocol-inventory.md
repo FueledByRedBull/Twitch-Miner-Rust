@@ -147,7 +147,12 @@ the list response contains pagination. Both are capacity-planned; overflow or
 failed presence capabilities use bounded GQL polling instead of silently
 dropping channels. The WebSocket requests Twitch's supported 30-second
 keepalive window and applies a five-second delivery grace before reconnecting,
-avoiding an edge race at the advertised silence boundary.
+avoiding an edge race at the advertised silence boundary. A connected peer has
+15 seconds to send the first Welcome frame, and the complete connect, Welcome,
+and subscription-setup attempt has a four-minute outer budget. Retry attempts
+refresh supervision activity without being recorded as successes; the existing
+eight-minute silent-task policy therefore still restarts a genuinely stuck
+task while bounded recovery remains in process.
 
 Message and subscription types this build does not model are ignored rather
 than treated as protocol violations, so an additive Twitch change cannot force a

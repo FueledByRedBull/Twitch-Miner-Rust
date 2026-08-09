@@ -394,3 +394,100 @@ approval remains pending immutable-image deployment and the fresh soak above.
   `d856e290` image is not a release candidate and cannot receive deployment or
   soak credit. The follow-up revision requires the same quality, immutable
   image, guarded deployment, and non-backdated soak gates.
+
+## EventSub Welcome/setup liveness follow-up - 2026-08-09
+
+### Scope, intent, and risk
+
+- Baseline: `61177339319029c7f87a42db4ebe5b5195825fa4`, the exact revision
+  deployed at manifest
+  `sha256:2a564e1028d5821c68c28265ad953239cdc46443134573d2868f00227c4e4533`.
+- Candidate branch: `fix/eventsub-welcome-deadline`.
+- Risk: high but narrow. The change affects external EventSub connection setup,
+  timeout classification, and application task-health activity. It does not
+  change authorization, subscription planning, event parsing, watch selection,
+  point accounting, PubSub, IRC, GraphQL mutations, persisted data, or config.
+- Incident basis: after a host Wi-Fi interruption the baseline recovered once,
+  then logged one keepalive timeout and two `no-subscriptions` attempts before
+  EventSub produced no health activity for 493 seconds. Existing fatal
+  supervision performed an orderly process restart and the same image recovered
+  to EventSub 10/10 and PubSub 53/53. This sequence supports a setup-silence
+  hypothesis; it does not prove which remote or local operation stalled.
+
+The intended change is deliberately smaller than an EventSub sub-supervisor:
+bound the first Welcome frame to 15 seconds, bound the complete connect,
+Welcome, and subscription-setup attempt to four minutes, refresh only the
+task's supervision activity when an attempt starts, and expose fixed timeout
+stage classes. The existing five-minute maximum retry backoff and eight-minute
+silent-task threshold remain unchanged. A failed attempt still increments and
+retains degraded health; only a real setup/heartbeat records success.
+
+### Blast radius and history
+
+| Changed area | Direct effect | Downstream checks |
+| --- | --- | --- |
+| `tm-pubsub/eventsub.rs` | Typed timeout stages and nested Welcome/setup deadlines | ordinary setup, reconnect inheritance, subscription capacity, established keepalive, local WebSocket/HTTP fixtures |
+| `tm-app/eventsub.rs` | Attempt activity and stage-to-health classification | retry/backoff, polling fallback, shutdown cancellation, redacted warnings |
+| `tm-app/status.rs` | Activity-only health update | strict health, silent-task supervision, failure counters and last error class |
+| Deep Quality CI | One bounded timeout-class mutation shard | non-empty selection and all-mutant kill requirement |
+
+History inspection traced the unbounded pre-Welcome read to the original
+EventSub runtime work in `92db087`, reconnect inheritance to `3a9c30c`, and the
+current recovery/supervision policy to `6b09ce7` and later assurance releases.
+The established socket already used the negotiated keepalive plus five seconds,
+WebSocket connect already had 30 seconds, and each Helix list/create request
+already had 30 seconds. The uncovered liveness boundary was the first-frame
+read and the aggregate serial setup attempt.
+
+### Adversarial analysis
+
+- **Timeout cancellation:** Tokio drops the in-flight setup future at the outer
+  deadline, closing its WebSocket/HTTP resources. No points-changing mutation is
+  involved, and a fresh ordinary session re-lists capacity before creating
+  subscriptions.
+- **Reconnect correctness:** a Twitch reconnect URL still carries the prior
+  subscriptions; the new session re-derives their active count instead of
+  recreating them. Both initial and inherited setup now share the same outer
+  liveness budget.
+- **Health masking:** attempt activity changes only `last_activity_unix`; it
+  cannot clear the last error class, reset consecutive failures, advance last
+  success, or make strict `--health` pass. The five-minute maximum backoff is
+  below the eight-minute inactivity limit, and the four-minute attempt budget is
+  independently below it.
+- **Protocol drift:** unsupported frames and Ping/Pong before Welcome remain
+  accepted within the deadline. A modelled non-Welcome first message, malformed
+  payload, early close, revocation, and established keepalive expiry retain
+  their existing fail-closed behavior.
+- **Privacy:** timeout variants contain only a fixed enum. Their health classes
+  cannot contain URLs, tokens, channel IDs, response bodies, or remote error
+  strings.
+- **Rejected expansion:** no permanent polling downgrade, duplicate EventSub
+  worker, generic component-supervision framework, user-configurable timeout, or
+  weakened fatal policy was added from a single incident.
+
+### Verification and remaining release evidence
+
+Local evidence includes the locked all-target/all-feature workspace tests, all
+45 `tm-pubsub` tests, all 131 `tm-app` tests plus its device-flow integration,
+workspace formatting, ordinary and production no-panic/no-unwrap strict
+all-target/all-feature Clippy, warning-denied rustdoc, documentation,
+architecture, release-hygiene, and diff checks. Local WebSocket/HTTP fixtures
+cover a connected
+peer that never sends Welcome and a subscription setup that exceeds its outer
+budget. Existing tests also cover ordinary setup, reconnect inheritance,
+keepalive grace, recovery classification, polling fallback, and shutdown
+cancellation. The timeout-class mutation shard is pinned in Deep Quality;
+`cargo-mutants` is not installed locally, so the non-empty/all-killed CI result
+is mandatory rather than inferred. Local `cargo audit` could not parse the
+user-level advisory checkout because it contains a duplicate upstream advisory
+ID; the clean pinned CI audit and dependency-policy jobs therefore remain
+mandatory and are not credited locally.
+
+Before acceptance, the exact candidate still requires the locked workspace,
+rustdoc, documentation, architecture, release-hygiene, dependency/security,
+coverage, replay, both bounded fuzz targets, every mutation shard,
+reproducibility, and remote CI gates. Because production bytes change, it also
+requires one merged revision, a new immutable three-platform manifest, registry
+smoke tests, exact-digest Pi preflight/deployment, normal-SIGTERM recovery, and
+a fresh non-backdated 72-hour strict-health/reward soak. Earlier runtime cannot
+be credited to that new baseline.

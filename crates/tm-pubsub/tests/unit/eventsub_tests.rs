@@ -6,10 +6,10 @@ use std::sync::{
 use super::{
     event_from_notification, listen_socket, parse_eventsub_message,
     subscription_plan_with_capacity, subscription_requests, subscription_requests_with_policy,
-    EventSubClient, EventSubClientSettings, EventSubConnectionEvent, EventSubMessage,
-    MessageDeduper, EVENTSUB_WEBSOCKET_URL,
+    EventSubClient, EventSubClientSettings, EventSubConnectionEvent, EventSubDeadlines,
+    EventSubError, EventSubMessage, EventSubTimeoutStage, MessageDeduper, EVENTSUB_WEBSOCKET_URL,
 };
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tm_domain::{IrcMode, Streamer, StreamerSettings};
 use tm_events::MinerEvent;
@@ -82,6 +82,62 @@ async fn keepalive_wait_allows_a_small_delivery_grace() {
         Some(EventSubConnectionEvent::Heartbeat)
     ));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_welcome_expires_at_the_welcome_deadline() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let _ = socket.next().await;
+    });
+
+    let mut settings = EventSubClientSettings::new("client", "token");
+    settings.websocket_url = format!("ws://{address}");
+    settings.subscriptions_url = String::from("http://127.0.0.1:1/unused");
+    let client = EventSubClient::new(settings);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+
+    let result = client
+        .connect_and_listen_with_deadlines(
+            &[streamer()],
+            sender,
+            EventSubDeadlines {
+                connect: std::time::Duration::from_secs(1),
+                welcome: std::time::Duration::from_millis(50),
+                session_setup: std::time::Duration::from_secs(1),
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(EventSubError::Timeout(EventSubTimeoutStage::Welcome))
+    ));
+    server.abort();
+}
+
+#[test]
+fn timeout_stages_have_stable_sanitized_failure_classes() {
+    let cases = [
+        (EventSubTimeoutStage::WebSocketConnect, "connect-timeout"),
+        (EventSubTimeoutStage::Welcome, "welcome-timeout"),
+        (EventSubTimeoutStage::SessionSetup, "setup-timeout"),
+        (
+            EventSubTimeoutStage::CreateSubscription,
+            "subscription-create-timeout",
+        ),
+        (
+            EventSubTimeoutStage::ListSubscriptions,
+            "subscription-list-timeout",
+        ),
+    ];
+    for (stage, expected) in cases {
+        assert_eq!(stage.failure_class(), expected);
+        assert!(!stage.to_string().contains("token"));
+    }
 }
 
 async fn read_http_json(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
@@ -178,6 +234,77 @@ async fn write_json_response(stream: &mut tokio::net::TcpStream, status: &str, b
             body.len()
         );
     stream.write_all(response.as_bytes()).await.unwrap();
+}
+
+#[tokio::test]
+async fn complete_session_setup_has_an_outer_deadline() {
+    let websocket_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let websocket_address = websocket_listener.local_addr().unwrap();
+    let subscription_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let subscription_address = subscription_listener.local_addr().unwrap();
+
+    let websocket_server = tokio::spawn(async move {
+        let (stream, _) = websocket_listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({
+                    "metadata": {"message_id":"welcome-1","message_type":"session_welcome"},
+                    "payload": {"session": {"id":"session-1","keepalive_timeout_seconds":30,"reconnect_url":null}}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.next().await;
+    });
+    let subscription_server = tokio::spawn(async move {
+        let (mut stream, _) = subscription_listener.accept().await.unwrap();
+        assert!(read_http_json(&mut stream).await.is_null());
+        write_json_response(&mut stream, "200 OK", &capacity_response(0, 10)).await;
+
+        let (mut stream, _) = subscription_listener.accept().await.unwrap();
+        let _request = read_http_json(&mut stream).await;
+        std::future::pending::<()>().await;
+    });
+
+    let tracked = (0..5)
+        .map(|index| {
+            let mut tracked = streamer();
+            tracked.channel_id = (100 + index).to_string();
+            tracked.settings.make_predictions = false;
+            tracked.settings.follow_raid = false;
+            tracked
+        })
+        .collect::<Vec<_>>();
+    let mut settings = EventSubClientSettings::new("client", "token");
+    settings.websocket_url = format!("ws://{websocket_address}");
+    settings.subscriptions_url = format!("http://{subscription_address}/eventsub");
+    let client = EventSubClient::new(settings);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+
+    let result = client
+        .connect_and_listen_with_deadlines(
+            &tracked,
+            sender,
+            EventSubDeadlines {
+                connect: std::time::Duration::from_secs(1),
+                welcome: std::time::Duration::from_secs(1),
+                session_setup: std::time::Duration::from_millis(250),
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(EventSubError::Timeout(EventSubTimeoutStage::SessionSetup))
+        ),
+        "unexpected setup result: {result:?}"
+    );
+    websocket_server.abort();
+    subscription_server.abort();
 }
 
 #[test]

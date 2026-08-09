@@ -44,6 +44,7 @@ async fn run_eventsub_loop(
         if *stop.borrow() {
             break;
         }
+        context.effects.health.activity("eventsub");
         let _ = context
             .fallback_tx
             .send((0..context.tracked_streamers.len()).collect());
@@ -446,7 +447,7 @@ fn classify_eventsub_error(error: &EventSubError) -> &'static str {
         EventSubError::HttpStatus { .. } => "http-status",
         EventSubError::Http(_) => "http-error",
         EventSubError::WebSocket(_) => "connection-reset",
-        EventSubError::Timeout(_) => "timeout",
+        EventSubError::Timeout(stage) => stage.failure_class(),
         EventSubError::KeepaliveTimeout => "keepalive-timeout",
         EventSubError::Revoked { .. } => "revoked",
         EventSubError::ReconnectRequested { .. } => "reconnect",
@@ -482,6 +483,7 @@ mod tests {
     use tm_observability::DiscordClient;
     use tm_pubsub::{
         EventSubConnectionEvent, EventSubError, EventSubSetupReport, EventSubStreamerCapability,
+        EventSubTimeoutStage,
     };
     use tm_twitch::{TwitchClient, TwitchEndpoints};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -569,8 +571,8 @@ mod tests {
         };
         assert_eq!(classify_eventsub_error(&error), "rate-limited");
         assert_eq!(
-            classify_eventsub_error(&EventSubError::Timeout("test")),
-            "timeout"
+            classify_eventsub_error(&EventSubError::Timeout(EventSubTimeoutStage::Welcome)),
+            "welcome-timeout"
         );
         assert_eq!(
             classify_eventsub_error(&EventSubError::KeepaliveTimeout),
@@ -626,7 +628,26 @@ mod tests {
                 "http-status",
             ),
             (EventSubError::Http(http_error), "http-error"),
-            (EventSubError::Timeout("test"), "timeout"),
+            (
+                EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect),
+                "connect-timeout",
+            ),
+            (
+                EventSubError::Timeout(EventSubTimeoutStage::Welcome),
+                "welcome-timeout",
+            ),
+            (
+                EventSubError::Timeout(EventSubTimeoutStage::SessionSetup),
+                "setup-timeout",
+            ),
+            (
+                EventSubError::Timeout(EventSubTimeoutStage::CreateSubscription),
+                "subscription-create-timeout",
+            ),
+            (
+                EventSubError::Timeout(EventSubTimeoutStage::ListSubscriptions),
+                "subscription-list-timeout",
+            ),
             (EventSubError::KeepaliveTimeout, "keepalive-timeout"),
             (
                 EventSubError::Revoked {

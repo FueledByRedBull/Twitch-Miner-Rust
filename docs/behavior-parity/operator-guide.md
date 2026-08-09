@@ -191,7 +191,10 @@ without duplicating that comparison.
 EventSub and PubSub are separate health entries. EventSub `unauthorized`,
 `revoked`, or `no-subscriptions` means the official subscription path needs
 authorization or contract attention; `rate-limited`, `server-error`,
-`connection-reset`, and `timeout` are bounded recovery states. Presence entries
+`connection-reset`, `connect-timeout`, `welcome-timeout`, `setup-timeout`,
+`subscription-create-timeout`, `subscription-list-timeout`, and
+`keepalive-timeout` are bounded recovery states whose names identify the failed
+stage without exposing the endpoint or payload. Presence entries
 whose source is `gql-polling` are intentionally covered by the fallback poller.
 One fallback cycle may query many streamers, but health counts that batch as a
 single success or failure so a brief shared network outage cannot exhaust the

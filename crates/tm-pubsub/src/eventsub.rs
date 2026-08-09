@@ -39,8 +39,25 @@ const EVENTSUB_MAX_LIST_PAGES: usize = 10;
 const EVENTSUB_MAX_READ_ATTEMPTS: usize = 3;
 const EVENTSUB_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const EVENTSUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const EVENTSUB_WELCOME_TIMEOUT: Duration = Duration::from_secs(15);
+const EVENTSUB_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 const EVENTSUB_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const EVENTSUB_KEEPALIVE_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
+struct EventSubDeadlines {
+    connect: Duration,
+    welcome: Duration,
+    session_setup: Duration,
+}
+
+impl EventSubDeadlines {
+    const PRODUCTION: Self = Self {
+        connect: EVENTSUB_CONNECT_TIMEOUT,
+        welcome: EVENTSUB_WELCOME_TIMEOUT,
+        session_setup: EVENTSUB_SESSION_SETUP_TIMEOUT,
+    };
+}
 
 /// Immutable connection, authorization, and source-selection policy.
 #[derive(Clone)]
@@ -104,11 +121,49 @@ pub enum EventSubError {
     #[error("eventsub has no usable subscriptions")]
     NoSubscriptions,
     #[error("eventsub operation timed out: {0}")]
-    Timeout(&'static str),
+    Timeout(EventSubTimeoutStage),
     #[error("eventsub keepalive timeout")]
     KeepaliveTimeout,
     #[error("eventsub reconnect requested")]
     ReconnectRequested { reconnect_url: String },
+}
+
+/// Network stage whose deadline expired.
+///
+/// The variants deliberately contain no URL, session, token, or broadcaster
+/// data so callers can safely expose their stable failure classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSubTimeoutStage {
+    WebSocketConnect,
+    Welcome,
+    SessionSetup,
+    CreateSubscription,
+    ListSubscriptions,
+}
+
+impl EventSubTimeoutStage {
+    #[must_use]
+    pub const fn failure_class(self) -> &'static str {
+        match self {
+            Self::WebSocketConnect => "connect-timeout",
+            Self::Welcome => "welcome-timeout",
+            Self::SessionSetup => "setup-timeout",
+            Self::CreateSubscription => "subscription-create-timeout",
+            Self::ListSubscriptions => "subscription-list-timeout",
+        }
+    }
+}
+
+impl std::fmt::Display for EventSubTimeoutStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::WebSocketConnect => "websocket connect",
+            Self::Welcome => "welcome",
+            Self::SessionSetup => "session setup",
+            Self::CreateSubscription => "create subscription",
+            Self::ListSubscriptions => "list subscriptions",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +285,20 @@ impl EventSubClient {
         tracked_streamers: &[Streamer],
         sender: mpsc::Sender<EventSubConnectionEvent>,
     ) -> Result<(), EventSubError> {
+        self.connect_and_listen_with_deadlines(
+            tracked_streamers,
+            sender,
+            EventSubDeadlines::PRODUCTION,
+        )
+        .await
+    }
+
+    async fn connect_and_listen_with_deadlines(
+        &self,
+        tracked_streamers: &[Streamer],
+        sender: mpsc::Sender<EventSubConnectionEvent>,
+        deadlines: EventSubDeadlines,
+    ) -> Result<(), EventSubError> {
         if tracked_streamers.is_empty() {
             return Err(EventSubError::NoSubscriptions);
         }
@@ -238,35 +307,49 @@ impl EventSubClient {
         let mut websocket_url = self.settings.websocket_url.clone();
         let mut inherited_subscriptions: Option<EventSubSetupReport> = None;
         loop {
-            let (mut socket, _) =
-                tokio::time::timeout(EVENTSUB_CONNECT_TIMEOUT, connect_async(&websocket_url))
+            let setup = async {
+                let (mut socket, _) =
+                    tokio::time::timeout(deadlines.connect, connect_async(&websocket_url))
+                        .await
+                        .map_err(|_| {
+                            EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect)
+                        })??;
+                let welcome = tokio::time::timeout(
+                    deadlines.welcome,
+                    read_welcome(&mut socket, tracked_streamers),
+                )
+                .await
+                .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::Welcome))??;
+                let EventSubMessage::Welcome {
+                    session_id,
+                    keepalive_timeout,
+                    ..
+                } = welcome
+                else {
+                    return Err(EventSubError::Protocol("welcome message was not decoded"));
+                };
+                let report = match inherited_subscriptions.take() {
+                    // Twitch carries the subscriptions to the reconnect URL, but the
+                    // count must be re-derived for the new session rather than
+                    // reported from memory.
+                    Some(previous) => {
+                        self.reconcile_inherited_report(&session_id, previous)
+                            .await?
+                    }
+                    None => {
+                        self.create_subscriptions(&session_id, tracked_streamers)
+                            .await?
+                    }
+                };
+                if report.active_subscriptions == 0 {
+                    return Err(EventSubError::NoSubscriptions);
+                }
+                Ok((socket, keepalive_timeout, report))
+            };
+            let (mut socket, keepalive_timeout, report) =
+                tokio::time::timeout(deadlines.session_setup, setup)
                     .await
-                    .map_err(|_| EventSubError::Timeout("websocket connect"))??;
-            let welcome = read_welcome(&mut socket, tracked_streamers).await?;
-            let EventSubMessage::Welcome {
-                session_id,
-                keepalive_timeout,
-                ..
-            } = welcome
-            else {
-                return Err(EventSubError::Protocol("welcome message was not decoded"));
-            };
-            let report = match inherited_subscriptions.take() {
-                // Twitch carries the subscriptions to the reconnect URL, but the
-                // count must be re-derived for the new session rather than
-                // reported from memory.
-                Some(previous) => {
-                    self.reconcile_inherited_report(&session_id, previous)
-                        .await?
-                }
-                None => {
-                    self.create_subscriptions(&session_id, tracked_streamers)
-                        .await?
-                }
-            };
-            if report.active_subscriptions == 0 {
-                return Err(EventSubError::NoSubscriptions);
-            }
+                    .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::SessionSetup))??;
             let carried_report = report.clone();
             sender
                 .send(EventSubConnectionEvent::Setup(Box::new(report)))
@@ -437,7 +520,7 @@ impl EventSubClient {
                 .send(),
         )
         .await
-        .map_err(|_| EventSubError::Timeout("create subscription"))??;
+        .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::CreateSubscription))??;
         if !response.status().is_success() {
             return Err(EventSubError::HttpStatus {
                 status: response.status(),
@@ -523,7 +606,7 @@ impl EventSubClient {
             }
             let response = tokio::time::timeout(EVENTSUB_HTTP_TIMEOUT, request.send())
                 .await
-                .map_err(|_| EventSubError::Timeout("list subscriptions"))??;
+                .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::ListSubscriptions))??;
             let status = response.status();
             if status.is_success() {
                 return response.json().await.map_err(EventSubError::from);
@@ -612,7 +695,7 @@ fn subscription_failure_class(error: &EventSubError) -> &'static str {
         EventSubError::HttpStatus { status, .. } if status.as_u16() == 429 => "rate-limited",
         EventSubError::HttpStatus { status, .. } if status.is_server_error() => "server-error",
         EventSubError::HttpStatus { .. } => "http-status",
-        EventSubError::Timeout(_) => "timeout",
+        EventSubError::Timeout(stage) => stage.failure_class(),
         EventSubError::Http(_) => "http-error",
         EventSubError::Json(_) | EventSubError::Protocol(_) | EventSubError::Timestamp => {
             "protocol"
