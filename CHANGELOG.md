@@ -34,6 +34,11 @@
 - Logs the sanitized concrete `EventSub` failure beside its stable error class
   and classifies a missed keepalive deadline as `keepalive-timeout` instead of
   conflating normal liveness recovery with a rejected protocol payload.
+- Bounds the first `EventSub` Welcome frame to 15 seconds and the complete
+  connect/Welcome/subscription-setup attempt to four minutes. Each retry marks
+  supervision activity without clearing degraded health, and sanitized timeout
+  classes now distinguish connect, Welcome, full setup, subscription creation,
+  subscription listing, and established keepalive stages.
 - Reports a partially failed context-refresh cycle to task health only after
   all bounded child refreshes finish. Successful sibling updates remain
   applied, and the successful-refresh counter advances only for an entirely

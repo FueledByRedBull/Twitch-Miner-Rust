@@ -95,6 +95,12 @@ impl HealthTracker {
         }
     }
 
+    pub(crate) fn activity(&self, name: &'static str) {
+        if let Some(task) = self.lock_tasks().get_mut(name) {
+            task.last_activity_unix = unix_now_infallible();
+        }
+    }
+
     pub(crate) fn failure(&self, name: &'static str, error_class: &'static str) {
         if let Some(task) = self.lock_tasks().get_mut(name) {
             task.last_activity_unix = unix_now_infallible();
@@ -613,6 +619,33 @@ mod tests {
         reporter.supervision_heartbeat()?;
         assert!(check_health(directory.path()).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn activity_refreshes_supervision_without_hiding_failures() {
+        let health = HealthTracker::default();
+        health.register("eventsub", std::time::Duration::from_secs(60));
+        health.failure("eventsub", "welcome-timeout");
+        {
+            let mut tasks = health.lock_tasks();
+            match tasks.get_mut("eventsub") {
+                Some(task) => task.last_activity_unix = 0,
+                None => panic!("registered EventSub task must exist"),
+            }
+        }
+
+        health.activity("eventsub");
+
+        let Some(task) = health
+            .snapshot()
+            .into_iter()
+            .find(|task| task.name == "eventsub")
+        else {
+            panic!("EventSub task must remain in the health snapshot");
+        };
+        assert!(task.last_activity_unix > 0);
+        assert_eq!(task.consecutive_failures, 1);
+        assert_eq!(task.last_error_class.as_deref(), Some("welcome-timeout"));
     }
 
     #[test]

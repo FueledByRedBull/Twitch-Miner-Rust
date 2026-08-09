@@ -21,7 +21,8 @@ pub use errors::PubSubError;
 pub use eventsub::{
     parse_eventsub_message, plan_eventsub_capacity, EventSubClient, EventSubClientSettings,
     EventSubConnectionEvent, EventSubError, EventSubMessage, EventSubSetupReport,
-    EventSubStreamerCapability, EVENTSUB_SUBSCRIPTIONS_URL, EVENTSUB_WEBSOCKET_URL,
+    EventSubStreamerCapability, EventSubTimeoutStage, EVENTSUB_SUBSCRIPTIONS_URL,
+    EVENTSUB_WEBSOCKET_URL,
 };
 pub use parse::{
     bad_auth_cookie_file, channel_id_from_payload, parse_message, parse_transport_message,
