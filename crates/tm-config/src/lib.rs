@@ -418,6 +418,65 @@ fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), 
         root.remove("watch_streak_warm_start_cache");
         *changed = true;
     }
+    if let Some(watch_streams) = root.get("watch_streams") {
+        match watch_streams.as_bool() {
+            Some(true) => {}
+            Some(false) => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.watch_streams=false is no longer supported; stop the miner instead of starting it with watching disabled",
+                )));
+            }
+            None => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.watch_streams must be a boolean when present",
+                )));
+            }
+        }
+        root.remove("watch_streams");
+        *changed = true;
+    }
+    if let Some(legacy_betting) = root.get("betting") {
+        let legacy_betting = legacy_betting.as_object().ok_or_else(|| {
+            ConfigError::Validation(String::from(
+                "config.betting must be an object with a boolean make_predictions field",
+            ))
+        })?;
+        if let Some(unknown) = legacy_betting
+            .keys()
+            .find(|key| key.as_str() != "make_predictions")
+        {
+            return Err(ConfigError::Validation(format!(
+                "config.betting.{unknown} is not a recognized legacy configuration key"
+            )));
+        }
+        let make_predictions = legacy_betting
+            .get("make_predictions")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                ConfigError::Validation(String::from(
+                    "config.betting.make_predictions must be a boolean",
+                ))
+            })?;
+        if let Some(current) = root.get("betting(make_predictions)") {
+            let current = current.as_bool().ok_or_else(|| {
+                ConfigError::Validation(String::from(
+                    "config.betting(make_predictions) must be a boolean",
+                ))
+            })?;
+            if current != make_predictions {
+                return Err(ConfigError::Validation(String::from(
+                    "config.betting.make_predictions conflicts with config.betting(make_predictions)",
+                )));
+            }
+        } else {
+            root.insert(
+                String::from("betting(make_predictions)"),
+                Value::Bool(make_predictions),
+            );
+        }
+        root.remove("betting");
+        *changed = true;
+    }
     Ok(())
 }
 

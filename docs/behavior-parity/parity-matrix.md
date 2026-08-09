@@ -43,6 +43,8 @@ working Rust implementation:
 | `disable_ssl_cert_verification` | Rejected when true; TLS verification is mandatory. |
 | `auto_update` | `false` is migrated away; `true` is rejected. |
 | `watch_streak_warm_start_cache` | The Go boolean is migrated away; Rust always manages its bounded streak cache internally. |
+| `betting.make_predictions` wrapper | Migrated to `betting(make_predictions)`; matching duplicates are removed, while conflicts or malformed wrappers are rejected without write-back. |
+| `watch_streams` marker | Legacy `true` is migrated away because running the miner means watching; `false` or non-boolean values are rejected rather than changing operator intent. |
 | Unknown configuration keys | Rejected with an exact root/nested JSON path after recognized legacy migrations; dynamic streamer-login map keys remain valid. |
 | `config_schema_version` | Added by migration; future versions are rejected without write-back. |
 

@@ -372,3 +372,25 @@ inside tests covered by explicit test-module Clippy allowances.
 introduced no runtime change or production-binary drift. **Current candidate
 status:** implementation and code-head quality gates are complete; release
 approval remains pending immutable-image deployment and the fresh soak above.
+
+### Live configuration preflight follow-up
+
+- The first immutable candidate, revision `4621d86` at manifest `d856e290`,
+  passed all three platform builds and registry smoke tests but was not
+  deployed. Its read-only Pi config preflight correctly rejected the previously
+  ignored `config.betting` wrapper before the running service was stopped.
+- The live wrapper has exactly one boolean `make_predictions` field and matches
+  the canonical `betting(make_predictions)` value. The follow-up migration
+  accepts only that typed legacy shape, creates the canonical flag when absent,
+  removes matching duplicates, and rejects conflicts, wrong types, or extra
+  wrapper keys without write-back. No account value or private config content
+  is recorded here.
+- A key-only audit also found the `watch_streams=true` marker from this miner's
+  earlier local JSON example. It is migrated away because starting the miner
+  already means watching; `false` or a non-boolean is rejected so migration
+  cannot silently reverse operator intent. No other unknown root or fixed
+  nested keys remain in the live configuration.
+- Because production migration behavior changed after publication, the
+  `d856e290` image is not a release candidate and cannot receive deployment or
+  soak credit. The follow-up revision requires the same quality, immutable
+  image, guarded deployment, and non-backdated soak gates.
