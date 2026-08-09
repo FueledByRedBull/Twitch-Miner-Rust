@@ -305,5 +305,38 @@ inside tests covered by explicit test-module Clippy allowances.
   median, p90, and p95 were all six minutes and 97.48% landed within six
   minutes. No deployment or new soak is warranted.
 
+### Risk-driven application coverage follow-up
+
+- PR #68 test head `8b979133d66081e8509b98d88b2f93c7b04a7071`
+  passed CI run `31314451399` and Deep Quality run `31314457675`. The latter
+  includes replay regression, both 120-second fuzz targets, every existing
+  bounded mutation shard, and the new application prediction-skip shard.
+- Pinned Linux application branch coverage rose from 296/751 (39.41%) to
+  349/755 (46.23%). The four-region denominator increase is reported in
+  `shutdown.rs` after the previously unexercised shutdown orchestrator became
+  linked into coverage; external test files remain absent from the source
+  report. Covered production branches changed as follows: bootstrap 30/46 to
+  32/46, canary 10/42 to 26/42, EventSub 26/64 to 27/64, PubSub 15/64 to 21/64,
+  runtime effects 2/48 to 26/48, shutdown 6/8 to 8/12, streak cache 19/52 to
+  20/52, and task wiring 5/6 to 6/6. The stable CI floor is therefore 46.0%.
+- The new prediction-skip mutation shard selected four meaningful status and
+  minimum-balance mutants and caught all four, with zero misses or timeouts.
+  A first run exposed an assertion-order timeout in the device-code-expiry
+  fixture; moving the semantic assertion before the mock-server join made the
+  already-detected bootstrap mutant fail immediately, and the exact-head
+  bootstrap shard then passed.
+- The release adds only tests, CI assurance, and documentation. Controlled
+  release builds of baseline `b88c465` and test head `8da0304` used identical
+  fixed revision/time metadata, path remapping, disabled incrementality, and
+  reproducible MSVC linker flags; both produced SHA-256
+  `F54CEA9C8EDC607FC8CA5CD230FBCE04575A362740D406E7F374D51D3D8FE0F2`.
+  The later `8b97913` change adds only a test boundary assertion, so it cannot
+  enter the non-test binary. No deployment or new soak is warranted.
+- Onboarding documentation now names `config.example.json` as the sole manual
+  starter template, explains the historical `betting(make_predictions)` key,
+  reconciles built-in config creation with the copy/edit flow, distinguishes
+  direct binary `docker exec` from unavailable scratch-image shells, and links
+  the Go/Python migration guide to behavior-level playback/HLS differences.
+
 **Confidence:** high. No security finding, runtime change, public-contract
 change, production-binary drift, or live-mining regression was found.
