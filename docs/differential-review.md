@@ -360,11 +360,15 @@ inside tests covered by explicit test-module Clippy allowances.
 - Independent Luna/max review rejected a blanket Serde attribute, a schema
   bump, a filesystem fuzz API, new parser/config frameworks, and attribution of
   historical aggregate `watch-request` warnings to the oldest-segment choice.
-  Focused tests, two bounded mutation shards, existing structured-input fuzz,
-  the complete release gates, a new immutable image, guarded Pi deployment,
-  and a fresh non-backdated 72-hour soak remain required.
+  On code head `a15f856`, CI run `31317285578` passed locked workspace tests,
+  coverage, Rust QA, dependency/security policy, documentation, the Go
+  baseline, and reproducible-build validation. Deep Quality run `31317295107`
+  passed critical branch coverage, replay, structured-input and transport
+  fuzzing, every existing mutation partition, and the two new bounded HLS and
+  configuration-key mutation partitions. A new immutable image, guarded Pi
+  deployment, and a fresh non-backdated 72-hour soak remain required.
 
 **Prior-release confidence:** high. The earlier accepted assurance follow-ups
 introduced no runtime change or production-binary drift. **Current candidate
-status:** implementation review is complete; release approval remains pending
-the recorded quality gates, immutable-image deployment, and fresh soak above.
+status:** implementation and code-head quality gates are complete; release
+approval remains pending immutable-image deployment and the fresh soak above.
