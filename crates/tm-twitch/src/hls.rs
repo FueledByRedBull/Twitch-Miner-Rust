@@ -59,6 +59,8 @@ pub(crate) fn media_segment_url(
     validate_header(playlist, "media playlist")?;
 
     let mut expects_segment = false;
+    let mut saw_stray_uri = false;
+    let mut newest_segment = None;
     for line in playlist.lines().map(str::trim) {
         if line.is_empty() || line == "#EXTM3U" {
             continue;
@@ -66,27 +68,45 @@ pub(crate) fn media_segment_url(
         if let Some(value) = line.strip_prefix("#EXTINF:") {
             let duration = value
                 .split_once(',')
-                .map_or(value, |(duration, _)| duration)
+                .map(|(duration, _)| duration)
+                .ok_or(TwitchClientError::InvalidField("media playlist"))?
                 .trim()
                 .parse::<f64>()
                 .map_err(|_| TwitchClientError::InvalidField("media playlist"))?;
             if !duration.is_finite() || duration < 0.0 || expects_segment {
                 return Err(TwitchClientError::InvalidField("media playlist"));
             }
+            if saw_stray_uri {
+                return Err(TwitchClientError::InvalidField("media playlist"));
+            }
             expects_segment = true;
             continue;
         }
-        if line.starts_with('#') || !expects_segment {
+        if line == "#EXTINF" {
+            return Err(TwitchClientError::InvalidField("media playlist"));
+        }
+        if line.starts_with('#') {
             continue;
         }
-        return base_url
+
+        if !expects_segment {
+            if newest_segment.is_some() {
+                return Err(TwitchClientError::InvalidField("media playlist"));
+            }
+            saw_stray_uri = true;
+            continue;
+        }
+
+        let url = base_url
             .join(line)
-            .map_err(|_| TwitchClientError::InvalidField("media playlist"));
+            .map_err(|_| TwitchClientError::InvalidField("media playlist"))?;
+        newest_segment = Some(url);
+        expects_segment = false;
     }
     if expects_segment {
         Err(TwitchClientError::InvalidField("media playlist"))
     } else {
-        Err(TwitchClientError::MissingField("media playlist"))
+        newest_segment.ok_or(TwitchClientError::MissingField("media playlist"))
     }
 }
 

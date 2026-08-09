@@ -42,6 +42,8 @@ working Rust implementation:
 | `password` | Rejected when non-empty; device login does not need it. |
 | `disable_ssl_cert_verification` | Rejected when true; TLS verification is mandatory. |
 | `auto_update` | `false` is migrated away; `true` is rejected. |
+| `watch_streak_warm_start_cache` | The Go boolean is migrated away; Rust always manages its bounded streak cache internally. |
+| Unknown configuration keys | Rejected with an exact root/nested JSON path after recognized legacy migrations; dynamic streamer-login map keys remain valid. |
 | `config_schema_version` | Added by migration; future versions are rejected without write-back. |
 
 ## Contract evidence

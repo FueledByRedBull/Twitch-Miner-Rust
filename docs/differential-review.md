@@ -338,5 +338,33 @@ inside tests covered by explicit test-module Clippy allowances.
   direct binary `docker exec` from unavailable scratch-image shells, and links
   the Go/Python migration guide to behavior-level playback/HLS differences.
 
-**Confidence:** high. No security finding, runtime change, public-contract
-change, production-binary drift, or live-mining regression was found.
+### HLS freshness and strict configuration-key follow-up
+
+- Baseline `6bf8de8` retains the production behavior deployed as revision
+  `a9817e7` at immutable manifest `36b40d7b`. The candidate changes two bounded
+  production contracts: semantic HLS media-playlist selection and on-disk
+  configuration validation.
+- `media_segment_url` now scans and validates the complete playlist before
+  returning the newest complete `EXTINF`/URI segment. Generic HLS tags,
+  including low-latency partial/preload tags, are not mistaken for full media
+  segments; dangling/repeated `EXTINF`, stray segment URIs after a valid entry,
+  invalid durations, and invalid URL resolution fail closed. A local playback
+  fixture verifies that the client HEADs the newest segment rather than the
+  older entry.
+- Configuration files are migrated as raw JSON before strict known-key checks.
+  Root, bet/filter, privacy, Discord, and per-streamer override typos report an
+  exact `config.<path>` error without write-back. Dynamic streamer-login keys
+  remain valid. The pinned Go-only `watch_streak_warm_start_cache` boolean is
+  recognized and migrated away before validation, preserving Go migration and
+  Rust's always-managed private streak cache.
+- Independent Luna/max review rejected a blanket Serde attribute, a schema
+  bump, a filesystem fuzz API, new parser/config frameworks, and attribution of
+  historical aggregate `watch-request` warnings to the oldest-segment choice.
+  Focused tests, two bounded mutation shards, existing structured-input fuzz,
+  the complete release gates, a new immutable image, guarded Pi deployment,
+  and a fresh non-backdated 72-hour soak remain required.
+
+**Prior-release confidence:** high. The earlier accepted assurance follow-ups
+introduced no runtime change or production-binary drift. **Current candidate
+status:** implementation review is complete; release approval remains pending
+the recorded quality gates, immutable-image deployment, and fresh soak above.

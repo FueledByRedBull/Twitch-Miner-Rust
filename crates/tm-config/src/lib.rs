@@ -264,13 +264,15 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     migrate_drop_farming_options(&mut value, &mut changed);
     validate_schema_version(&value)?;
 
-    changed |= fill_missing_top_level(&mut value, &default_config_value());
     validate_object_section(&value, "privacy")?;
     validate_object_section(&value, "discord")?;
     validate_object_section(&value, "bet")?;
     validate_object_section(&value, "streamer_overrides")?;
     validate_nested_object(&value, "bet", "filter_condition")?;
     validate_streamer_override_shapes(&value)?;
+    validate_known_keys(&value)?;
+
+    changed |= fill_missing_top_level(&mut value, &default_config_value());
     let privacy_defaults = privacy_defaults();
     let discord_defaults = discord_defaults();
     let bet_defaults = bet_defaults();
@@ -407,6 +409,15 @@ fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), 
         root.remove("auto_update");
         *changed = true;
     }
+    if let Some(warm_start_cache) = root.get("watch_streak_warm_start_cache") {
+        if !warm_start_cache.is_boolean() {
+            return Err(ConfigError::Validation(String::from(
+                "config.watch_streak_warm_start_cache must be a boolean when present",
+            )));
+        }
+        root.remove("watch_streak_warm_start_cache");
+        *changed = true;
+    }
     Ok(())
 }
 
@@ -453,6 +464,144 @@ fn validate_schema_version(value: &Value) -> Result<(), ConfigError> {
     if version > CONFIG_SCHEMA_VERSION {
         return Err(ConfigError::Validation(format!(
             "config schema version {version} is newer than supported version {CONFIG_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
+    "config_schema_version",
+    "username",
+    "password",
+    "debug",
+    "debug_deep",
+    "watch_queue_logging",
+    "smart_logging",
+    "disable_ssl_cert_verification",
+    "show_seconds",
+    "claim_drops_startup",
+    "farm_drops",
+    "claim_drops",
+    "watch_one_stream_when_drops_active",
+    "claim_moments",
+    "watch_streak_vod_recovery",
+    "betting(make_predictions)",
+    "follow_raid",
+    "community_goals",
+    "emojis",
+    "save_logs",
+    "show_username_in_console",
+    "show_claimed_bonus_msg",
+    "show_game",
+    "chat_presence",
+    "disable_at_in_nickname",
+    "streamers",
+    "streamers_exclude",
+    "game_priority",
+    "game_exclude",
+    "watch_priority",
+    "followers_order",
+    "bet",
+    "timezone",
+    "privacy",
+    "discord",
+    "streamer_overrides",
+];
+
+const BET_CONFIG_KEYS: &[&str] = &[
+    "strategy",
+    "percentage",
+    "percentage_gap",
+    "max_points",
+    "stealth_mode",
+    "deduct_stake_on_place",
+    "delay_mode",
+    "delay",
+    "minimum_points",
+    "filter_condition",
+];
+
+const FILTER_CONDITION_KEYS: &[&str] = &["by", "where", "value"];
+const PRIVACY_CONFIG_KEYS: &[&str] = &["anonymize_logs"];
+const DISCORD_CONFIG_KEYS: &[&str] = &["webhook_api", "events"];
+const STREAMER_OVERRIDE_KEYS: &[&str] = &[
+    "make_predictions",
+    "follow_raid",
+    "farm_drops",
+    "claim_drops",
+    "watch_one_stream_when_drops_active",
+    "claim_moments",
+    "watch_streak",
+    "watch_streak_vod_recovery",
+    "community_goals",
+    "chat_presence",
+    "bet",
+];
+
+fn validate_known_keys(value: &Value) -> Result<(), ConfigError> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+
+    validate_keys(root, "config", TOP_LEVEL_CONFIG_KEYS)?;
+    validate_nested_keys(root, "privacy", "config.privacy", PRIVACY_CONFIG_KEYS)?;
+    validate_nested_keys(root, "discord", "config.discord", DISCORD_CONFIG_KEYS)?;
+    validate_nested_keys(root, "bet", "config.bet", BET_CONFIG_KEYS)?;
+
+    if let Some(bet) = root.get("bet").and_then(Value::as_object) {
+        validate_nested_keys(
+            bet,
+            "filter_condition",
+            "config.bet.filter_condition",
+            FILTER_CONDITION_KEYS,
+        )?;
+    }
+
+    let Some(overrides) = root.get("streamer_overrides").and_then(Value::as_object) else {
+        return Ok(());
+    };
+
+    for (login, override_value) in overrides {
+        let Some(override_object) = override_value.as_object() else {
+            continue;
+        };
+        let override_path = format!("config.streamer_overrides.{login}");
+        validate_keys(override_object, &override_path, STREAMER_OVERRIDE_KEYS)?;
+        let Some(bet) = override_object.get("bet").and_then(Value::as_object) else {
+            continue;
+        };
+        let bet_path = format!("{override_path}.bet");
+        validate_keys(bet, &bet_path, BET_CONFIG_KEYS)?;
+        let filter_path = format!("{bet_path}.filter_condition");
+        validate_nested_keys(bet, "filter_condition", &filter_path, FILTER_CONDITION_KEYS)?;
+    }
+
+    Ok(())
+}
+
+fn validate_nested_keys(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    allowed_keys: &[&str],
+) -> Result<(), ConfigError> {
+    let Some(nested) = object.get(key).and_then(Value::as_object) else {
+        return Ok(());
+    };
+    validate_keys(nested, path, allowed_keys)
+}
+
+fn validate_keys(
+    object: &Map<String, Value>,
+    path: &str,
+    allowed_keys: &[&str],
+) -> Result<(), ConfigError> {
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !allowed_keys.contains(&key.as_str()))
+    {
+        return Err(ConfigError::Validation(format!(
+            "{path}.{unknown} is not a recognized configuration key"
         )));
     }
     Ok(())

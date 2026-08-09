@@ -30,7 +30,7 @@
 - Extends branch coverage, bounded mutation, and structured-input fuzzing to
   the new auth, endpoint-policy, prediction-decision, and application paths.
   The existing 60% critical-core branch floor remains intact and `tm-app` now
-  has its own 33.5% ratchet instead of diluting the core aggregate.
+  has its own 46.0% ratchet instead of diluting the core aggregate.
 - Logs the sanitized concrete `EventSub` failure beside its stable error class
   and classifies a missed keepalive deadline as `keepalive-timeout` instead of
   conflating normal liveness recovery with a rejected protocol payload.
@@ -47,10 +47,16 @@
   input so tests remain deterministic, and minimum, balance, maximum, and
   top-predictor bounds remain enforced. This is amount variation, not an
   anti-detection guarantee.
-- Selects the lowest-bandwidth explicitly playable HLS video variant and a
-  valid media segment from playlist structure instead of taking the final URI.
-  Relative URL resolution and public-HTTPS endpoint validation remain
-  mandatory.
+- Selects the lowest-bandwidth explicitly playable HLS video variant and the
+  newest complete valid media segment from playlist structure. The full media
+  playlist is validated before returning, so malformed trailing segment state
+  cannot hide behind an earlier valid entry. Relative URL resolution and
+  public-HTTPS endpoint validation remain mandatory.
+- Rejects unknown top-level and fixed nested configuration keys with their
+  exact JSON paths after recognized legacy migrations run. Dynamic streamer
+  login keys remain valid, failures do not rewrite the source file, and the Go
+  `watch_streak_warm_start_cache` flag is migrated away because Rust manages
+  its bounded streak cache internally.
 - Keeps playback priming uncached after measuring the roughly 20-second
   selected-channel cadence and pinning the four-request preflight contract.
   No credited WATCH/WATCH_STREAK A/B evidence currently proves that reuse is

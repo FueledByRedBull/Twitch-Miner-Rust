@@ -29,14 +29,23 @@ normal Rust startup performs a versioned config migration only when necessary:
 - it initializes a missing `farm_drops` field from the legacy `claim_drops`
   value, including per-streamer overrides, and adds the default single-watcher
   campaign control;
-- it removes a legacy `auto_update=false` field; and
+- it removes a legacy `auto_update=false` field;
+- it removes the Go `watch_streak_warm_start_cache` boolean because Rust always
+  manages its bounded streak cache internally; and
 - it writes `<config>.bak` before the atomic replacement.
 
 `auto_update=true` is rejected and must be removed manually. A newer schema
-version is also rejected rather than overwritten. Cookie files are decoded from
-the current JSON map and legacy JSON record-list shapes only; changed cookie
-files are atomically replaced and retain a `.bak` copy of their previous
-content. The application never copies data out of the configured directory.
+version is also rejected rather than overwritten. After these recognized
+migrations, unknown root keys and unknown keys inside fixed nested sections are
+rejected with an exact `config.<path>` error so spelling mistakes cannot pass
+`--check-config` silently. Streamer logins remain dynamic keys inside
+`streamer_overrides`. Preview or validation failure never rewrites the source
+file or creates a backup.
+
+Cookie files are decoded from the current JSON map and legacy JSON record-list
+shapes only; changed cookie files are atomically replaced and retain a `.bak`
+copy of their previous content. The application never copies data out of the
+configured directory.
 
 Python cookie jars are outside that migration boundary. They are commonly
 Python pickle files, and loading a pickle can execute code. The Rust miner does
