@@ -56,7 +56,7 @@ jobs:
         run: >-
           ./scripts/verify-branch-coverage.ps1
           -ReportPath tm-app-branch-coverage.json
-          -MinimumPercent 39.0
+          -MinimumPercent 46.0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: critical-branch-coverage
@@ -129,6 +129,11 @@ jobs:
             package: tm-domain
             file: crates/tm-domain/src/prediction.rs
             filter: ' in (percentage_of_balance|select_outcome|PredictionEvent::decide_with_stealth_offset)$'
+            exclude: 'a^'
+          - name: app-prediction-skip
+            package: tm-app
+            file: crates/tm-app/src/runtime_effects.rs
+            filter: ' in (maybe_skip_prediction_for_status|maybe_skip_prediction_for_balance|skip_prediction)$'
             exclude: 'a^'
           - name: app-pubsub-retry
             package: tm-app

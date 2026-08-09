@@ -142,7 +142,7 @@ The exact PR head must still pass:
 1. PR CI, dependency policy/audit, reproducibility, secret scan, docs, and
    architecture checks;
 2. manual Deep Quality on pinned Linux: critical-core branch coverage at or
-   above 60%, application branch coverage at or above its 33.5% ratchet, every
+   above 60%, application branch coverage at or above its 46.0% ratchet, every
    non-empty bounded mutation shard killed, both fuzz targets for 120 seconds,
    and replay-regression comparison;
 3. the existing `db4a45a` immutable-image 72-hour gate without backdating;

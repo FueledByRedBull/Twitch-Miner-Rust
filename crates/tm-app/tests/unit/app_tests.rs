@@ -1495,10 +1495,10 @@ mod tests {
         .await
         .unwrap_err();
 
-        server.join().unwrap();
         assert!(error
             .to_string()
             .contains("device code expired before authorization"));
+        server.join().unwrap();
         assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
