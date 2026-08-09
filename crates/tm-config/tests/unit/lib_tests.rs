@@ -144,6 +144,53 @@ fn load_rejects_enabled_legacy_auto_update_without_rewriting() {
 }
 
 #[test]
+fn migrates_legacy_warm_start_cache_flag_on_load_with_backup() {
+    let dir = unique_temp_dir("warm-start-cache");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","watch_streak_warm_start_cache":false}"#;
+    fs::write(&path, original).unwrap();
+
+    let config = load_or_create_config(&path).unwrap();
+    assert_eq!(config.username, "Alice");
+    assert_eq!(fs::read(config_backup_path(&path)).unwrap(), original);
+    let migrated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(migrated.get("watch_streak_warm_start_cache").is_none());
+}
+
+#[test]
+fn previews_legacy_warm_start_cache_migration_without_writing() {
+    let dir = unique_temp_dir("warm-start-cache-preview");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","watch_streak_warm_start_cache":true}"#;
+    fs::write(&path, original).unwrap();
+
+    let preview = preview_config(&path).unwrap();
+    assert!(preview.migration_required);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
+fn rejects_invalid_legacy_warm_start_cache_without_rewriting() {
+    let dir = unique_temp_dir("warm-start-cache-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","watch_streak_warm_start_cache":"yes"}"#;
+    fs::write(&path, original).unwrap();
+
+    let error = load_or_create_config(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::Validation(message)
+            if message == "config.watch_streak_warm_start_cache must be a boolean when present"
+    ));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
 fn preview_reports_migration_without_writing_and_write_back_creates_backup() {
     let dir = unique_temp_dir("preview");
     fs::create_dir_all(&dir).unwrap();
@@ -230,6 +277,198 @@ fn rejects_future_config_schema_without_rewriting() {
 
     assert!(preview_config(&path).is_err());
     assert_eq!(fs::read_to_string(path).unwrap(), original);
+}
+
+fn assert_rejects_unknown_key(name: &str, value: &Value, expected_path: &str) {
+    let dir = unique_temp_dir(name);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = serde_json::to_vec_pretty(value).unwrap();
+    fs::write(&path, &original).unwrap();
+
+    let error = load_or_create_config(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::Validation(message)
+            if message == format!(
+                "{expected_path} is not a recognized configuration key"
+            )
+    ));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
+fn rejects_unknown_top_level_key_without_rewriting() {
+    assert_rejects_unknown_key(
+        "unknown-top-level",
+        &json!({"username": "Alice", "usernmae": "typo"}),
+        "config.usernmae",
+    );
+}
+
+#[test]
+fn rejects_unknown_nested_keys_with_actionable_paths() {
+    let cases = [
+        (
+            "unknown-bet",
+            json!({"username": "Alice", "bet": {"percentag": 10}}),
+            "config.bet.percentag",
+        ),
+        (
+            "unknown-filter",
+            json!({
+                "username": "Alice",
+                "bet": {"filter_condition": {"wher": "GTE"}}
+            }),
+            "config.bet.filter_condition.wher",
+        ),
+        (
+            "unknown-privacy",
+            json!({"username": "Alice", "privacy": {"anonymize_log": true}}),
+            "config.privacy.anonymize_log",
+        ),
+        (
+            "unknown-discord",
+            json!({"username": "Alice", "discord": {"event": []}}),
+            "config.discord.event",
+        ),
+        (
+            "unknown-override",
+            json!({
+                "username": "Alice",
+                "streamer_overrides": {"alice": {"claim_drop": true}}
+            }),
+            "config.streamer_overrides.alice.claim_drop",
+        ),
+        (
+            "unknown-override-bet",
+            json!({
+                "username": "Alice",
+                "streamer_overrides": {"alice": {"bet": {"percentag": 10}}}
+            }),
+            "config.streamer_overrides.alice.bet.percentag",
+        ),
+        (
+            "unknown-override-filter",
+            json!({
+                "username": "Alice",
+                "streamer_overrides": {
+                    "alice": {"bet": {"filter_condition": {"wher": "GTE"}}}
+                }
+            }),
+            "config.streamer_overrides.alice.bet.filter_condition.wher",
+        ),
+    ];
+
+    for (name, value, expected_path) in cases {
+        assert_rejects_unknown_key(name, &value, expected_path);
+    }
+}
+
+#[test]
+fn preview_rejects_unknown_key_without_writing_or_reporting_migration() {
+    let dir = unique_temp_dir("preview-unknown-key");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","auto_update":false,"usernmae":"typo"}"#;
+    fs::write(&path, original).unwrap();
+
+    let error = preview_config(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::Validation(message)
+            if message == "config.usernmae is not a recognized configuration key"
+    ));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
+fn migration_removal_precedes_unknown_key_rejection_without_rewriting() {
+    let dir = unique_temp_dir("migration-before-unknown");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","auto_update":false,"usernmae":"typo"}"#;
+    fs::write(&path, original).unwrap();
+
+    let error = load_or_create_config(&path).unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::Validation(message)
+            if message == "config.usernmae is not a recognized configuration key"
+    ));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
+fn accepts_dynamic_streamer_login_keys() {
+    let dir = unique_temp_dir("dynamic-streamer-login");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "username": "Alice",
+            "streamer_overrides": {
+                "some.login": {"chat_presence": "ONLINE"},
+                "other_login": {"watch_streak": false}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let config = load_or_create_config(&path).unwrap();
+    assert!(config.streamer_overrides.contains_key("some.login"));
+    assert!(config.streamer_overrides.contains_key("other_login"));
+}
+
+#[test]
+fn strict_key_allowlists_match_the_serialized_schema() {
+    fn sorted_keys(value: &Value) -> Vec<String> {
+        let mut keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+
+    fn sorted_names(values: &[&str]) -> Vec<String> {
+        let mut names = values
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    let mut root = default_config_value();
+    root.as_object_mut()
+        .unwrap()
+        .insert("password".to_owned(), Value::String(String::new()));
+    assert_eq!(sorted_keys(&root), sorted_names(TOP_LEVEL_CONFIG_KEYS));
+    assert_eq!(sorted_keys(&bet_defaults()), sorted_names(BET_CONFIG_KEYS));
+    assert_eq!(
+        sorted_keys(&json!({"by": null, "where": null, "value": null})),
+        sorted_names(FILTER_CONDITION_KEYS)
+    );
+    assert_eq!(
+        sorted_keys(&privacy_defaults()),
+        sorted_names(PRIVACY_CONFIG_KEYS)
+    );
+    assert_eq!(
+        sorted_keys(&discord_defaults()),
+        sorted_names(DISCORD_CONFIG_KEYS)
+    );
+    assert_eq!(
+        sorted_keys(&serde_json::to_value(StreamerSettingsOverride::default()).unwrap()),
+        sorted_names(STREAMER_OVERRIDE_KEYS)
+    );
 }
 
 #[test]

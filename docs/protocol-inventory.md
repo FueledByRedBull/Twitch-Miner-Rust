@@ -61,7 +61,8 @@ payloads, or request headers.
 
 Every request target that Twitch supplies inside a document rather than one the
 miner compiles in is checked before use: the settings script, playback master
-playlist, selected media playlist, media segment, and the spade endpoint. The
+playlist, selected media playlist, newest complete media segment, and the spade
+endpoint. The
 remote client disables redirects, requires HTTPS for public origins, and allows
 HTTP loopback only when an endpoint-override constructor explicitly injects a
 loopback HTTP base URL for local tests. The app's production construction path

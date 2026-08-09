@@ -359,16 +359,16 @@ fn hls_parsers_resolve_absolute_and_relative_segment_urls() {
     assert_eq!(
         media_segment_url(
             &media_base,
-            "#EXTM3U\n# comment\n#EXTINF:2.0,\n  segments/first.ts  \n#EXTINF:2.0,\nhttps://cdn.example/second.ts\n",
+            "#EXTM3U\n\n# comment\n#EXTINF:2.0,\n  segments/first.ts  \n#EXTINF:2.0,\nhttps://cdn.example/second.ts\n#EXT-X-ENDLIST\n",
         )
         .unwrap()
         .as_str(),
-        "https://media.example/live/segments/first.ts"
+        "https://cdn.example/second.ts"
     );
     assert_eq!(
         media_segment_url(
             &media_base,
-            "#EXTM3U\n#EXTINF:2.0,\nhttps://cdn.example/absolute.ts\n",
+            "#EXTM3U\n#EXTINF:0.0,\nhttps://cdn.example/absolute.ts\n",
         )
         .unwrap()
         .as_str(),
@@ -404,6 +404,61 @@ fn hls_parsers_reject_empty_audio_only_and_malformed_playlists() {
     assert!(matches!(
         media_segment_url(&base, "#EXTM3U\n#EXTINF:not-a-duration,\nsegment.ts\n"),
         Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:-0.1,\nsegment.ts\n"),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:inf,\nsegment.ts\n"),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:2.0,\nfirst.ts\n#EXTINF:2.0,\n",),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:2.0,\nfirst.ts\nsecond.ts\n",),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:2.0\nsegment.ts\n"),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+    assert!(matches!(
+        media_segment_url(&base, "#EXTM3U\n#EXTINF:2.0,\n#EXTINF:2.0,\nsegment.ts\n",),
+        Err(TwitchClientError::InvalidField("media playlist"))
+    ));
+}
+
+#[test]
+fn hls_media_parser_ignores_ll_hls_partial_and_trailing_tags() {
+    let base = reqwest::Url::parse("https://video.example/live/index.m3u8").unwrap();
+    assert_eq!(
+        media_segment_url(
+            &base,
+            concat!(
+                "#EXTM3U\n",
+                "#EXT-X-TARGETDURATION:2\n",
+                "#EXT-X-PART:DURATION=0.33333,URI=\"part-0.ts\"\n",
+                "#EXTINF:2.0,\nsegment-0.ts\n",
+                "#EXT-X-DISCONTINUITY\n",
+                "#EXTINF:2.0,\nsegment-1.ts\n",
+                "#EXT-X-PART:DURATION=0.33333,URI=\"part-2.ts\"\n",
+                "#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part-3.ts\"\n",
+                "#EXT-X-ENDLIST\n",
+            ),
+        )
+        .unwrap()
+        .as_str(),
+        "https://video.example/live/segment-1.ts"
+    );
+    assert!(matches!(
+        media_segment_url(
+            &base,
+            "#EXTM3U\n#EXT-X-PART:DURATION=0.33333,URI=\"part-0.ts\"\n#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part-1.ts\"\n",
+        ),
+        Err(TwitchClientError::MissingField("media playlist"))
     ));
 }
 
@@ -1021,6 +1076,13 @@ async fn playback_priming_repeats_all_four_requests_on_every_tick() {
             .count(),
         2
     );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("HEAD /older-segment.ts"))
+            .count(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -1329,7 +1391,7 @@ fn spawn_playback_server(
             } else if request.starts_with("GET /hls/tester.m3u8") {
                 "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1.4d401e,mp4a.40.2\",RESOLUTION=640x360\n/variant.m3u8\n"
             } else if request.starts_with("GET /variant.m3u8") {
-                "#EXTM3U\n#EXTINF:2.0,\n/segment.ts\n"
+                "#EXTM3U\n#EXTINF:2.0,\n/older-segment.ts\n#EXTINF:2.0,\n/segment.ts\n"
             } else if request.starts_with("HEAD /segment.ts") {
                 ""
             } else {
