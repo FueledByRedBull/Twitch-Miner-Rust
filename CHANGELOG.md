@@ -56,7 +56,12 @@
   exact JSON paths after recognized legacy migrations run. Dynamic streamer
   login keys remain valid, failures do not rewrite the source file, and the Go
   `watch_streak_warm_start_cache` flag is migrated away because Rust manages
-  its bounded streak cache internally.
+  its bounded streak cache internally. The former `betting.make_predictions`
+  wrapper is migrated to the canonical `betting(make_predictions)` flag;
+  matching duplicates are removed while conflicts and malformed wrappers fail
+  without write-back. The old `watch_streams=true` marker is removed because
+  running the miner already means watching; `false` and non-boolean values are
+  rejected rather than silently changing operator intent.
 - Keeps playback priming uncached after measuring the roughly 20-second
   selected-channel cadence and pinning the four-request preflight contract.
   No credited WATCH/WATCH_STREAK A/B evidence currently proves that reuse is

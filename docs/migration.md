@@ -32,6 +32,12 @@ normal Rust startup performs a versioned config migration only when necessary:
 - it removes a legacy `auto_update=false` field;
 - it removes the Go `watch_streak_warm_start_cache` boolean because Rust always
   manages its bounded streak cache internally; and
+- it converts the former `betting.make_predictions` wrapper to the canonical
+  `betting(make_predictions)` flag, removes matching duplicates, and rejects
+  conflicting or malformed wrappers without writing; and
+- it removes the earlier `watch_streams=true` marker because running the miner
+  already means watching, while `false` and non-boolean values are rejected;
+  and
 - it writes `<config>.bak` before the atomic replacement.
 
 `auto_update=true` is rejected and must be removed manually. A newer schema

@@ -191,6 +191,111 @@ fn rejects_invalid_legacy_warm_start_cache_without_rewriting() {
 }
 
 #[test]
+fn migrates_legacy_betting_wrapper_and_matching_duplicate() {
+    for (name, original, expected) in [
+        (
+            "legacy-betting-only",
+            br#"{"username":"Alice","watch_streams":true,"betting":{"make_predictions":true}}"#.as_slice(),
+            true,
+        ),
+        (
+            "legacy-betting-duplicate",
+            br#"{"username":"Alice","watch_streams":true,"betting":{"make_predictions":false},"betting(make_predictions)":false}"#.as_slice(),
+            false,
+        ),
+    ] {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, original).unwrap();
+
+        let config = load_or_create_config(&path).unwrap();
+        assert_eq!(config.betting_make_predictions, expected);
+        assert_eq!(fs::read(config_backup_path(&path)).unwrap(), original);
+        let migrated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(migrated.get("betting").is_none());
+        assert!(migrated.get("watch_streams").is_none());
+        assert_eq!(
+            migrated
+                .get("betting(make_predictions)")
+                .and_then(Value::as_bool),
+            Some(config.betting_make_predictions)
+        );
+    }
+}
+
+#[test]
+fn previews_legacy_betting_wrapper_without_writing() {
+    let dir = unique_temp_dir("legacy-betting-preview");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","betting":{"make_predictions":true}}"#;
+    fs::write(&path, original).unwrap();
+
+    let preview = preview_config(&path).unwrap();
+    assert!(preview.migration_required);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
+fn rejects_ambiguous_or_malformed_legacy_betting_without_rewriting() {
+    for (name, original, expected) in [
+        (
+            "legacy-betting-conflict",
+            br#"{"username":"Alice","betting":{"make_predictions":true},"betting(make_predictions)":false}"#.as_slice(),
+            "config.betting.make_predictions conflicts with config.betting(make_predictions)",
+        ),
+        (
+            "legacy-betting-invalid-value",
+            br#"{"username":"Alice","betting":{"make_predictions":"yes"}}"#.as_slice(),
+            "config.betting.make_predictions must be a boolean",
+        ),
+        (
+            "legacy-betting-unknown-key",
+            br#"{"username":"Alice","betting":{"make_predictions":true,"enabled":true}}"#.as_slice(),
+            "config.betting.enabled is not a recognized legacy configuration key",
+        ),
+    ] {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, original).unwrap();
+
+        let error = load_or_create_config(&path).unwrap_err();
+        assert!(matches!(error, ConfigError::Validation(message) if message == expected));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!config_backup_path(&path).exists());
+    }
+}
+
+#[test]
+fn rejects_disabled_or_malformed_legacy_watch_streams_without_rewriting() {
+    for (name, original, expected) in [
+        (
+            "legacy-watch-streams-disabled",
+            br#"{"username":"Alice","watch_streams":false}"#.as_slice(),
+            "config.watch_streams=false is no longer supported; stop the miner instead of starting it with watching disabled",
+        ),
+        (
+            "legacy-watch-streams-invalid",
+            br#"{"username":"Alice","watch_streams":"yes"}"#.as_slice(),
+            "config.watch_streams must be a boolean when present",
+        ),
+    ] {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, original).unwrap();
+
+        let error = load_or_create_config(&path).unwrap_err();
+        assert!(matches!(error, ConfigError::Validation(message) if message == expected));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!config_backup_path(&path).exists());
+    }
+}
+
+#[test]
 fn preview_reports_migration_without_writing_and_write_back_creates_backup() {
     let dir = unique_temp_dir("preview");
     fs::create_dir_all(&dir).unwrap();
