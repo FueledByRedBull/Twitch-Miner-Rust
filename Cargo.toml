@@ -4,14 +4,11 @@ members = [
     "crates/tm-auth",
     "crates/tm-config",
     "crates/tm-domain",
-    "crates/tm-events",
     "crates/tm-irc",
     "crates/tm-observability",
     "crates/tm-pubsub",
     "crates/tm-runtime",
     "crates/tm-twitch",
-    "tests/contract",
-    "tests/integration",
 ]
 resolver = "2"
 

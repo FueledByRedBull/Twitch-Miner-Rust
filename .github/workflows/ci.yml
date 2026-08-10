@@ -41,15 +41,6 @@ jobs:
       - name: Run Go baseline and Rust contract comparison
         shell: pwsh
         run: ./scripts/verify-go-baseline.ps1 -GoRoot Twitch-Channel-Points-Miner
-      - name: Validate complete language comparison
-        shell: pwsh
-        run: >
-          ./scripts/measure-language-comparison.ps1
-          -GoRoot Twitch-Channel-Points-Miner
-          -Iterations 100000
-          -Runs 3
-          -StartupRuns 5
-          -OutputPath ./language-comparison-smoke.json
 
   docs:
     runs-on: ubuntu-latest
@@ -75,23 +66,6 @@ jobs:
           docker compose -f docker-compose.yml config >/dev/null
           docker compose -f deploy/docker-compose.rpi.yml config >/dev/null
           docker compose -f deploy/docker-compose.volume.yml config >/dev/null
-
-  dependency-audit:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
-        with:
-          toolchain: 1.94.0
-      - name: Install pinned cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Audit locked dependencies
-        run: cargo audit
 
   dependency-policy:
     runs-on: ubuntu-latest

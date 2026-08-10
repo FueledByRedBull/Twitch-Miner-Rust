@@ -1,20 +1,20 @@
+// Parity fixtures constrain these JSON integers to the target field widths.
+#![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]
+
 use std::fs;
 use std::path::Path;
 
 use tm_config::{build_base_streamer_settings, BetConfig, ConfigFile};
 use tm_domain::{
-    parse_watch_priorities, pick_streamers_to_watch, BetSettings, Game, HistoryEntry,
+    parse_watch_priorities, pick_streamers_to_watch, BetSettings, Game, HistoryEntry, MinerEvent,
     OffsetDateTime, PredictionEvent, PredictionOutcome, Strategy, Stream, Streamer,
     StreamerSettings,
 };
-use tm_pubsub::{
-    build_topic_batches_with_policy, parse_message, plan_eventsub_capacity, PubSubEvent,
-    TransportSourcePolicy,
-};
+use tm_pubsub::{build_topic_batches, parse_message, plan_eventsub_capacity};
 use tm_runtime::{apply_pubsub_gain, RuntimeState};
 
 fn vectors() -> serde_json::Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../parity/vectors.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/parity/vectors.json");
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
@@ -356,7 +356,7 @@ fn normalized_pubsub_points_event_contract_matches_expected() {
     let expected = &input["expected"];
     assert_eq!(
         event,
-        PubSubEvent::PointsEarned {
+        MinerEvent::PointsEarned {
             channel_id: expected["channel_id"].as_str().unwrap().to_string(),
             earned: expected["earned"].as_i64().unwrap(),
             reason: expected["reason"].as_str().unwrap().to_string(),
@@ -377,10 +377,8 @@ fn normalized_dual_transport_policy_matches_expected() {
         },
         ..Streamer::default()
     };
-    let policy = TransportSourcePolicy::viewer_compatibility();
-    let batches =
-        build_topic_batches_with_policy("viewer", std::slice::from_ref(&streamer), policy).unwrap();
-    let report = plan_eventsub_capacity(std::slice::from_ref(&streamer), policy);
+    let batches = build_topic_batches("viewer", std::slice::from_ref(&streamer)).unwrap();
+    let report = plan_eventsub_capacity(std::slice::from_ref(&streamer), None);
 
     assert_eq!(
         report.capabilities[0].presence_source,
@@ -432,12 +430,7 @@ fn normalized_pubsub_batching_matches_expected() {
             ..Streamer::default()
         })
         .collect::<Vec<_>>();
-    let batches = build_topic_batches_with_policy(
-        "viewer",
-        &streamers,
-        TransportSourcePolicy::viewer_compatibility(),
-    )
-    .unwrap();
+    let batches = build_topic_batches("viewer", &streamers).unwrap();
     let expected = &input["expected"];
     assert_eq!(
         batches.iter().map(Vec::len).sum::<usize>(),
@@ -464,7 +457,7 @@ fn normalized_eventsub_capacity_matches_expected() {
             ..Streamer::default()
         })
         .collect::<Vec<_>>();
-    let report = plan_eventsub_capacity(&streamers, TransportSourcePolicy::viewer_compatibility());
+    let report = plan_eventsub_capacity(&streamers, None);
     let expected = &input["expected"];
     assert_eq!(
         report.planned_subscriptions,
@@ -498,18 +491,18 @@ fn normalized_cross_transport_presence_is_idempotent() {
     };
     let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
     state.streamers[0].channel_id = String::from("100");
-    let online = PubSubEvent::Playback {
+    let online = MinerEvent::Playback {
         channel_id: String::from("100"),
         kind: tm_pubsub::PlaybackType::StreamUp,
     };
-    state.apply_pubsub_event(&online, ts(100));
-    state.apply_pubsub_event(&online, ts(101));
-    let offline = PubSubEvent::Playback {
+    state.apply_event(&online, ts(100));
+    state.apply_event(&online, ts(101));
+    let offline = MinerEvent::Playback {
         channel_id: String::from("100"),
         kind: tm_pubsub::PlaybackType::StreamDown,
     };
-    state.apply_pubsub_event(&offline, ts(102));
-    state.apply_pubsub_event(&offline, ts(103));
+    state.apply_event(&offline, ts(102));
+    state.apply_event(&offline, ts(103));
 
     assert_eq!(
         state.streamers[0].online_at.unwrap().unix_timestamp(),

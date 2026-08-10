@@ -18,7 +18,7 @@ It is not a toy rewrite. The workspace is split into focused crates, the Twitch 
 
 The point was not to rewrite working behavior for the sake of language preference. The point was to keep the miner useful while making the internals less fragile.
 
-- one actor owns mutable state instead of scattering it across the process
+- one serialized runtime state owns mutable data instead of scattering it across the process
 - decision logic stays pure and testable
 - protocol boundaries remain isolated from domain state
 - startup, persistence, and local operation use explicit contracts
@@ -185,7 +185,6 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
 - end-to-end WATCH walkthrough: [docs/architecture/walkthrough.md](docs/architecture/walkthrough.md)
-- end-to-end prediction (effect-loop) walkthrough: [docs/architecture/prediction-walkthrough.md](docs/architecture/prediction-walkthrough.md)
 - behavioral differences and limits, including typed playback-token/HLS
   preflight: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)

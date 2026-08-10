@@ -6,7 +6,7 @@ use tm_twitch::TwitchClient;
 
 use crate::bootstrap::normalized_username;
 use crate::chat::spawn_chat_manager_loop;
-use crate::context::{spawn_context_refresh_loop, spawn_pending_claim_loop};
+use crate::context::spawn_context_refresh_loop;
 use crate::drops::spawn_drop_claim_loop;
 use crate::eventsub::{
     spawn_eventsub_loop, spawn_eventsub_presence_poll_loop, EventSubTaskContext,
@@ -24,7 +24,6 @@ pub(crate) struct BackgroundTasks {
     pub(crate) pubsub: Option<tokio::task::JoinHandle<()>>,
     pub(crate) presence_poll: Option<tokio::task::JoinHandle<()>>,
     pub(crate) context: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) pending_claims: Option<tokio::task::JoinHandle<()>>,
     pub(crate) minute: Option<tokio::task::JoinHandle<()>>,
     pub(crate) drop: Option<tokio::task::JoinHandle<()>>,
     pub(crate) chat: Option<tokio::task::JoinHandle<()>>,
@@ -44,7 +43,6 @@ impl BackgroundTasks {
             ("eventsub", self.eventsub.as_ref()),
             ("presence-poll", self.presence_poll.as_ref()),
             ("context", self.context.as_ref()),
-            ("pending-claims", self.pending_claims.as_ref()),
             ("minute", self.minute.as_ref()),
             ("drop", self.drop.as_ref()),
             ("chat", self.chat.as_ref()),
@@ -81,16 +79,6 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
     let transports = spawn_transport_tasks(params, &username);
     let context = params.user_id.map(|user_id| {
         spawn_context_refresh_loop(
-            params.stop_rx.clone(),
-            params.runtime.clone(),
-            Arc::clone(params.twitch),
-            user_id.clone(),
-            params.observability.clone(),
-            params.health.clone(),
-        )
-    });
-    let pending_claims = params.user_id.map(|user_id| {
-        spawn_pending_claim_loop(
             params.stop_rx.clone(),
             params.runtime.clone(),
             Arc::clone(params.twitch),
@@ -166,7 +154,6 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
         pubsub: transports.pubsub,
         presence_poll: transports.presence_poll,
         context,
-        pending_claims,
         minute,
         drop,
         chat,
@@ -189,10 +176,6 @@ fn register_background_health(params: &BackgroundTaskParams<'_>) {
         params
             .health
             .register("context", std::time::Duration::from_secs(30 * 60));
-        params.health.register(
-            "pending-claims",
-            std::time::Duration::from_secs(6 * 60 * 60),
-        );
         params
             .health
             .register("minute", std::time::Duration::from_secs(10 * 60));
@@ -283,7 +266,6 @@ mod tests {
             pubsub: None,
             presence_poll: None,
             context: None,
-            pending_claims: None,
             minute: None,
             drop: None,
             chat: None,
@@ -401,7 +383,6 @@ mod tests {
         assert!(tasks.pubsub.is_none());
         assert!(tasks.presence_poll.is_none());
         assert!(tasks.context.is_none());
-        assert!(tasks.pending_claims.is_none());
         assert!(tasks.minute.is_none());
         assert!(tasks.drop.is_none());
         assert!(tasks.streak_recovery.is_none());
@@ -443,7 +424,6 @@ mod tests {
         assert!(tasks.pubsub.is_some());
         assert!(tasks.presence_poll.is_some());
         assert!(tasks.context.is_some());
-        assert!(tasks.pending_claims.is_some());
         assert!(tasks.minute.is_some());
         assert!(tasks.drop.is_some());
         assert!(tasks.streak_recovery.is_some());
@@ -454,7 +434,6 @@ mod tests {
             "pubsub",
             "presence-poll",
             "context",
-            "pending-claims",
             "minute",
             "drop",
             "chat",
@@ -509,7 +488,6 @@ mod tests {
         assert!(tasks.pubsub.is_some());
         assert!(tasks.presence_poll.is_some());
         assert!(tasks.context.is_some());
-        assert!(tasks.pending_claims.is_some());
         assert!(tasks.minute.is_some());
         assert!(tasks.drop.is_none());
         assert!(tasks.streak_recovery.is_none());
@@ -520,7 +498,6 @@ mod tests {
             "pubsub",
             "presence-poll",
             "context",
-            "pending-claims",
             "minute",
             "chat",
             "streak-cache",

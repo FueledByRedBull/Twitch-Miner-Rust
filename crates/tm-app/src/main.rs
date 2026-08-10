@@ -12,22 +12,22 @@
 //! health/status/config/support-bundle commands, then loads and validates the
 //! config, prepares the work directory, and initializes tracing. It creates the
 //! session/client, bootstraps streamer context, presence, and streak cache,
-//! starts the `tm-runtime` actor, spawns the background tasks, publishes ready
+//! starts the `tm-runtime` state handle, spawns the background tasks, publishes ready
 //! health, and waits for a signal or task failure. `--canary`
 //! uses a config preview and a read-only canary instead of starting the miner.
 //!
 //! `tm-runtime` is the single writer for mutable mining state. `EventSub`, `PubSub`,
 //! polling, watcher, chat, and cache loops communicate through its handle and
 //! snapshots; reducers return typed effects rather than performing network I/O.
-//! [`runtime_effects`] executes those actor-approved effects (claims, raids,
+//! [`runtime_effects`] executes those runtime-approved effects (claims, raids,
 //! community goals, prediction work, and observability) at the application
 //! boundary, where point-changing mutations are not silently replayed.
 //!
 //! [`tasks::spawn_background_tasks`] registers and supervises `EventSub`, `PubSub`,
-//! presence fallback, context refresh, pending claims, minute watching, drops,
+//! presence fallback, context refresh, minute watching, drops,
 //! chat, streak-cache, and optional streak-recovery loops. [`shutdown`] watches
 //! signals and task liveness, broadcasts stop, joins with a grace period, then
-//! shuts down the actor and records the session summary.
+//! closes the runtime state handle and records the session summary.
 //!
 //! For the next layer, read [`startup`] for state construction, [`tasks`] for
 //! task wiring, [`eventsub`] and [`pubsub`] for transport adapters,
@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{anyhow, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
 use tm_twitch::TwitchClient;
@@ -75,15 +75,13 @@ use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
 use startup::{bootstrap_runtime_state, build_canary_logger_settings, build_logger_settings};
 use streak_cache::StreakCache;
 use tasks::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
-use utilities::{clear_console, new_session_id, set_console_title, time_now};
+use utilities::{new_session_id, time_now};
 
 mod build_info;
 mod status;
 
-const DEFAULT_CONSOLE_TITLE: &str = build_info::DISPLAY_NAME;
 const CONTEXT_REFRESH_CONCURRENCY: usize = 8;
 const WATCH_SELECTION_REFRESH_CONCURRENCY: usize = 4;
-const PENDING_CLAIMS_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
 const SPADE_URL_TTL: Duration = Duration::from_secs(15 * 60);
 const MINUTE_WATCHER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
@@ -92,7 +90,7 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 // These booleans are the stable, mutually constrained flat CLI surface consumed
 // by health checks and deployment scripts, not independent runtime policy.
 #[allow(clippy::struct_excessive_bools)]
-#[command(version = build_info::VERSION_BANNER)]
+#[command(version = build_info::VERSION)]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -113,7 +111,8 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let version: &'static str = Box::leak(build_info::version_banner().into_boxed_str());
+    let cli = Cli::from_arg_matches(&Cli::command().version(version).get_matches())?;
     build_runtime()?.block_on(run_cli(cli))
 }
 
@@ -129,9 +128,6 @@ async fn run_cli(cli: Cli) -> Result<()> {
     if let Some(result) = run_immediate_command(&cli, &requested_paths) {
         return result;
     }
-    set_console_title(DEFAULT_CONSOLE_TITLE);
-    clear_console();
-
     let loaded_config = load_active_config(&cli, &requested_paths, has_override)?;
     if cli.canary {
         let http_client = build_http_client(loaded_config.config.disable_ssl_cert_verification)?;
@@ -257,7 +253,7 @@ async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
         operation = "run",
         "{} | {}",
         build_info::DISPLAY_NAME,
-        build_info::VERSION_BANNER
+        build_info::version_banner()
     );
     tracing::info!(operation = "run", "{}", build_info::REPOSITORY_URL);
 

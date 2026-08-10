@@ -93,13 +93,6 @@ pub struct DiscordWebhook {
     pub events: Vec<Event>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscordRequest {
-    pub url: String,
-    pub content_type: String,
-    pub body: String,
-}
-
 #[derive(Debug, Error)]
 pub enum ObservabilityError {
     #[error("logger init failed: {0}")]
@@ -286,11 +279,11 @@ pub fn should_send_discord_event(webhook: &DiscordWebhook, event: Option<Event>)
 }
 
 #[must_use]
-pub fn build_discord_request(
+pub fn discord_message(
     webhook: &DiscordWebhook,
     message: &str,
     event: Option<Event>,
-) -> Option<DiscordRequest> {
+) -> Option<String> {
     if !should_send_discord_event(webhook, event) {
         return None;
     }
@@ -298,14 +291,7 @@ pub fn build_discord_request(
     if clean_message.is_empty() {
         return None;
     }
-    Some(DiscordRequest {
-        url: webhook.webhook_api.clone(),
-        content_type: String::from("application/x-www-form-urlencoded"),
-        body: form_url_encode(&[
-            ("content", clean_message.as_str()),
-            ("username", DISCORD_USERNAME),
-        ]),
-    })
+    Some(clean_message)
 }
 
 impl DiscordClient {
@@ -320,12 +306,11 @@ impl DiscordClient {
         Self { client }
     }
 
-    pub async fn send(&self, request: &DiscordRequest) -> Result<(), ObservabilityError> {
+    pub async fn send(&self, webhook_api: &str, message: &str) -> Result<(), ObservabilityError> {
         let response = self
             .client
-            .post(&request.url)
-            .header("Content-Type", &request.content_type)
-            .body(request.body.clone())
+            .post(webhook_api)
+            .form(&[("content", message), ("username", DISCORD_USERNAME)])
             .send()
             .await?;
         if !response.status().is_success() {
@@ -785,33 +770,6 @@ fn prune_old_log_archives(path: &Path, max_age: Duration) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn form_url_encode(pairs: &[(&str, &str)]) -> String {
-    pairs
-        .iter()
-        .map(|(key, value)| {
-            format!(
-                "{}={}",
-                url_encode_component(key),
-                url_encode_component(value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn url_encode_component(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            b' ' => String::from("+"),
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
 }
 
 fn random_initial_points(minimum: i64, maximum: i64) -> i64 {

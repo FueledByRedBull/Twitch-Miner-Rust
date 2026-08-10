@@ -1,6 +1,8 @@
+mod common;
+
+use common::{fixture_path, ts};
 use tm_config::ConfigFile;
-use tm_integration_tests::{fixture_path, ts};
-use tm_pubsub::{PlaybackType, PredictionUserKind, PubSubEvent};
+use tm_domain::{MinerEvent, PlaybackType, PredictionUserKind};
 use tm_runtime::{RuntimeEffect, RuntimeState};
 
 #[tokio::test]
@@ -16,15 +18,15 @@ async fn fixture_config_runtime_flow_stays_consistent_across_pubsub_events() {
     state.streamers[1].channel_points = 900;
     state.capture_initial_points();
 
-    state.apply_pubsub_event(
-        &PubSubEvent::Playback {
+    state.apply_event(
+        &MinerEvent::Playback {
             channel_id: String::from("100"),
             kind: PlaybackType::StreamUp,
         },
         ts(10),
     );
-    state.apply_pubsub_event(
-        &PubSubEvent::PointsEarned {
+    state.apply_event(
+        &MinerEvent::PointsEarned {
             channel_id: String::from("100"),
             earned: 50,
             reason: String::from("WATCH"),
@@ -32,8 +34,8 @@ async fn fixture_config_runtime_flow_stays_consistent_across_pubsub_events() {
         },
         ts(11),
     );
-    let claim_effects = state.apply_pubsub_event(
-        &PubSubEvent::ClaimAvailable {
+    let claim_effects = state.apply_event(
+        &MinerEvent::ClaimAvailable {
             channel_id: String::from("100"),
             claim_id: String::from("claim-1"),
         },
@@ -64,8 +66,8 @@ async fn fixture_config_runtime_flow_stays_consistent_across_pubsub_events() {
             result_string: String::new(),
         },
     );
-    let settled = state.apply_pubsub_event(
-        &PubSubEvent::PredictionUser {
+    let settled = state.apply_event(
+        &MinerEvent::PredictionUser {
             event_id: String::from("event-1"),
             kind: PredictionUserKind::PredictionResult,
             result: Some(serde_json::json!({ "type": "WIN" })),

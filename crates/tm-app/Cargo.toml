@@ -7,8 +7,6 @@ publish = false
 repository.workspace = true
 rust-version.workspace = true
 
-build = "build.rs"
-
 [dependencies]
 anyhow.workspace = true
 chrono-tz = "0.10.4"

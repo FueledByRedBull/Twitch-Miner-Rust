@@ -2,11 +2,9 @@
 // convert bounded counters to f64. Keep these schema/formatting exceptions at the module boundary.
 #![allow(clippy::struct_excessive_bools)]
 
-use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
-
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -318,21 +316,6 @@ impl Stream {
     #[must_use]
     pub const fn has_active_drop_campaign(&self) -> bool {
         matches!(self.drop_campaign_eligible, Some(true))
-    }
-
-    #[must_use]
-    pub fn last_update_ago_at(&self, now: OffsetDateTime) -> Duration {
-        self.last_update
-            .map(|last_update| {
-                Duration::from_secs((now - last_update).whole_seconds().max(0).cast_unsigned())
-            })
-            .unwrap_or_default()
-    }
-
-    #[must_use]
-    pub fn stream_up_elapsed_at(&self, now: OffsetDateTime) -> bool {
-        self.stream_up_at
-            .is_none_or(|started| now - started > time::Duration::minutes(2))
     }
 
     pub fn encode_payload(&self) -> Result<HashMap<String, String>, serde_json::Error> {

@@ -1,6 +1,10 @@
-use tm_domain::{CommunityGoal, PredictionDecision, PredictionEvent, PredictionOutcome};
-use tm_integration_tests::{base_runtime_state, ts};
-use tm_pubsub::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PubSubEvent};
+mod common;
+
+use common::{base_runtime_state, ts};
+use tm_domain::{
+    CommunityGoal, CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind,
+    PredictionDecision, PredictionEvent, PredictionOutcome,
+};
 use tm_runtime::RuntimeEffect;
 
 #[tokio::test]
@@ -10,8 +14,8 @@ async fn spawned_runtime_applies_stream_presence_goal_and_prediction_flow() {
     let runtime = tm_runtime::spawn_runtime_state(state);
 
     runtime
-        .apply_pubsub_event(
-            PubSubEvent::Playback {
+        .apply_event(
+            MinerEvent::Playback {
                 channel_id: "100".into(),
                 kind: PlaybackType::StreamUp,
             },
@@ -24,8 +28,8 @@ async fn spawned_runtime_applies_stream_presence_goal_and_prediction_flow() {
     assert_eq!(snapshot.desired_chat_logins(), vec!["alpha"]);
 
     let goal_effects = runtime
-        .apply_pubsub_event(
-            PubSubEvent::CommunityGoal {
+        .apply_event(
+            MinerEvent::CommunityGoal {
                 channel_id: "100".into(),
                 kind: CommunityGoalKind::Updated,
                 goal: Some(CommunityGoal {
@@ -51,8 +55,8 @@ async fn spawned_runtime_applies_stream_presence_goal_and_prediction_flow() {
     );
 
     let prediction_effects = runtime
-        .apply_pubsub_event(
-            PubSubEvent::PredictionChannel {
+        .apply_event(
+            MinerEvent::PredictionChannel {
                 kind: PredictionChannelKind::EventCreated,
                 event: Box::new(PredictionEvent {
                     streamer: snapshot.streamers[0].clone(),
@@ -69,9 +73,9 @@ async fn spawned_runtime_applies_stream_presence_goal_and_prediction_flow() {
                             total_users: 10,
                             total_points: 100,
                             top_points: 20,
-                            percentage_users: 66.66666666666667,
+                            percentage_users: 66.666_666_666_666_67,
                             odds: 1.5,
-                            odds_percentage: 66.66666666666667,
+                            odds_percentage: 66.666_666_666_666_67,
                         },
                         PredictionOutcome {
                             id: "b".into(),
@@ -80,9 +84,9 @@ async fn spawned_runtime_applies_stream_presence_goal_and_prediction_flow() {
                             total_users: 5,
                             total_points: 50,
                             top_points: 10,
-                            percentage_users: 33.333333333333336,
+                            percentage_users: 33.333_333_333_333_336,
                             odds: 3.0,
-                            odds_percentage: 33.333333333333336,
+                            odds_percentage: 33.333_333_333_333_336,
                         },
                     ],
                     decision: PredictionDecision::default(),

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tm_domain::Streamer;
 use tm_pubsub::{
-    CommunityGoalKind, PlaybackType, PredictionChannelKind, PredictionUserKind, PubSubEvent,
+    CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
 };
 use tm_twitch::{
     extract_build_id, extract_settings_script_url, extract_spade_url,
@@ -13,7 +13,7 @@ use tm_twitch::{
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures")
+        .join("../../tests/fixtures")
         .join(name)
 }
 
@@ -112,10 +112,11 @@ fn twitch_contract_fixtures_cover_build_id_context_stream_info_inventory_campaig
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn pubsub_contract_fixtures_cover_each_topic_family() {
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.claim_available.json"), &[]).unwrap(),
-        Some(PubSubEvent::ClaimAvailable {
+        Some(MinerEvent::ClaimAvailable {
             channel_id: String::from("123"),
             claim_id: String::from("claim-1"),
         })
@@ -123,7 +124,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.points_earned.json"), &[]).unwrap(),
-        Some(PubSubEvent::PointsEarned {
+        Some(MinerEvent::PointsEarned {
             channel_id: String::from("123"),
             earned: 50,
             reason: String::from("WATCH"),
@@ -133,21 +134,21 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.playback_stream_up.json"), &[]).unwrap(),
-        Some(PubSubEvent::Playback {
+        Some(MinerEvent::Playback {
             channel_id: String::from("123"),
             kind: PlaybackType::StreamUp,
         })
     );
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.playback_viewcount.json"), &[]).unwrap(),
-        Some(PubSubEvent::Playback {
+        Some(MinerEvent::Playback {
             channel_id: String::from("123"),
             kind: PlaybackType::Viewcount,
         })
     );
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.playback_stream_down.json"), &[]).unwrap(),
-        Some(PubSubEvent::Playback {
+        Some(MinerEvent::Playback {
             channel_id: String::from("123"),
             kind: PlaybackType::StreamDown,
         })
@@ -155,7 +156,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.raid.json"), &[]).unwrap(),
-        Some(PubSubEvent::Raid {
+        Some(MinerEvent::Raid {
             channel_id: String::from("123"),
             raid_id: String::from("raid-1"),
             target_login: String::from("target"),
@@ -164,7 +165,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.moment.json"), &[]).unwrap(),
-        Some(PubSubEvent::Moment {
+        Some(MinerEvent::Moment {
             channel_id: String::from("123"),
             moment_id: String::from("moment-1"),
         })
@@ -172,7 +173,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.community_goal_created.json"), &[]).unwrap(),
-        Some(PubSubEvent::CommunityGoal {
+        Some(MinerEvent::CommunityGoal {
             channel_id: String::from("123"),
             kind: CommunityGoalKind::Created,
             goal: Some(tm_domain::CommunityGoal {
@@ -189,7 +190,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     );
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.community_goal_updated.json"), &[]).unwrap(),
-        Some(PubSubEvent::CommunityGoal {
+        Some(MinerEvent::CommunityGoal {
             channel_id: String::from("123"),
             kind: CommunityGoalKind::Updated,
             goal: Some(tm_domain::CommunityGoal {
@@ -206,7 +207,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     );
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.community_goal_deleted.json"), &[]).unwrap(),
-        Some(PubSubEvent::CommunityGoal {
+        Some(MinerEvent::CommunityGoal {
             channel_id: String::from("123"),
             kind: CommunityGoalKind::Deleted,
             goal: None,
@@ -220,7 +221,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     )
     .unwrap()
     .unwrap();
-    let PubSubEvent::PredictionChannel {
+    let MinerEvent::PredictionChannel {
         kind,
         event,
         winning_outcome_id,
@@ -239,7 +240,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     )
     .unwrap()
     .unwrap();
-    let PubSubEvent::PredictionChannel {
+    let MinerEvent::PredictionChannel {
         kind,
         event,
         winning_outcome_id,
@@ -255,7 +256,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     assert_eq!(winning_outcome_id.as_deref(), Some("a"));
 
     let partial_update = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"RESOLVED\",\"winning_outcome_id\":\"a\"}}}"}}"#;
-    let PubSubEvent::PredictionChannel {
+    let MinerEvent::PredictionChannel {
         event,
         winning_outcome_id,
         ..
@@ -269,7 +270,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     assert_eq!(winning_outcome_id.as_deref(), Some("a"));
 
     let resolved_without_winner = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"RESOLVED\"}}}"}}"#;
-    let PubSubEvent::PredictionChannel {
+    let MinerEvent::PredictionChannel {
         event,
         winning_outcome_id,
         ..
@@ -287,7 +288,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
         let pending_update = format!(
             r#"{{"type":"MESSAGE","data":{{"topic":"predictions-channel-v1.123","message":"{{\"type\":\"event-updated\",\"data\":{{\"event\":{{\"id\":\"event-1\",\"status\":\"{pending_status}\"}}}}}}"}}}}"#
         );
-        let PubSubEvent::PredictionChannel { event, .. } =
+        let MinerEvent::PredictionChannel { event, .. } =
             tm_pubsub::parse_message(&pending_update, &[streamer("123")])
                 .unwrap()
                 .unwrap()
@@ -299,7 +300,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
     }
 
     let canceled_partial_update = r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.123","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"event-1\",\"status\":\"CANCELED\",\"created_at\":17,\"prediction_window_seconds\":-1,\"outcomes\":[{\"id\":\"a\",\"state\":\"CANCELED\"}]}}}"}}"#;
-    let PubSubEvent::PredictionChannel { event, .. } =
+    let MinerEvent::PredictionChannel { event, .. } =
         tm_pubsub::parse_message(canceled_partial_update, &[streamer("123")])
             .unwrap()
             .unwrap()
@@ -319,7 +320,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.prediction_made.json"), &[]).unwrap(),
-        Some(PubSubEvent::PredictionUser {
+        Some(MinerEvent::PredictionUser {
             event_id: String::from("event-1"),
             kind: PredictionUserKind::PredictionMade,
             result: None,
@@ -328,7 +329,7 @@ fn pubsub_contract_fixtures_cover_each_topic_family() {
 
     assert_eq!(
         tm_pubsub::parse_message(&fixture_json("pubsub.prediction_result.json"), &[]).unwrap(),
-        Some(PubSubEvent::PredictionUser {
+        Some(MinerEvent::PredictionUser {
             event_id: String::from("event-1"),
             kind: PredictionUserKind::PredictionResult,
             result: Some(serde_json::json!({ "type": "WIN", "points_won": 150 })),

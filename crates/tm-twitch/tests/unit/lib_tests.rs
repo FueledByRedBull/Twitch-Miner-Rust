@@ -23,8 +23,10 @@ use tm_domain::{CommunityGoal, Stream};
 
 #[test]
 fn extracts_build_id_from_homepage() {
-    let html =
-        r#"<script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#;
+    let html = concat!(
+        r#"window.__twilightBuildID_old = "decoy";"#,
+        r#"<script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#
+    );
     assert_eq!(
         extract_build_id(html).unwrap(),
         "ef928475-9403-42f2-8a34-55784bd08e16"
@@ -39,7 +41,10 @@ fn extracts_settings_script_and_spade_url() {
         "https://static.twitchcdn.net/config/settings.123.js"
     );
 
-    let settings = r#"window.__settings={"spade_url":"https://spade.example/submit"}"#;
+    let settings = concat!(
+        r#"window.decoy={"spade_url":false};"#,
+        r#"window.__settings={"spade_url":"https://spade.example/submit"}"#
+    );
     assert_eq!(
         extract_spade_url(settings).unwrap(),
         "https://spade.example/submit"

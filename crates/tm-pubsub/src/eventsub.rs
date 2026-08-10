@@ -8,13 +8,10 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use time::format_description::well_known::Rfc2822;
 use time::OffsetDateTime;
-use tm_domain::Streamer;
-use tm_events::MinerEvent;
+use tm_domain::{MinerEvent, Streamer};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-
-use crate::policy::TransportSourcePolicy;
 
 mod planning;
 mod protocol;
@@ -22,7 +19,7 @@ mod protocol;
 pub use planning::plan_eventsub_capacity;
 use planning::subscription_plan_with_capacity;
 #[cfg(test)]
-use planning::{subscription_plan, subscription_requests, subscription_requests_with_policy};
+use planning::{subscription_plan, subscription_requests};
 #[cfg(test)]
 use protocol::event_from_notification;
 pub use protocol::parse_eventsub_message;
@@ -59,7 +56,7 @@ impl EventSubDeadlines {
     };
 }
 
-/// Immutable connection, authorization, and source-selection policy.
+/// Immutable connection and authorization settings.
 #[derive(Clone)]
 pub struct EventSubClientSettings {
     pub client_id: String,
@@ -67,7 +64,6 @@ pub struct EventSubClientSettings {
     pub websocket_url: String,
     pub subscriptions_url: String,
     pub allow_prediction_scope_fallback: bool,
-    pub source_policy: TransportSourcePolicy,
     pub authorized_prediction_broadcaster_id: Option<String>,
     pub verify_subscriptions: bool,
     pub http_client: reqwest::Client,
@@ -82,7 +78,6 @@ impl EventSubClientSettings {
             websocket_url: EVENTSUB_WEBSOCKET_URL.to_string(),
             subscriptions_url: EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
             allow_prediction_scope_fallback: true,
-            source_policy: TransportSourcePolicy::viewer_compatibility(),
             authorized_prediction_broadcaster_id: None,
             verify_subscriptions: false,
             http_client: reqwest::Client::new(),
@@ -394,7 +389,6 @@ impl EventSubClient {
         let available_cost = existing.max_total_cost - existing.total_cost;
         let (requests, mut report) = subscription_plan_with_capacity(
             tracked_streamers,
-            self.settings.source_policy,
             self.settings
                 .authorized_prediction_broadcaster_id
                 .as_deref(),

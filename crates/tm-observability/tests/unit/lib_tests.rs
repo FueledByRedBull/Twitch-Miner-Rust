@@ -154,25 +154,19 @@ fn rotating_log_writer_bounds_file_size_and_archives() {
 }
 
 #[test]
-fn discord_request_uses_form_encoding_and_strips_ansi() {
+fn discord_message_strips_ansi() {
     let webhook = new_discord_webhook(&DiscordSettings {
         webhook_api: "https://example.invalid/webhook".into(),
         events: vec!["STREAMER_ONLINE".into()],
     })
     .unwrap();
-    let request = build_discord_request(
+    let message = discord_message(
         &webhook,
         "\u{1b}[32mStreamer online\u{1b}[0m",
         Some(Event::StreamerOnline),
     )
     .unwrap();
-    assert_eq!(request.url, "https://example.invalid/webhook");
-    assert_eq!(request.content_type, "application/x-www-form-urlencoded");
-    assert!(request.body.contains("content=Streamer+online"));
-    assert!(request
-        .body
-        .contains("username=Twitch+Channel+Points+Miner"));
-    assert!(!request.body.contains("avatar_url="));
+    assert_eq!(message, "Streamer online");
 }
 
 #[test]

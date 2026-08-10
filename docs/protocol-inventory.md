@@ -176,7 +176,7 @@ community-goal changes. It is unofficial/deprecated, so LISTEN acknowledgement,
 message time, reconnect count, and fixed failure class are exposed separately
 from EventSub status. User topics alone receive the auth token, connections are
 limited to 50 topics, and failures cannot stop EventSub, polling, IRC, or drops.
-Both paths normalize into `tm-events`; mutation IDs, point-event state, and
+Both paths normalize into `tm-domain::MinerEvent`; mutation IDs, point-event state, and
 prediction event IDs are boundedly deduplicated before effects are scheduled. GQL remains the typed
 mutation/reconciliation path. Twitch currently supports
 `drop.entitlement.grant` only through webhooks or conduits, not WebSockets.

@@ -1,19 +1,21 @@
 # Architecture
 
-The project runs as a Cargo workspace with crate boundaries split by responsibility:
+The project runs as a Cargo workspace with crate boundaries split by
+responsibility:
 
 - `tm-app` owns process bootstrap and task wiring.
 - `tm-config` owns config/path resolution and write-back; typed streamer-setting
   composition is isolated from persistence and migration.
 - `tm-auth` owns cookie persistence and device auth helpers.
-- `tm-domain` owns pure logic and shared types.
-- `tm-events` owns transport-neutral runtime events shared by EventSub and PubSub compatibility.
+- `tm-domain` owns pure logic, shared types, and the transport-neutral
+  `MinerEvent` contract.
 - `tm-twitch` owns Twitch HTTP, GQL, and scraping contracts. HTTP execution and
   typed response normalization remain separate modules.
-- `tm-pubsub` owns the isolated PubSub `/v1` compatibility client, EventSub
-  WebSocket transport, and the explicit source-selection policy. EventSub
-  connection lifecycle, capacity planning, and protocol normalization are
-  separate modules behind one facade.
+- `tm-pubsub` owns the isolated PubSub `/v1` compatibility client and EventSub
+  WebSocket transport. Production uses the fixed viewer-compatible topic set;
+  an authenticated broadcaster may additionally use EventSub prediction topics.
+  EventSub connection lifecycle, capacity planning, and protocol normalization
+  are separate modules behind one facade.
 - `tm-irc` owns IRC protocol handling.
 - `tm-runtime` owns the single-writer runtime state model.
 - `tm-observability` owns logging, privacy helpers, and Discord webhook payloads.
@@ -22,50 +24,20 @@ Discord is the sole built-in outbound notifier. Generic notifier backends and
 analytics exporters are intentionally out of scope unless a concrete operator
 requirement justifies adding them.
 
-`tm-runtime` owns the single-writer runtime state model, and `tm-app` owns bootstrap, process lifecycle, and top-level scheduling glue that drives it.
+## Architecture overview
 
-## One-screen ownership map
-
-The [ordinary WATCH walkthrough](walkthrough.md) follows the two separate
-halves of a reward: the minute-watch submission and the later points event.
-The [prediction walkthrough](prediction-walkthrough.md) follows the write side —
-how a reducer effect becomes one `make_prediction` mutation and how settlement
-is accounted.
-This map shows who owns each boundary and which way the Cargo dependencies
-point. Solid arrows are dependencies (the left side uses the right side);
-dotted arrows are the runtime data/control path for that walkthrough.
-It is the reward-path slice, not a replacement for the crate table above.
-
-```mermaid
-flowchart LR
-    A["tm-app<br/>watchers, transport tasks, effects"]
-    T["tm-twitch<br/>HTTP/GQL, playback, Spade"]
-    P["tm-pubsub<br/>WebSocket transports, parsing"]
-    E["tm-events<br/>transport-neutral MinerEvent"]
-    R["tm-runtime<br/>single actor, reducer, state"]
-    D["tm-domain<br/>pure shared types/logic"]
-
-    A -->|depends on| T
-    A -->|depends on| P
-    A -->|depends on| R
-    T -->|depends on| D
-    P -->|depends on| E
-    P -->|depends on| D
-    E -->|depends on| D
-    R -->|depends on| E
-    R -->|depends on| D
-
-    A -. "minute-watched POST" .-> T
-    P -. "validated PointsEarned" .-> A
-    A -. "apply command" .-> R
-    R -. "snapshot / effects" .-> A
-```
+The concise [architecture walkthrough](walkthrough.md) keeps the ownership
+map and one effect-capable event-flow diagram. This page records the broader
+crate boundaries and invariants without repeating that diagram.
 
 ## Internal module layout
 
 The largest crates are decomposed behind stable crate facades:
 
-- `tm-app` keeps `main.rs` as the executable entrypoint and splits orchestration into startup, shutdown, drops, independently supervised EventSub/PubSub tasks, presence fallback polling, runtime effects, context refresh, minute watching, chat, and shared utilities.
+- `tm-app` keeps `main.rs` as the executable entrypoint and splits orchestration
+  into startup, shutdown, drops, independently supervised EventSub/PubSub tasks,
+  presence fallback polling, runtime effects, context refresh, minute watching,
+  chat, and shared utilities.
 - `tm-config` keeps the stable flat schema and atomic persistence in `lib.rs`;
   `settings.rs` owns typed base/override composition.
 - `tm-twitch` exposes the same public API from `lib.rs`; `client.rs` owns HTTP
@@ -75,7 +47,9 @@ The largest crates are decomposed behind stable crate facades:
   connection/subscription lifecycle, `eventsub/planning.rs` owns deterministic
   cost planning, and `eventsub/protocol.rs` owns wire validation, normalization,
   and bounded message deduplication.
-- `tm-runtime` exposes the same public API from `lib.rs` while separating the actor handle, runtime state/types, effects, prediction settlement helpers, and summary/history formatting.
+- `tm-runtime` exposes the same public API from `lib.rs` while separating the
+  serialized handle, runtime state/types, effects, prediction settlement
+  helpers, and summary/history formatting.
 
 Large private unit-test suites live under each crate's `tests/unit/` directory
 and are included with `cfg(test)` path modules. They retain private access
@@ -83,11 +57,11 @@ without becoming integration targets or forcing test hooks into public APIs.
 
 ## Runtime ownership and effects
 
-All mutable mining state remains owned by one `tm-runtime` actor. Transport,
-polling, and watcher tasks submit typed commands and receive snapshots or
-effect decisions; they never retain a second mutable copy. The reducer
+All mutable mining state remains owned by one serialized `tm-runtime` state.
+Transport, polling, and watcher tasks submit typed events/updates and receive
+snapshots or effect decisions; they never retain a second mutable copy. The reducer
 deduplicates external mutation identifiers before returning effects. Network
-mutations are executed once by `tm-app` after the actor decision and are never
+mutations are executed once by `tm-app` after the runtime decision and are never
 silently replayed.
 
 Application orchestration uses contexts only where values share a lifecycle:
@@ -98,7 +72,7 @@ state/watch reducers stay explicit because wrapping them solely to satisfy a
 line or boolean count would obscure the contract.
 
 EventSub and PubSub task contexts embed the same `RuntimeEffectContext` used to
-execute actor-approved network effects. This removes duplicated runtime/client/
+execute runtime-approved network effects. This removes duplicated runtime/client/
 identity/observability/health wiring while leaving transport credentials and
 subscription state in their narrower transport contexts.
 
@@ -107,8 +81,7 @@ subscription state in their narrower transport contexts.
 | Boundary | Invariant |
 | --- | --- |
 | Domain | `tm-domain` remains deterministic and has no async, HTTP, transport, tracing, CLI, or application dependency. |
-| Events | `tm-events` contains transport-neutral observations only. |
-| Runtime | One actor owns mutable state; its bounded queue applies backpressure, and reducers emit effects without executing network mutations. |
+| Runtime | One serialized state owner applies updates, and reducers emit effects without executing network mutations. |
 | Twitch HTTP | Only classified read operations retry; mutations are not replayed after an uncertain response. |
 | Transports | EventSub, PubSub, IRC, and polling are independently supervised and cannot directly own runtime state. |
 | Watching | At most two Twitch-creditable slots run; an eligible campaign can pin one while the remaining slot fair-rotates. |
@@ -122,7 +95,7 @@ runs it without installing another analysis dependency.
 
 Production workspace code forbids `unsafe`. CI also rejects production
 `unwrap`, `expect`, panic, `todo!`, and `unimplemented!` shortcuts, except for
-narrowly documented compile-time invariants such as fixed regex literals and
-the built-in default-config schema. Test fixtures may still fail loudly.
+narrowly documented compile-time invariants such as the built-in default-config
+schema. Test fixtures may still fail loudly.
 
 Quality gates are handled by `.github/workflows/ci.yml`; Docker image validation and publishing remain in the multiarch workflow. Automatic self-update is intentionally absent: releases are source- and digest-pinned.

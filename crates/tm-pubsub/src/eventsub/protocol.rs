@@ -6,8 +6,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
-use tm_domain::{PredictionDecision, PredictionEvent, PredictionOutcome, Streamer};
-use tm_events::{MinerEvent, PlaybackType, PredictionChannelKind};
+use tm_domain::{
+    MinerEvent, PlaybackType, PredictionChannelKind, PredictionDecision, PredictionEvent,
+    PredictionOutcome, Streamer,
+};
 
 use super::{EventSubError, EventSubMessage, MAX_SEEN_MESSAGE_IDS};
 

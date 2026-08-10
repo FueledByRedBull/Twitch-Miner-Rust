@@ -2,11 +2,12 @@ use super::*;
 use std::collections::HashMap;
 use tm_config::ConfigFile;
 use tm_domain::{
-    parse_watch_priorities, should_prioritize_streak, CommunityGoal, HistoryEntry, IrcMode,
-    OffsetDateTime, PredictionDecision, PredictionEvent, PredictionOutcome, Stream, Streamer,
-    StreamerSettings, WatchPriority,
+    parse_watch_priorities, should_prioritize_streak, CommunityGoal, CommunityGoalKind,
+    HistoryEntry, IrcMode, MinerEvent, OffsetDateTime, PlaybackType, PredictionChannelKind,
+    PredictionDecision, PredictionEvent, PredictionOutcome, Stream, Streamer, StreamerSettings,
+    WatchPriority,
 };
-use tm_pubsub::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PubSubEvent};
+use tm_pubsub::parse_message;
 
 fn assert_f64_eq(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < f64::EPSILON);
@@ -141,7 +142,7 @@ fn watch_streak_event_records_resolution_time_for_warm_restart() {
     let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
     state.streamers[0].channel_id = String::from("100");
     state.streamers[0].stream = Some(Stream::default());
-    let event = PubSubEvent::PointsEarned {
+    let event = MinerEvent::PointsEarned {
         channel_id: String::from("100"),
         earned: 50,
         reason: String::from("WATCH_STREAK"),
@@ -304,8 +305,8 @@ fn playback_presence_drives_watch_and_chat_targets() {
         completed_predictions: std::collections::VecDeque::new(),
     };
 
-    state.apply_pubsub_event(
-        &PubSubEvent::Playback {
+    state.apply_event(
+        &MinerEvent::Playback {
             channel_id: "123".into(),
             kind: PlaybackType::StreamUp,
         },
@@ -314,8 +315,8 @@ fn playback_presence_drives_watch_and_chat_targets() {
     assert_eq!(state.desired_chat_logins(), vec!["tester"]);
     assert_eq!(state.watch_target_logins(ts(100)), vec!["tester"]);
 
-    state.apply_pubsub_event(
-        &PubSubEvent::Playback {
+    state.apply_event(
+        &MinerEvent::Playback {
             channel_id: "123".into(),
             kind: PlaybackType::StreamDown,
         },
@@ -354,8 +355,8 @@ fn viewcount_playback_does_not_promote_presence() {
         completed_predictions: std::collections::VecDeque::new(),
     };
 
-    state.apply_pubsub_event(
-        &PubSubEvent::Playback {
+    state.apply_event(
+        &MinerEvent::Playback {
             channel_id: "123".into(),
             kind: PlaybackType::Viewcount,
         },
@@ -671,8 +672,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         completed_predictions: std::collections::VecDeque::new(),
     };
 
-    let raid_effects = state.apply_pubsub_event(
-        &PubSubEvent::Raid {
+    let raid_effects = state.apply_event(
+        &MinerEvent::Raid {
             channel_id: "123".into(),
             raid_id: "raid-1".into(),
             target_login: "target".into(),
@@ -688,8 +689,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         }]
     );
     assert!(state
-        .apply_pubsub_event(
-            &PubSubEvent::Raid {
+        .apply_event(
+            &MinerEvent::Raid {
                 channel_id: "123".into(),
                 raid_id: "raid-1".into(),
                 target_login: "target".into(),
@@ -698,8 +699,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         )
         .is_empty());
 
-    let moment_effects = state.apply_pubsub_event(
-        &PubSubEvent::Moment {
+    let moment_effects = state.apply_event(
+        &MinerEvent::Moment {
             channel_id: "123".into(),
             moment_id: "moment-1".into(),
         },
@@ -713,8 +714,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         }]
     );
     assert!(state
-        .apply_pubsub_event(
-            &PubSubEvent::Moment {
+        .apply_event(
+            &MinerEvent::Moment {
                 channel_id: "123".into(),
                 moment_id: "moment-1".into(),
             },
@@ -722,21 +723,21 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         )
         .is_empty());
 
-    let claim = PubSubEvent::ClaimAvailable {
+    let claim = MinerEvent::ClaimAvailable {
         channel_id: "123".into(),
         claim_id: "claim-1".into(),
     };
     assert_eq!(
-        state.apply_pubsub_event(&claim, ts(102)),
+        state.apply_event(&claim, ts(102)),
         vec![RuntimeEffect::ClaimBonus {
             channel_id: "123".into(),
             claim_id: "claim-1".into(),
         }]
     );
-    assert!(state.apply_pubsub_event(&claim, ts(102)).is_empty());
+    assert!(state.apply_event(&claim, ts(102)).is_empty());
 
-    let goal_effects = state.apply_pubsub_event(
-        &PubSubEvent::CommunityGoal {
+    let goal_effects = state.apply_event(
+        &MinerEvent::CommunityGoal {
             channel_id: "123".into(),
             kind: CommunityGoalKind::Created,
             goal: Some(CommunityGoal {
@@ -761,7 +762,7 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
     assert!(state.streamers[0].community_goals.contains_key("goal-1"));
     let unchanged_goal = state.streamers[0].community_goals["goal-1"].clone();
     let unchanged_application = state.apply_event_with_outcome(
-        &PubSubEvent::CommunityGoal {
+        &MinerEvent::CommunityGoal {
             channel_id: "123".into(),
             kind: CommunityGoalKind::Updated,
             goal: Some(unchanged_goal),
@@ -772,8 +773,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
     assert!(!unchanged_application.changed);
     assert!(unchanged_application.effects.is_empty());
 
-    let prediction_effects = state.apply_pubsub_event(
-        &PubSubEvent::PredictionChannel {
+    let prediction_effects = state.apply_event(
+        &MinerEvent::PredictionChannel {
             kind: PredictionChannelKind::EventCreated,
             event: Box::new(PredictionEvent {
                 streamer: state.streamers[0].clone(),
@@ -823,8 +824,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         }]
     );
     assert!(state.predictions.contains_key("event-1"));
-    let duplicate_prediction_effects = state.apply_pubsub_event(
-        &PubSubEvent::PredictionChannel {
+    let duplicate_prediction_effects = state.apply_event(
+        &MinerEvent::PredictionChannel {
             kind: PredictionChannelKind::EventCreated,
             event: Box::new(state.predictions["event-1"].clone()),
             winning_outcome_id: None,
@@ -833,13 +834,13 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
     );
     assert!(duplicate_prediction_effects.is_empty());
 
-    let prediction_result = tm_pubsub::parse_message(
+    let prediction_result = parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"event-1\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
             &[],
         )
         .unwrap()
         .unwrap();
-    let settled = state.apply_pubsub_event(&prediction_result, ts(105));
+    let settled = state.apply_event(&prediction_result, ts(105));
     assert_eq!(
         settled,
         vec![RuntimeEffect::PredictionSettled {
@@ -871,8 +872,8 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
     replay.result_type.clear();
     replay.result_string.clear();
     assert!(state
-        .apply_pubsub_event(
-            &PubSubEvent::PredictionChannel {
+        .apply_event(
+            &MinerEvent::PredictionChannel {
                 kind: PredictionChannelKind::EventCreated,
                 event: Box::new(replay),
                 winning_outcome_id: None,
@@ -922,8 +923,8 @@ async fn spawned_runtime_is_single_writer_for_pubsub_and_shutdown() {
     assert_eq!(summary.configured_streamers, 1);
 
     runtime
-        .apply_pubsub_event(
-            PubSubEvent::PointsEarned {
+        .apply_event(
+            MinerEvent::PointsEarned {
                 channel_id: String::new(),
                 earned: 100,
                 reason: "WATCH".into(),
@@ -961,7 +962,7 @@ fn duplicate_points_event_does_not_double_balance_or_history() {
     let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
     state.streamers[0].channel_id = String::from("100");
     state.streamers[0].channel_points = 1_000;
-    let event = PubSubEvent::PointsEarned {
+    let event = MinerEvent::PointsEarned {
         channel_id: String::from("100"),
         earned: 50,
         reason: String::from("WATCH"),
@@ -997,7 +998,7 @@ fn points_replay_dedupe_property_tracks_post_application_balance() {
             let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
             state.streamers[0].channel_id = String::from("100");
             state.streamers[0].channel_points = starting_balance;
-            let event = PubSubEvent::PointsEarned {
+            let event = MinerEvent::PointsEarned {
                 channel_id: String::from("100"),
                 earned,
                 reason: String::from("WATCH"),
@@ -1060,7 +1061,7 @@ fn unknown_channel_winner_does_not_fabricate_a_loss() {
     active.status = String::from("RESOLVED");
 
     let application = state.apply_event_with_outcome(
-        &PubSubEvent::PredictionChannel {
+        &MinerEvent::PredictionChannel {
             kind: PredictionChannelKind::EventUpdated,
             event: Box::new(active),
             winning_outcome_id: Some(String::from("unknown")),
@@ -1119,7 +1120,7 @@ fn partial_settlement_update_keeps_connection_flow_for_viewer_result() {
     };
     state.predictions.insert(active.event_id.clone(), active);
 
-    let pending_update = tm_pubsub::parse_message(
+    let pending_update = parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-partial-settlement\",\"status\":\"RESOLVE_PENDING\"}}}"}}"#,
             &state.streamers,
         )
@@ -1133,7 +1134,7 @@ fn partial_settlement_update_keeps_connection_flow_for_viewer_result() {
         "RESOLVE_PENDING"
     );
 
-    let channel_update = tm_pubsub::parse_message(
+    let channel_update = parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-partial-settlement\",\"status\":\"RESOLVED\"}}}"}}"#,
             &state.streamers,
         )
@@ -1146,13 +1147,13 @@ fn partial_settlement_update_keeps_connection_flow_for_viewer_result() {
         .predictions
         .contains_key("prediction-partial-settlement"));
 
-    let viewer_result = tm_pubsub::parse_message(
+    let viewer_result = parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"prediction-partial-settlement\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
             &[],
         )
         .unwrap()
         .unwrap();
-    let viewer_effects = state.apply_pubsub_event(&viewer_result, ts(4));
+    let viewer_effects = state.apply_event(&viewer_result, ts(4));
 
     assert_eq!(viewer_effects.len(), 1);
     assert!(!state
@@ -1200,13 +1201,13 @@ fn partial_cancellation_update_refunds_placed_bet() {
     };
     state.predictions.insert(active.event_id.clone(), active);
 
-    let cancellation = tm_pubsub::parse_message(
+    let cancellation = parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-channel-v1.100","message":"{\"type\":\"event-updated\",\"data\":{\"event\":{\"id\":\"prediction-canceled\",\"status\":\"CANCELED\",\"outcomes\":[{\"id\":\"a\",\"state\":\"CANCELED\"}]}}}"}}"#,
             &state.streamers,
         )
         .unwrap()
         .unwrap();
-    let effects = state.apply_pubsub_event(&cancellation, ts(2));
+    let effects = state.apply_event(&cancellation, ts(2));
 
     assert_eq!(effects.len(), 1);
     assert_eq!(state.completed_predictions.len(), 1);
@@ -1264,8 +1265,8 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
     resolved.status = String::from("RESOLVED");
     resolved.outcomes.clear();
 
-    let channel_effects = state.apply_pubsub_event(
-        &PubSubEvent::PredictionChannel {
+    let channel_effects = state.apply_event(
+        &MinerEvent::PredictionChannel {
             kind: PredictionChannelKind::EventUpdated,
             event: Box::new(resolved),
             winning_outcome_id: Some(String::from("a")),
@@ -1276,13 +1277,13 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
     assert_eq!(state.completed_predictions.len(), 1);
     assert_eq!(state.completed_predictions[0].outcomes.len(), 2);
 
-    let viewer_result = tm_pubsub::parse_message(
+    let viewer_result = parse_message(
             r#"{"type":"MESSAGE","data":{"topic":"predictions-user-v1.user","message":"{\"type\":\"prediction-result\",\"data\":{\"prediction\":{\"event_id\":\"prediction-1\",\"result\":{\"type\":\"WIN\",\"points_won\":250}}}}"}}"#,
             &[],
         )
         .unwrap()
         .unwrap();
-    let viewer_effects = state.apply_pubsub_event(&viewer_result, ts(3));
+    let viewer_effects = state.apply_event(&viewer_result, ts(3));
 
     assert!(viewer_effects.is_empty());
     assert_eq!(state.completed_predictions.len(), 1);
@@ -1403,7 +1404,7 @@ fn confirmed_watch_progress_rejects_stale_and_nonpositive_intervals() {
 }
 
 #[tokio::test]
-async fn runtime_metrics_capture_event_processing_and_queue_depth() {
+async fn runtime_metrics_capture_event_processing_and_compatibility_fields() {
     let config = ConfigFile {
         streamers: vec!["tester".into()],
         ..ConfigFile::default()
@@ -1411,7 +1412,7 @@ async fn runtime_metrics_capture_event_processing_and_queue_depth() {
     let runtime = spawn_runtime(&config, ts(10));
     runtime
         .apply_event(
-            PubSubEvent::Playback {
+            MinerEvent::Playback {
                 channel_id: String::from("missing"),
                 kind: PlaybackType::Viewcount,
             },
@@ -1421,78 +1422,11 @@ async fn runtime_metrics_capture_event_processing_and_queue_depth() {
         .unwrap();
     let metrics = runtime.metrics();
     assert_eq!(metrics.processed_events, 1);
-    assert!(metrics.max_queue_depth >= 1);
-    assert!(metrics.max_queue_depth <= 64);
+    assert_eq!(metrics.max_queue_depth, 0);
 }
 
 #[tokio::test]
-async fn queued_commands_and_dropped_callers_do_not_block_orderly_shutdown() {
-    let config = ConfigFile {
-        streamers: vec!["tester".into()],
-        ..ConfigFile::default()
-    };
-    let runtime = spawn_runtime(&config, ts(10));
-    let mut queued = Vec::new();
-    for index in 0_i64..64 {
-        let handle = runtime.clone();
-        queued.push(tokio::spawn(async move {
-            handle
-                .apply_event(
-                    PubSubEvent::PointsEarned {
-                        channel_id: String::new(),
-                        earned: 1,
-                        reason: String::from("WATCH"),
-                        balance: index,
-                    },
-                    ts(20 + index),
-                )
-                .await
-        }));
-    }
-    tokio::task::yield_now().await;
-    let dropped = tokio::spawn({
-        let handle = runtime.clone();
-        async move {
-            let _ = handle
-                .apply_event(
-                    PubSubEvent::Playback {
-                        channel_id: String::new(),
-                        kind: PlaybackType::Viewcount,
-                    },
-                    ts(100),
-                )
-                .await;
-        }
-    });
-    dropped.abort();
-
-    let shutdown = tokio::spawn({
-        let handle = runtime.clone();
-        async move { handle.shutdown(false, ts(200)).await }
-    });
-    for task in queued {
-        let _ = task.await;
-    }
-    let summary = shutdown.await.unwrap().unwrap();
-    assert_eq!(summary.streamers.len(), 1);
-    assert!(runtime.metrics().processed_events <= 65);
-    assert!(runtime.metrics().max_queue_depth > 0);
-}
-
-#[tokio::test]
-async fn run_bootstraps_session_directly() {
-    let config = ConfigFile {
-        streamers: vec!["tester".into()],
-        ..ConfigFile::default()
-    };
-
-    let session = run(&config).await;
-
-    assert_eq!(session.summary.configured_streamers, 1);
-}
-
-#[tokio::test]
-async fn runtime_handle_returns_typed_actor_closed_error_after_shutdown() {
+async fn runtime_handle_returns_typed_closed_error_after_shutdown() {
     let config = ConfigFile {
         streamers: vec!["tester".into()],
         ..ConfigFile::default()
@@ -1504,11 +1438,7 @@ async fn runtime_handle_returns_typed_actor_closed_error_after_shutdown() {
 
     assert!(matches!(
         error,
-        RuntimeError::SendFailed {
-            command: "StateSnapshot"
-        } | RuntimeError::ActorClosed {
-            command: "StateSnapshot"
-        } | RuntimeError::CallerDropped {
+        RuntimeError::RuntimeClosed {
             command: "StateSnapshot"
         }
     ));

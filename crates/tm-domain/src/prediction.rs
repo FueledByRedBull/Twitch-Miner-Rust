@@ -31,7 +31,7 @@ fn percentage_of_balance(balance: i64, percentage: u32) -> i64 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PredictionOutcome {
-    /// Immutable identity shared with owned decisions sent across the runtime actor.
+    /// Immutable identity shared with owned decisions sent across the runtime handle.
     pub id: Arc<str>,
     pub title: String,
     pub color: String,
@@ -292,12 +292,6 @@ impl PredictionEvent {
         self.outcomes
             .iter()
             .find(|outcome| outcome.id == self.decision.outcome_id)
-    }
-
-    #[must_use]
-    pub fn decision_outcome_string(&self) -> String {
-        self.decision_outcome()
-            .map_or_else(|| self.decision.outcome_id.to_string(), ToString::to_string)
     }
 
     #[must_use]

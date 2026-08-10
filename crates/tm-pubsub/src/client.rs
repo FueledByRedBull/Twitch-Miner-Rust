@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tm_domain::Streamer;
+use tm_domain::{MinerEvent, Streamer};
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
 use tokio_tungstenite::connect_async;
@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::errors::PubSubError;
 use crate::parse::{bad_auth_cookie_file, parse_transport_message};
 use crate::topics::{build_topics, listen_payloads, ping_payload, pubsub_topic_class};
-use crate::types::{IncomingTransportMessage, PubSubEvent};
+use crate::types::IncomingTransportMessage;
 use crate::WEBSOCKET_URL;
 
 const PING_JITTER_SECONDS: u64 = 5;
@@ -29,7 +29,7 @@ pub enum PubSubConnectionEvent {
     ListenAcknowledged {
         topic_class: String,
     },
-    Event(Box<PubSubEvent>),
+    Event(Box<MinerEvent>),
     ResponseError {
         nonce: Option<String>,
         topic_class: Option<String>,

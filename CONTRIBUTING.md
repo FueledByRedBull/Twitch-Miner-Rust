@@ -40,7 +40,7 @@ Before submitting a change, run:
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo clippy --workspace --exclude tm-contract-tests --exclude tm-integration-tests --lib --bins --examples --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented
+cargo clippy --workspace --lib --bins --examples --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented
 cargo test --workspace --all-targets --all-features --locked --quiet
 $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --workspace --all-features --locked --no-deps
@@ -52,29 +52,21 @@ cargo build --workspace --release --locked
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
 
-Performance-sensitive changes should also run the sanitized, network-free
+Performance-sensitive changes should also run the fixed sanitized, network-free
 replay. Timing is review evidence, not a wall-clock pass/fail gate:
 
 ```powershell
-./scripts/measure-replay.ps1 -Iterations 5
-```
-
-Changes shared with the Go reference should use an explicit clean Go checkout
-and retain the generated report only as review/release evidence:
-
-```powershell
-./scripts/measure-language-comparison.ps1 `
-  -GoRoot C:/path/to/pinned-go-checkout
+cargo run -p tm-runtime --example replay_benchmark --release --locked
 ```
 
 The manually dispatched/weekly `Deep Quality` workflow pins its nightly and
 analysis executables. It preserves the 60% critical-core branch floor and a
 separate 46.0% `tm-app` ratchet, runs bounded pure-parser fuzzing from the isolated
-`fuzz/` workspace, and mutates only the functions named in the workflow. Do not
-expand it to network effects or treat timing as a correctness gate.
+`fuzz/` workspace, and runs the fixed replay once. Do not expand it to network
+effects or treat timing as a correctness gate.
 
 Protocol changes need a sanitized fixture, parser test, and parity-matrix
-update. Run `tests/contract/tests/parser_robustness.rs` as part of the normal
+update. Run `crates/tm-app/tests/parser_robustness.rs` as part of the normal
 suite; it is the bounded arbitrary-input regression check for protocol
 parsers. Release changes need `CHANGELOG.md`, the protocol inventory,
 container/release docs, and image-smoke updates.
