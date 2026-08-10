@@ -71,6 +71,11 @@
   selected-channel cadence and pinning the four-request preflight contract.
   No credited WATCH/WATCH_STREAK A/B evidence currently proves that reuse is
   safe.
+- Refreshes Twitch's retired `PlaybackAccessToken` persisted hash and sends the
+  verified full read-only query in the same request. This restores playback
+  priming immediately and keeps future hash retirement from stopping WATCH
+  while Twitch continues to accept raw queries; strict task health still
+  exposes schema or endpoint failures.
 - Decodes the primary `spade_url` as a JSON string while accepting harmless
   whitespace and escaping. Missing or malformed primary shapes fail clearly;
   no alternate extraction chain is added.

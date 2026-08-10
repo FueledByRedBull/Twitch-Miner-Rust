@@ -119,26 +119,30 @@ $allowedRustOnly = @(
     'FilterableVideoTower_Videos',
     'ClipsCards__User'
 )
+$allowedHashMismatches = @('PlaybackAccessToken')
 
 $missing = @($goMap.Keys | Where-Object { -not $rustMap.ContainsKey($_) } | Sort-Object)
 $extra = @($rustMap.Keys | Where-Object { -not $goMap.ContainsKey($_) } | Sort-Object)
 $mismatches = @($goMap.Keys | Where-Object {
     $rustMap.ContainsKey($_) -and $goMap[$_] -ne $rustMap[$_]
 } | Sort-Object)
+$unexpectedMismatches = @($mismatches | Where-Object { $_ -notin $allowedHashMismatches })
+$missingDocumentedMismatches = @($allowedHashMismatches | Where-Object { $_ -notin $mismatches })
 $unexpectedMissing = @($missing | Where-Object { $_ -notin $allowedGoOnly })
 $unexpectedGoOnly = @($allowedGoOnly | Where-Object { $_ -notin $missing })
 $unexpectedExtra = @($extra | Where-Object { $_ -notin $allowedRustOnly })
 $missingRustOnly = @($allowedRustOnly | Where-Object { $_ -notin $extra })
 
-if ($unexpectedMissing.Count -or $unexpectedGoOnly.Count -or $unexpectedExtra.Count -or $missingRustOnly.Count -or $mismatches.Count) {
+if ($unexpectedMissing.Count -or $unexpectedGoOnly.Count -or $unexpectedExtra.Count -or $missingRustOnly.Count -or $unexpectedMismatches.Count -or $missingDocumentedMismatches.Count) {
     throw @"
 Go/Rust contract comparison failed.
 Unexpected Go-only: $($unexpectedMissing -join ', ')
 Missing documented Go-only: $($unexpectedGoOnly -join ', ')
 Unexpected Rust-only: $($unexpectedExtra -join ', ')
 Missing documented Rust-only: $($missingRustOnly -join ', ')
-Hash mismatches: $($mismatches -join ', ')
+Unexpected hash mismatches: $($unexpectedMismatches -join ', ')
+Missing documented hash mismatches: $($missingDocumentedMismatches -join ', ')
 "@
 }
 
-Write-Output "go-baseline-ok: $($goMap.Count) Go definitions, $($rustMap.Count) active Rust definitions, $($missing.Count) documented Go-only definitions, $($extra.Count) documented Rust-only definitions"
+Write-Output "go-baseline-ok: $($goMap.Count) Go definitions, $($rustMap.Count) active Rust definitions, $($missing.Count) documented Go-only definitions, $($extra.Count) documented Rust-only definitions, $($mismatches.Count) documented hash mismatch"

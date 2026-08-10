@@ -2,6 +2,8 @@ use serde_json::json;
 
 use crate::types::GqlPersistedOperation;
 
+const PLAYBACK_ACCESS_TOKEN_QUERY: &str = "query PlaybackAccessToken($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!, $platform: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } videoPlaybackAccessToken(id: $vodID, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isVod) { value signature __typename } }";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistedOperationContract {
     pub operation_name: &'static str,
@@ -37,7 +39,7 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
     },
     PersistedOperationContract {
         operation_name: "PlaybackAccessToken",
-        sha256_hash: "3093517e37e4f4cb48906155bcd894150aef92617939236d2508f3375ab732ce",
+        sha256_hash: "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
         read_only: true,
     },
     PersistedOperationContract {
@@ -156,15 +158,19 @@ pub fn stream_info_overlay(channel_login: &str) -> GqlPersistedOperation {
 pub fn playback_access_token(channel_login: &str) -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "PlaybackAccessToken",
-        "3093517e37e4f4cb48906155bcd894150aef92617939236d2508f3375ab732ce",
+        "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
         json!({
             "isLive": true,
             "isVod": false,
             "login": channel_login.to_lowercase(),
             "playerType": "site",
+            "platform": "web",
             "vodID": ""
         }),
     )
+    // Twitch accepts the full query alongside the persisted hash. Keeping both
+    // preserves the audited path without letting hash rotation stop WATCH.
+    .with_query(PLAYBACK_ACCESS_TOKEN_QUERY)
 }
 
 #[must_use]
