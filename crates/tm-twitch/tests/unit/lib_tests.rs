@@ -291,6 +291,15 @@ fn builds_single_and_batch_gql_requests() {
     assert_eq!(playback.variables["login"], "tester");
     assert_eq!(playback.variables["isLive"], true);
     assert_eq!(playback.variables["playerType"], "site");
+    assert_eq!(playback.variables["platform"], "web");
+    assert!(playback
+        .query
+        .is_some_and(|query| query.contains("streamPlaybackAccessToken")));
+
+    let serialized = serde_json::to_value(playback).unwrap();
+    assert!(serialized["query"]
+        .as_str()
+        .is_some_and(|query| query.contains("$platform")));
 }
 
 #[test]

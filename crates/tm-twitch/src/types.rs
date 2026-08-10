@@ -108,6 +108,8 @@ pub struct GqlPersistedExtensions {
 pub struct GqlPersistedOperation {
     #[serde(rename = "operationName")]
     pub operation_name: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<&'static str>,
     pub variables: serde_json::Value,
     pub extensions: GqlPersistedExtensions,
 }
@@ -121,6 +123,7 @@ impl GqlPersistedOperation {
     ) -> Self {
         Self {
             operation_name,
+            query: None,
             variables,
             extensions: GqlPersistedExtensions {
                 persisted_query: GqlPersistedQuery {
@@ -129,6 +132,12 @@ impl GqlPersistedOperation {
                 },
             },
         }
+    }
+
+    #[must_use]
+    pub fn with_query(mut self, query: &'static str) -> Self {
+        self.query = Some(query);
+        self
     }
 }
 

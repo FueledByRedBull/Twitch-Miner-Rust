@@ -19,7 +19,9 @@ Rust, and accounts for five Go definitions that Go never issues:
 `PlaybackAccessToken`, `ModViewChannelQuery`, `ViewerDropsDashboard`,
 `DropCampaignDetails`, and `PersonalSections`. Rust actively exercises
 `PlaybackAccessToken` and `ViewerDropsDashboard`; the remaining three are not
-part of either miner's runtime.
+part of either miner's runtime. The gate also requires the one documented hash
+mismatch: Rust carries Twitch's current `PlaybackAccessToken` hash while the Go
+baseline retains the retired hash for an operation it does not issue.
 
 | Operation | Mode |
 | --- | --- |
@@ -135,6 +137,11 @@ A/B or canary evidence currently proves that reusing a playback session
 preserves credit. Adding a broadcast-bound cache on request volume alone would
 therefore weaken a working private protocol contract without evidence, and is
 rejected.
+
+The playback-token request includes both the audited persisted hash and its full
+read-only query. Twitch accepts that combined shape, so a future persisted-hash
+retirement does not stop WATCH while raw queries remain supported; a schema
+change or raw-query rejection still fails strict health and requires a release.
 
 The preferred EventSub WebSocket path handles stream presence and observes
 raids. Broadcaster prediction subscriptions are requested only when a tracked
