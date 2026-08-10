@@ -123,7 +123,7 @@ jobs:
         run: |
           docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --help
           $version = docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --version 2>&1
-          if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch 'built [^)]+' ) {
+          if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch [regex]::Escape('${{ github.sha }}')) {
             throw "Version metadata smoke test failed for ${{ matrix.platform }}: $($version -join ' ')"
           }
           $health = docker run --rm --platform "${{ matrix.platform }}" "${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}" --health 2>&1
