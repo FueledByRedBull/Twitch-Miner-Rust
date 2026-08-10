@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
@@ -277,17 +277,6 @@ pub fn loaded_cookie_store(store: &CookieStore) -> LoadedCookieStore {
         persistent,
         session_cookies: session_cookies_by_host(store),
     }
-}
-
-#[must_use]
-pub fn special_cookie_names(store: &CookieStore) -> BTreeSet<&str> {
-    store
-        .keys()
-        .filter_map(|name| match name.as_str() {
-            "auth-token" | "persistent" => Some(name.as_str()),
-            _ => None,
-        })
-        .collect()
 }
 
 #[cfg(test)]

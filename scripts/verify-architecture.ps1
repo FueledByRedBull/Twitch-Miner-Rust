@@ -21,11 +21,10 @@ $expectedInternalDependencies = [ordered]@{
     'tm-auth' = @('tm-twitch')
     'tm-config' = @('tm-domain')
     'tm-domain' = @()
-    'tm-events' = @('tm-domain')
     'tm-irc' = @()
     'tm-observability' = @('tm-domain')
-    'tm-pubsub' = @('tm-domain', 'tm-events')
-    'tm-runtime' = @('tm-config', 'tm-domain', 'tm-events', 'tm-pubsub')
+    'tm-pubsub' = @('tm-domain', 'tm-twitch')
+    'tm-runtime' = @('tm-config', 'tm-domain', 'tm-pubsub')
     'tm-twitch' = @('tm-domain')
 }
 $productionCrates = @($expectedInternalDependencies.Keys)

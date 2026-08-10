@@ -4,10 +4,6 @@ $revision = (git rev-parse --short=12 HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($revision)) {
     throw 'Unable to determine the source revision.'
 }
-$buildTime = (git show -s --format=%cI HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildTime)) {
-    throw 'Unable to determine the deterministic source timestamp.'
-}
 $sourceDateEpoch = (git show -s --format=%ct HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceDateEpoch -notmatch '^\d+$') {
     throw 'Unable to determine SOURCE_DATE_EPOCH.'
@@ -22,7 +18,6 @@ if (-not (Test-Path -LiteralPath 'Cargo.lock' -PathType Leaf)) {
 }
 
 $oldRevision = $env:BUILD_REVISION
-$oldBuildTime = $env:BUILD_TIME
 $oldSourceDateEpoch = $env:SOURCE_DATE_EPOCH
 $oldCargoIncremental = $env:CARGO_INCREMENTAL
 $oldRustFlags = $env:RUSTFLAGS
@@ -42,7 +37,6 @@ foreach ($buildRoot in $buildRoots) {
 
 try {
     $env:BUILD_REVISION = $revision
-    $env:BUILD_TIME = $buildTime
     $env:SOURCE_DATE_EPOCH = $sourceDateEpoch
     $env:CARGO_INCREMENTAL = '0'
     $remapRoot = $repositoryRoot.Replace('\', '/')
@@ -82,7 +76,6 @@ try {
     throw
 } finally {
     $env:BUILD_REVISION = $oldRevision
-    $env:BUILD_TIME = $oldBuildTime
     $env:SOURCE_DATE_EPOCH = $oldSourceDateEpoch
     $env:CARGO_INCREMENTAL = $oldCargoIncremental
     $env:RUSTFLAGS = $oldRustFlags
@@ -96,8 +89,8 @@ try {
     }
     $binaryPath = (Resolve-Path -LiteralPath $binary).Path
     $version = (& $binaryPath --version 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0 -or $version -notmatch [regex]::Escape($revision) -or $version -notmatch 'built ') {
-        throw 'Release binary metadata does not identify the source revision and build timestamp.'
+    if ($LASTEXITCODE -ne 0 -or $version -notmatch [regex]::Escape($revision)) {
+        throw 'Release binary metadata does not identify the source revision.'
     }
 
     Write-Output "build-integrity-ok: revision=$revision packages=$($metadata.packages.Count) sha256=$($hashes[0])"

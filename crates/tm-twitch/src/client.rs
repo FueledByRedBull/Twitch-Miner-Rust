@@ -340,20 +340,6 @@ impl TwitchClient {
             .ok_or(TwitchClientError::MissingField("data.user.login"))
     }
 
-    /// Low-level compatibility escape hatch for protocol experiments.
-    /// High-value runtime paths use typed methods below.
-    pub async fn post_gql(
-        &self,
-        operation: &GqlPersistedOperation,
-    ) -> Result<serde_json::Value, TwitchClientError> {
-        self.post_gql_value_with_cookie(
-            serde_json::to_value(operation)?,
-            None,
-            operation_is_read_only(operation.operation_name),
-        )
-        .await
-    }
-
     pub async fn fetch_channel_points_context(
         &self,
         channel_login: &str,
@@ -930,13 +916,6 @@ fn invalid_mutation(context: &'static str, detail: &'static str) -> TwitchClient
         context: context.to_string(),
         detail: detail.to_string(),
     }
-}
-
-fn operation_is_read_only(operation_name: &str) -> bool {
-    crate::operations::PERSISTED_OPERATION_CONTRACTS
-        .iter()
-        .find(|contract| contract.operation_name == operation_name)
-        .is_some_and(|contract| contract.read_only)
 }
 
 /// Guards every request target that Twitch hands us inside a document rather

@@ -1,3 +1,6 @@
+// Generated fuzz bytes intentionally exercise every low byte of the PRNG state.
+#![allow(clippy::cast_possible_truncation)]
+
 use tm_domain::Streamer;
 
 fn generated_inputs(count: usize) -> impl Iterator<Item = Vec<u8>> {

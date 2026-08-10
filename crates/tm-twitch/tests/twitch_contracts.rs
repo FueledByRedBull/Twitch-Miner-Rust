@@ -11,7 +11,7 @@ use tm_twitch::{
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures")
+        .join("../../tests/fixtures")
         .join(name)
 }
 

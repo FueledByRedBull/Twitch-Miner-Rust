@@ -200,19 +200,6 @@ impl TwitchAuthClient {
         })
     }
 
-    pub async fn validate_login(
-        &self,
-        auth_token: &str,
-        device_id: &str,
-        username: &str,
-        user_agent: &str,
-    ) -> Result<String, AuthClientError> {
-        Ok(self
-            .validate_login_details(auth_token, device_id, username, user_agent)
-            .await?
-            .user_id)
-    }
-
     pub async fn validate_login_details(
         &self,
         auth_token: &str,

@@ -4,9 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tm_domain::Streamer;
 use tm_observability::{event_from_gain_reason, Event as DiscordEvent};
-use tm_pubsub::{
-    build_topic_batches_with_policy, PubSubClient, PubSubConnectionEvent, TransportSourcePolicy,
-};
+use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
 
 use crate::observability::AppObservability;
 use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
@@ -37,11 +35,8 @@ pub(crate) fn spawn_pubsub_loop(
     tokio::spawn(async move {
         let (sender, receiver) = tokio::sync::mpsc::channel(128);
         let (effect_sender, effect_receiver) = tokio::sync::mpsc::channel(128);
-        let topic_batches = match build_topic_batches_with_policy(
-            &context.user_id,
-            &context.tracked_streamers,
-            TransportSourcePolicy::viewer_compatibility(),
-        ) {
+        let topic_batches = match build_topic_batches(&context.user_id, &context.tracked_streamers)
+        {
             Ok(batches) => batches,
             Err(error) => {
                 context
@@ -230,16 +225,16 @@ async fn handle_pubsub_message(
     false
 }
 
-fn pubsub_event_topic_class(event: &tm_pubsub::PubSubEvent) -> &'static str {
+fn pubsub_event_topic_class(event: &tm_domain::MinerEvent) -> &'static str {
     match event {
-        tm_pubsub::PubSubEvent::PointsEarned { .. }
-        | tm_pubsub::PubSubEvent::ClaimAvailable { .. } => "points-user",
-        tm_pubsub::PubSubEvent::Playback { .. } => "presence",
-        tm_pubsub::PubSubEvent::Raid { .. } => "raid",
-        tm_pubsub::PubSubEvent::Moment { .. } => "moments",
-        tm_pubsub::PubSubEvent::PredictionChannel { .. } => "prediction-channel",
-        tm_pubsub::PubSubEvent::PredictionUser { .. } => "prediction-user",
-        tm_pubsub::PubSubEvent::CommunityGoal { .. } => "community-goals",
+        tm_domain::MinerEvent::PointsEarned { .. }
+        | tm_domain::MinerEvent::ClaimAvailable { .. } => "points-user",
+        tm_domain::MinerEvent::Playback { .. } => "presence",
+        tm_domain::MinerEvent::Raid { .. } => "raid",
+        tm_domain::MinerEvent::Moment { .. } => "moments",
+        tm_domain::MinerEvent::PredictionChannel { .. } => "prediction-channel",
+        tm_domain::MinerEvent::PredictionUser { .. } => "prediction-user",
+        tm_domain::MinerEvent::CommunityGoal { .. } => "community-goals",
     }
 }
 
@@ -536,10 +531,10 @@ fn exponential_backoff_with_jitter(
 pub(crate) async fn log_pubsub_event(
     runtime: &tm_runtime::RuntimeHandle,
     observability: &AppObservability,
-    event: &tm_pubsub::PubSubEvent,
+    event: &tm_domain::MinerEvent,
 ) -> Result<()> {
     match event {
-        tm_pubsub::PubSubEvent::PointsEarned {
+        tm_domain::MinerEvent::PointsEarned {
             channel_id,
             earned,
             reason,
@@ -559,7 +554,7 @@ pub(crate) async fn log_pubsub_event(
                 observability.send_event(event, &message).await;
             }
         }
-        tm_pubsub::PubSubEvent::Playback { channel_id, kind } => {
+        tm_domain::MinerEvent::Playback { channel_id, kind } => {
             let snapshot = runtime.state_snapshot().await?;
             let Some(streamer) = snapshot
                 .streamers

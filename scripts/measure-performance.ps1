@@ -112,8 +112,7 @@ $result = [ordered]@{
         max = ($samples | Measure-Object -Maximum).Maximum
     }
     resource_sampling = $resourceSummary
-    runtime_metrics = 'Run a real session and inspect --status for queue depth, command wait, event throughput, and transport-to-state latency.'
-    language_comparison = 'Use scripts/measure-language-comparison.ps1 with an explicit clean Go baseline checkout.'
+    runtime_metrics = 'Run a real session and inspect --status for processed events and transport-to-state latency.'
 }
 
 $json = $result | ConvertTo-Json -Depth 5

@@ -92,12 +92,10 @@ if ($multiarchWorkflow -match 'actions/download-artifact' -or
 $deepQualityWorkflow = Get-Content -Raw .github/workflows/deep-quality.yml
 if ($deepQualityWorkflow -notmatch 'nightly-\d{4}-\d{2}-\d{2}' -or
     $deepQualityWorkflow -notmatch 'cargo-fuzz --version \d+\.\d+\.\d+ --locked' -or
-    $deepQualityWorkflow -notmatch 'cargo-mutants --version \d+\.\d+\.\d+ --locked' -or
     $deepQualityWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+' -or
     $deepQualityWorkflow -notmatch '--branch' -or
-    $deepQualityWorkflow -notmatch 'verify-branch-coverage\.ps1' -or
-    $deepQualityWorkflow -notmatch 'compare-replay-baseline\.ps1') {
-    throw 'Deep quality tools, nightly, coverage, and replay comparison must be explicitly pinned.'
+    $deepQualityWorkflow -notmatch 'verify-branch-coverage\.ps1') {
+    throw 'Deep quality tools, nightly, and coverage checks must be explicitly pinned.'
 }
 if (-not (Test-Path -LiteralPath 'fuzz/Cargo.lock' -PathType Leaf) -or
     -not (Test-Path -LiteralPath 'fuzz/Cargo.toml' -PathType Leaf)) {

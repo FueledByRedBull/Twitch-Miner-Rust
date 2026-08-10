@@ -5,14 +5,14 @@ use std::sync::{
 
 use super::{
     event_from_notification, listen_socket, parse_eventsub_message,
-    subscription_plan_with_capacity, subscription_requests, subscription_requests_with_policy,
-    EventSubClient, EventSubClientSettings, EventSubConnectionEvent, EventSubDeadlines,
-    EventSubError, EventSubMessage, EventSubTimeoutStage, MessageDeduper, EVENTSUB_WEBSOCKET_URL,
+    subscription_plan_with_capacity, subscription_requests, EventSubClient, EventSubClientSettings,
+    EventSubConnectionEvent, EventSubDeadlines, EventSubError, EventSubMessage,
+    EventSubTimeoutStage, MessageDeduper, EVENTSUB_WEBSOCKET_URL,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use tm_domain::MinerEvent;
 use tm_domain::{IrcMode, Streamer, StreamerSettings};
-use tm_events::MinerEvent;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -596,12 +596,8 @@ fn raid_subscription_is_only_requested_when_follow_raid_is_enabled() {
 }
 
 #[test]
-fn viewer_policy_does_not_request_broadcaster_prediction_subscriptions() {
-    let requests = subscription_requests_with_policy(
-        "session",
-        &[streamer()],
-        crate::TransportSourcePolicy::viewer_compatibility(),
-    );
+fn viewer_compatibility_does_not_request_broadcaster_prediction_subscriptions() {
+    let requests = subscription_requests("session", &[streamer()]);
 
     assert!(requests
         .iter()
@@ -617,11 +613,8 @@ fn viewer_policy_prefers_eventsub_predictions_only_for_authenticated_broadcaster
     let mut other_channel = streamer();
     other_channel.channel_id = String::from("other-200");
 
-    let (requests, report) = super::subscription_plan(
-        &[own_channel, other_channel],
-        crate::TransportSourcePolicy::viewer_compatibility(),
-        Some("viewer-100"),
-    );
+    let (requests, report) =
+        super::subscription_plan(&[own_channel, other_channel], Some("viewer-100"));
 
     assert_eq!(
         report.capabilities[0].prediction_source,
@@ -649,10 +642,7 @@ fn capacity_plan_is_deterministic_and_uses_polling_for_presence_overflow() {
             ..Streamer::default()
         })
         .collect::<Vec<_>>();
-    let report = super::plan_eventsub_capacity(
-        &tracked,
-        crate::TransportSourcePolicy::viewer_compatibility(),
-    );
+    let report = super::plan_eventsub_capacity(&tracked, None);
 
     assert_eq!(report.planned_subscriptions, 10);
     assert_eq!(report.overflow_streamers, 3);
@@ -668,7 +658,7 @@ fn capacity_plan_is_deterministic_and_uses_polling_for_presence_overflow() {
 }
 
 #[test]
-fn capacity_plan_prioritizes_presence_then_raid_before_predictions() {
+fn capacity_plan_keeps_predictions_only_for_authenticated_broadcaster() {
     let tracked = (0..2)
         .map(|index| Streamer {
             channel_id: format!("channel-{index}"),
@@ -680,18 +670,20 @@ fn capacity_plan_prioritizes_presence_then_raid_before_predictions() {
             ..Streamer::default()
         })
         .collect::<Vec<_>>();
-    let report = super::plan_eventsub_capacity(
-        &tracked,
-        crate::TransportSourcePolicy::broadcaster_eventsub(),
-    );
+    let report = super::plan_eventsub_capacity(&tracked, Some("channel-0"));
 
     assert_eq!(report.planned_subscriptions, 10);
     assert!(report.capabilities[0]
         .planned_subscription_types
         .contains(&String::from("channel.prediction.end")));
-    assert!(report.capabilities[1]
-        .skipped_subscription_types
-        .contains(&String::from("channel.prediction.begin")));
+    assert_eq!(
+        report.capabilities[1].prediction_source,
+        "pubsub-compatibility"
+    );
+    assert!(!report.capabilities[1]
+        .planned_subscription_types
+        .iter()
+        .any(|kind| kind.starts_with("channel.prediction.")));
 }
 
 #[test]
@@ -703,27 +695,14 @@ fn capacity_plan_uses_current_cost_and_zero_cost_authenticated_broadcaster() {
             ..streamer()
         },
     ];
-    let (requests, report) = subscription_plan_with_capacity(
-        &tracked,
-        crate::TransportSourcePolicy::viewer_compatibility(),
-        None,
-        2,
-        8,
-        10,
-    );
+    let (requests, report) = subscription_plan_with_capacity(&tracked, None, 2, 8, 10);
     assert_eq!(requests.len(), 2);
     assert_eq!(report.total_cost, 8);
     assert_eq!(report.max_total_cost, 10);
     assert_eq!(report.overflow_streamers, 1);
 
-    let (requests, report) = subscription_plan_with_capacity(
-        std::slice::from_ref(&tracked[0]),
-        crate::TransportSourcePolicy::viewer_compatibility(),
-        Some("100"),
-        0,
-        10,
-        10,
-    );
+    let (requests, report) =
+        subscription_plan_with_capacity(std::slice::from_ref(&tracked[0]), Some("100"), 0, 10, 10);
     assert_eq!(requests.len(), 6);
     assert_eq!(report.overflow_streamers, 0);
     assert_eq!(
@@ -932,7 +911,7 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
     });
 
     let mut settings = EventSubClientSettings::new("client", "token");
-    settings.source_policy = crate::TransportSourcePolicy::broadcaster_eventsub();
+    settings.authorized_prediction_broadcaster_id = Some(String::from("100"));
     settings.websocket_url = format!("ws://{websocket_address}");
     settings.subscriptions_url = format!("http://{subscriptions_address}/eventsub");
     let client = EventSubClient::new(settings);
@@ -1009,7 +988,7 @@ async fn strict_canary_mode_rejects_missing_prediction_scope() {
     });
 
     let mut settings = EventSubClientSettings::new("client", "token");
-    settings.source_policy = crate::TransportSourcePolicy::broadcaster_eventsub();
+    settings.authorized_prediction_broadcaster_id = Some(String::from("100"));
     settings.subscriptions_url = format!("http://{address}/eventsub");
     settings.allow_prediction_scope_fallback = false;
     let client = EventSubClient::new(settings);

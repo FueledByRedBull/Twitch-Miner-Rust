@@ -4,11 +4,15 @@
 //! Its prediction, watch-selection, formatting, and settlement functions are
 //! deterministic for the same validated inputs.
 
+pub mod events;
 pub mod formatting;
 pub mod prediction;
 pub mod types;
 pub mod watch;
 
+pub use events::{
+    CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
+};
 pub use formatting::{
     format_channel_points, format_drop_progress, format_duration, format_points_with_suffix,
     progress_percent,

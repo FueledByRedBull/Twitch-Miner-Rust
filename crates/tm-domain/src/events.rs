@@ -1,18 +1,11 @@
-//! Transport-neutral events accepted by the single-writer runtime.
-//!
-//! Event variants describe observations, never network clients or retry policy.
-//! External mutation identifiers remain available to the runtime so duplicate
-//! delivery cannot produce duplicate state effects.
+//! Transport-neutral events accepted by the runtime.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tm_domain::{CommunityGoal, PredictionEvent};
+
+use crate::{CommunityGoal, PredictionEvent};
 
 /// Events emitted by any supported real-time transport.
-///
-/// Transport-specific parsing belongs in the transport crate. Runtime state
-/// consumes this type so it does not need to know whether an event came from
-/// `EventSub`, legacy `PubSub` fixtures, or another future transport.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MinerEvent {
     PointsEarned {
@@ -55,9 +48,6 @@ pub enum MinerEvent {
         goal_id: Option<String>,
     },
 }
-
-/// Compatibility alias for code that still names the former transport.
-pub type PubSubEvent = MinerEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlaybackType {

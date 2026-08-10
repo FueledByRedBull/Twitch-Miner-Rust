@@ -1,4 +1,4 @@
-use tm_events::MinerEvent;
+use tm_domain::MinerEvent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IncomingTransportMessage {
@@ -14,6 +14,3 @@ pub enum IncomingTransportMessage {
     Event(Box<MinerEvent>),
     Ignore,
 }
-
-/// Compatibility name retained for legacy `PubSub` callers and fixtures.
-pub type PubSubEvent = MinerEvent;

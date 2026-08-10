@@ -9,7 +9,7 @@ use crate::observability::AppObservability;
 use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
-use crate::{CONTEXT_REFRESH_CONCURRENCY, PENDING_CLAIMS_INTERVAL};
+use crate::CONTEXT_REFRESH_CONCURRENCY;
 
 type ContextRefreshJoinResult = std::result::Result<(String, Result<()>), tokio::task::JoinError>;
 
@@ -129,48 +129,6 @@ pub(crate) fn spawn_context_refresh_loop(
                     record_context_refresh_health(&health, "context", &refresh_result);
                     if let Err(error) = refresh_result {
                         tracing::warn!(task = "context", error_class = "refresh", %error, "context refresh snapshot failed");
-                    }
-                }
-            }
-        }
-    })
-}
-
-pub(crate) fn spawn_pending_claim_loop(
-    stop: tokio::sync::watch::Receiver<bool>,
-    runtime: tm_runtime::RuntimeHandle,
-    twitch: Arc<TwitchClient>,
-    persistent_user_id: String,
-    observability: AppObservability,
-    health: HealthTracker,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval_at(
-            tokio::time::Instant::now() + PENDING_CLAIMS_INTERVAL,
-            PENDING_CLAIMS_INTERVAL,
-        );
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut stop = stop;
-
-        loop {
-            tokio::select! {
-                changed = stop.changed() => {
-                    if changed.is_err() || *stop.borrow() {
-                        break;
-                    }
-                }
-                _ = ticker.tick() => {
-                    let refresh_result = refresh_snapshot_streamers(
-                        &runtime,
-                        &twitch,
-                        &persistent_user_id,
-                        &observability,
-                        &health,
-                    )
-                    .await;
-                    record_context_refresh_health(&health, "pending-claims", &refresh_result);
-                    if let Err(error) = refresh_result {
-                        tracing::warn!(task = "pending-claims", error_class = "refresh", %error, "pending bonus sweep failed");
                     }
                 }
             }

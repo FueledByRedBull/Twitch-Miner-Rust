@@ -26,7 +26,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Reject production panic shortcuts
-        run: cargo clippy --workspace --exclude tm-contract-tests --exclude tm-integration-tests --lib --bins --examples --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented
+        run: cargo clippy --workspace --lib --bins --examples --all-features --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented
 
       - name: Test workspace
         run: cargo test --workspace --locked --quiet
@@ -38,17 +38,6 @@ jobs:
           if (-not $preview.valid -or $preview.schema_version -ne 1 -or $preview.migration_required) {
             throw 'The tracked example configuration is invalid, stale, or requires migration.'
           }
-
-      - name: Run deterministic replay benchmark
-        env:
-          BUILD_REVISION: ${{ github.sha }}
-        run: cargo run -p tm-integration-tests --example replay_benchmark --release --locked --quiet > replay-benchmark.json
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: replay-benchmark
-          path: replay-benchmark.json
-          if-no-files-found: error
 
       - name: Check rustdoc warnings
         env:

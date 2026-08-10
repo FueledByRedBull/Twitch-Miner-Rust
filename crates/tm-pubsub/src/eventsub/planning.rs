@@ -1,8 +1,6 @@
 use serde_json::{json, Value};
 use tm_domain::Streamer;
 
-use crate::policy::{PredictionSource, TransportSourcePolicy};
-
 use super::{
     EventSubSetupReport, EventSubStreamerCapability, SubscriptionRequest,
     EVENTSUB_ASSUMED_SUBSCRIPTION_COST, EVENTSUB_MAX_SUBSCRIPTIONS_PER_CONNECTION,
@@ -11,23 +9,10 @@ use super::{
 
 #[cfg(test)]
 pub(super) fn subscription_requests(
-    session_id: &str,
-    tracked_streamers: &[Streamer],
-) -> Vec<(String, Value)> {
-    subscription_requests_with_policy(
-        session_id,
-        tracked_streamers,
-        TransportSourcePolicy::broadcaster_eventsub(),
-    )
-}
-
-#[cfg(test)]
-pub(super) fn subscription_requests_with_policy(
     _session_id: &str,
     tracked_streamers: &[Streamer],
-    policy: TransportSourcePolicy,
 ) -> Vec<(String, Value)> {
-    subscription_plan(tracked_streamers, policy, None)
+    subscription_plan(tracked_streamers, None)
         .0
         .into_iter()
         .map(|request| (request.subscription_type, request.condition))
@@ -37,19 +22,17 @@ pub(super) fn subscription_requests_with_policy(
 #[must_use]
 pub fn plan_eventsub_capacity(
     tracked_streamers: &[Streamer],
-    policy: TransportSourcePolicy,
+    authorized_prediction_broadcaster_id: Option<&str>,
 ) -> EventSubSetupReport {
-    subscription_plan(tracked_streamers, policy, None).1
+    subscription_plan(tracked_streamers, authorized_prediction_broadcaster_id).1
 }
 
 pub(super) fn subscription_plan(
     tracked_streamers: &[Streamer],
-    policy: TransportSourcePolicy,
     authorized_prediction_broadcaster_id: Option<&str>,
 ) -> (Vec<SubscriptionRequest>, EventSubSetupReport) {
     subscription_plan_with_capacity(
         tracked_streamers,
-        policy,
         authorized_prediction_broadcaster_id,
         EVENTSUB_MAX_TOTAL_COST,
         0,
@@ -59,18 +42,14 @@ pub(super) fn subscription_plan(
 
 pub(super) fn subscription_plan_with_capacity(
     tracked_streamers: &[Streamer],
-    policy: TransportSourcePolicy,
     authorized_prediction_broadcaster_id: Option<&str>,
     available_cost: u32,
     current_total_cost: u32,
     max_total_cost: u32,
 ) -> (Vec<SubscriptionRequest>, EventSubSetupReport) {
     let mut requests = Vec::new();
-    let mut capabilities = initial_eventsub_capabilities(
-        tracked_streamers,
-        policy,
-        authorized_prediction_broadcaster_id,
-    );
+    let mut capabilities =
+        initial_eventsub_capabilities(tracked_streamers, authorized_prediction_broadcaster_id);
 
     let mut remaining_cost = available_cost;
     let mut overflow_streamers = 0_usize;
@@ -127,7 +106,7 @@ pub(super) fn subscription_plan_with_capacity(
 
     for (streamer_index, streamer) in tracked_streamers.iter().enumerate() {
         if streamer.channel_id.trim().is_empty()
-            || !uses_eventsub_predictions(streamer, policy, authorized_prediction_broadcaster_id)
+            || !uses_eventsub_predictions(streamer, authorized_prediction_broadcaster_id)
         {
             continue;
         }
@@ -172,7 +151,6 @@ pub(super) fn subscription_plan_with_capacity(
 
 fn initial_eventsub_capabilities(
     tracked_streamers: &[Streamer],
-    policy: TransportSourcePolicy,
     authorized_prediction_broadcaster_id: Option<&str>,
 ) -> Vec<EventSubStreamerCapability> {
     tracked_streamers
@@ -183,11 +161,7 @@ fn initial_eventsub_capabilities(
             presence_source: String::from("gql-polling"),
             prediction_source: if !streamer.settings.make_predictions {
                 String::from("disabled")
-            } else if uses_eventsub_predictions(
-                streamer,
-                policy,
-                authorized_prediction_broadcaster_id,
-            ) {
+            } else if uses_eventsub_predictions(streamer, authorized_prediction_broadcaster_id) {
                 String::from("eventsub-broadcaster")
             } else {
                 String::from("pubsub-compatibility")
@@ -207,13 +181,11 @@ fn initial_eventsub_capabilities(
 
 fn uses_eventsub_predictions(
     streamer: &Streamer,
-    policy: TransportSourcePolicy,
     authorized_prediction_broadcaster_id: Option<&str>,
 ) -> bool {
-    policy.prediction_source == PredictionSource::EventSubBroadcaster
-        || authorized_prediction_broadcaster_id.is_some_and(|broadcaster_id| {
-            !broadcaster_id.trim().is_empty() && streamer.channel_id.trim() == broadcaster_id.trim()
-        })
+    authorized_prediction_broadcaster_id.is_some_and(|broadcaster_id| {
+        !broadcaster_id.trim().is_empty() && streamer.channel_id.trim() == broadcaster_id.trim()
+    })
 }
 
 fn subscription_cost(streamer: &Streamer, authorized_broadcaster_id: Option<&str>) -> u32 {

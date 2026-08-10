@@ -1,7 +1,9 @@
 use std::time::Duration;
 
-use tm_integration_tests::{base_runtime_state, ts};
-use tm_pubsub::{PlaybackType, PubSubEvent};
+mod common;
+
+use common::{base_runtime_state, ts};
+use tm_domain::{MinerEvent, PlaybackType};
 
 #[tokio::test(start_paused = true)]
 async fn paused_runtime_can_drive_time_based_integration_sequences() {
@@ -11,8 +13,8 @@ async fn paused_runtime_can_drive_time_based_integration_sequences() {
     let task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
         delayed_runtime
-            .apply_pubsub_event(
-                PubSubEvent::Playback {
+            .apply_event(
+                MinerEvent::Playback {
                     channel_id: String::from("123"),
                     kind: PlaybackType::StreamUp,
                 },

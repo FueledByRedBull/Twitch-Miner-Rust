@@ -16,41 +16,32 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates/tm-app/Cargo.toml crates/tm-app/Cargo.toml
-COPY crates/tm-app/build.rs crates/tm-app/build.rs
 COPY crates/tm-auth/Cargo.toml crates/tm-auth/Cargo.toml
 COPY crates/tm-config/Cargo.toml crates/tm-config/Cargo.toml
 COPY crates/tm-domain/Cargo.toml crates/tm-domain/Cargo.toml
-COPY crates/tm-events/Cargo.toml crates/tm-events/Cargo.toml
 COPY crates/tm-irc/Cargo.toml crates/tm-irc/Cargo.toml
 COPY crates/tm-observability/Cargo.toml crates/tm-observability/Cargo.toml
 COPY crates/tm-pubsub/Cargo.toml crates/tm-pubsub/Cargo.toml
 COPY crates/tm-runtime/Cargo.toml crates/tm-runtime/Cargo.toml
 COPY crates/tm-twitch/Cargo.toml crates/tm-twitch/Cargo.toml
-COPY tests/contract/Cargo.toml tests/contract/Cargo.toml
-COPY tests/integration/Cargo.toml tests/integration/Cargo.toml
-RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm-domain/src crates/tm-events/src crates/tm-irc/src crates/tm-observability/src crates/tm-pubsub/src crates/tm-runtime/src crates/tm-twitch/src tests/contract/src tests/integration/src \
+RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm-domain/src crates/tm-irc/src crates/tm-observability/src crates/tm-pubsub/src crates/tm-runtime/src crates/tm-twitch/src \
     && printf 'fn main() {}\n' > crates/tm-app/src/main.rs \
     && printf '\n' > crates/tm-auth/src/lib.rs \
     && printf '\n' > crates/tm-config/src/lib.rs \
     && printf '\n' > crates/tm-domain/src/lib.rs \
-    && printf '\n' > crates/tm-events/src/lib.rs \
     && printf '\n' > crates/tm-irc/src/lib.rs \
     && printf '\n' > crates/tm-observability/src/lib.rs \
     && printf '\n' > crates/tm-pubsub/src/lib.rs \
     && printf '\n' > crates/tm-runtime/src/lib.rs \
-    && printf '\n' > crates/tm-twitch/src/lib.rs \
-    && printf '\n' > tests/contract/src/lib.rs \
-    && printf '\n' > tests/integration/src/lib.rs
+    && printf '\n' > crates/tm-twitch/src/lib.rs
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG BUILD_REVISION=unknown
-ARG BUILD_TIME=unknown
 ARG SOURCE_DATE_EPOCH=0
 ENV BUILD_REVISION=${BUILD_REVISION}
-ENV BUILD_TIME=${BUILD_TIME}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 ENV CARGO_INCREMENTAL=0
 ENV RUSTFLAGS=--remap-path-prefix=/workspace=.
@@ -68,15 +59,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cargo chef cook --locked --release --target "${rust_target}" --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY tests/contract/Cargo.toml tests/contract/Cargo.toml
-COPY tests/integration/Cargo.toml tests/integration/Cargo.toml
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    mkdir -p tests/contract/src tests/integration/src \
-    && printf '\n' > tests/contract/src/lib.rs \
-    && printf '\n' > tests/integration/src/lib.rs \
-    && case "${TARGETARCH}:${TARGETVARIANT}" in \
+    case "${TARGETARCH}:${TARGETVARIANT}" in \
         "amd64:") rust_target="x86_64-unknown-linux-musl" ;; \
         "arm64:") rust_target="aarch64-unknown-linux-musl" ;; \
         "arm:v7") rust_target="armv7-unknown-linux-musleabihf" ;; \
@@ -88,7 +74,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM build AS replay-build
 ARG TARGETARCH
 ARG TARGETVARIANT
-COPY tests/integration ./tests/integration
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
@@ -99,7 +84,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
     esac \
     && cargo build --locked --release --target "${rust_target}" \
-        --package tm-integration-tests --example replay_benchmark \
+        --package tm-runtime --example replay_benchmark \
     && install -D \
         "/workspace/target/${rust_target}/release/examples/replay_benchmark" \
         /workspace/bin/replay_benchmark

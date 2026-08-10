@@ -3,11 +3,9 @@ use std::collections::HashMap;
 use tm_config::{build_base_streamer_settings, build_override_settings, ConfigFile};
 use tm_domain::{
     normalize_game_list, normalize_streamer_list, parse_watch_priorities, pick_streamers_to_watch,
-    should_join_chat, CommunityGoal, Game, OffsetDateTime, PredictionDecision, PredictionEvent,
+    should_join_chat, CommunityGoal, CommunityGoalKind, Game, MinerEvent, OffsetDateTime,
+    PlaybackType, PredictionChannelKind, PredictionDecision, PredictionEvent, PredictionUserKind,
     Stream, Streamer, WatchPriority,
-};
-use tm_events::{
-    CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
 };
 
 use crate::effect::RuntimeEffect;
@@ -41,11 +39,6 @@ impl RuntimeSession {
     #[must_use]
     pub fn session_summary(&self, anonymize: bool, now: OffsetDateTime) -> SessionSummary {
         self.state.session_summary(anonymize, now)
-    }
-
-    #[must_use]
-    pub fn current_session_summary(&self, anonymize: bool) -> SessionSummary {
-        self.session_summary(anonymize, OffsetDateTime::now_utc())
     }
 }
 
@@ -427,15 +420,6 @@ impl RuntimeState {
                 }
             }
         }
-    }
-
-    /// Compatibility wrapper for callers that still use the former transport name.
-    pub fn apply_pubsub_event(
-        &mut self,
-        event: &MinerEvent,
-        now: OffsetDateTime,
-    ) -> Vec<RuntimeEffect> {
-        self.apply_event(event, now)
     }
 
     fn streamer_mut_by_channel_id(&mut self, channel_id: &str) -> Option<&mut Streamer> {

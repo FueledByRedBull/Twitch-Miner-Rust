@@ -26,7 +26,7 @@ fn builds_topics_from_streamer_settings() {
     let topics = build_topics("user-1", &[streamer("100"), streamer("200")]).unwrap();
     assert!(topics.contains(&"community-points-user-v1.user-1".to_string()));
     assert!(topics.contains(&"predictions-user-v1.user-1".to_string()));
-    assert!(topics.contains(&"video-playback-by-id.100".to_string()));
+    assert!(!topics.contains(&"video-playback-by-id.100".to_string()));
     assert!(topics.contains(&"raid.100".to_string()));
     assert!(topics.contains(&"predictions-channel-v1.100".to_string()));
     assert!(topics.contains(&"community-moments-channel-v1.100".to_string()));
@@ -53,13 +53,8 @@ fn omits_community_goal_topic_when_feature_is_disabled() {
 }
 
 #[test]
-fn viewer_policy_assigns_presence_to_eventsub_and_predictions_to_pubsub() {
-    let topics = build_topics_with_policy(
-        "user-1",
-        &[streamer("100")],
-        TransportSourcePolicy::viewer_compatibility(),
-    )
-    .unwrap();
+fn viewer_compatible_topics_keep_presence_on_eventsub() {
+    let topics = build_topics("user-1", &[streamer("100")]).unwrap();
 
     assert!(!topics.contains(&"video-playback-by-id.100".to_string()));
     assert!(topics.contains(&"predictions-user-v1.user-1".to_string()));
@@ -71,6 +66,10 @@ fn builds_topic_batches_with_auth_topic_and_fifty_max_topics() {
     let streamers = (0..51)
         .map(|index| Streamer {
             channel_id: format!("channel-{index}"),
+            settings: StreamerSettings {
+                community_goals: true,
+                ..StreamerSettings::default()
+            },
             ..Streamer::default()
         })
         .collect::<Vec<_>>();
@@ -88,7 +87,14 @@ fn builds_topic_batches_with_auth_topic_and_fifty_max_topics() {
 #[test]
 fn topic_batches_fail_closed_above_ten_connections() {
     let within_budget = (0..99)
-        .map(|index| streamer(&format!("channel-{index}")))
+        .map(|index| Streamer {
+            channel_id: format!("channel-{index}"),
+            settings: StreamerSettings {
+                community_goals: true,
+                ..StreamerSettings::default()
+            },
+            ..Streamer::default()
+        })
         .collect::<Vec<_>>();
     let batches = build_topic_batches("user-1", &within_budget).unwrap();
     assert!(batches.len() <= PUBSUB_MAX_CONNECTIONS);
@@ -96,8 +102,15 @@ fn topic_batches_fail_closed_above_ten_connections() {
         .iter()
         .all(|batch| { batch.len() <= PUBSUB_MAX_TOPICS_PER_CONNECTION }));
 
-    let over_budget = (0..100)
-        .map(|index| streamer(&format!("channel-{index}")))
+    let over_budget = (0..501)
+        .map(|index| Streamer {
+            channel_id: format!("channel-{index}"),
+            settings: StreamerSettings {
+                community_goals: true,
+                ..StreamerSettings::default()
+            },
+            ..Streamer::default()
+        })
         .collect::<Vec<_>>();
     assert!(matches!(
         build_topic_batches("user-1", &over_budget),
@@ -193,7 +206,7 @@ fn parses_claim_available_with_single_streamer_fallback() {
     let parsed = parse_message(&raw, &[streamer("fallback-channel")]).unwrap();
     assert_eq!(
         parsed,
-        Some(PubSubEvent::ClaimAvailable {
+        Some(MinerEvent::ClaimAvailable {
             channel_id: String::from("fallback-channel"),
             claim_id: String::from("claim-1"),
         })
@@ -213,7 +226,7 @@ fn parses_prediction_result_without_prediction_made() {
     let parsed = parse_message(&raw, &[]).unwrap();
     assert_eq!(
         parsed,
-        Some(PubSubEvent::PredictionUser {
+        Some(MinerEvent::PredictionUser {
             event_id: String::from("event-1"),
             kind: PredictionUserKind::PredictionResult,
             result: Some(json!({ "type": "WIN", "points_won": 250 })),
@@ -256,7 +269,7 @@ fn parses_prediction_channel_event_with_outcomes() {
         })
         .to_string();
     let parsed = parse_message(&raw, &[streamer("123")]).unwrap();
-    let Some(PubSubEvent::PredictionChannel {
+    let Some(MinerEvent::PredictionChannel {
         kind,
         event,
         winning_outcome_id,
@@ -286,7 +299,7 @@ fn parses_community_goal_message() {
     let parsed = parse_message(&raw, &[]).unwrap();
     assert_eq!(
         parsed,
-        Some(PubSubEvent::CommunityGoal {
+        Some(MinerEvent::CommunityGoal {
             channel_id: String::from("123"),
             kind: CommunityGoalKind::Created,
             goal: Some(CommunityGoal {

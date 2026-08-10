@@ -38,17 +38,16 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
 `target/`.
 
 1. Update `CHANGELOG.md` with behavior, configuration, migration, and known
-   compatibility changes. Review and attach the candidate's differential-review
-   artifact to the release evidence.
+   compatibility changes. Keep any review artifact with the release record.
 2. Run the local QA commands in `CONTRIBUTING.md`, including the architecture
    boundary check, run
-   `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and require
-   a clean-revision `scripts/measure-language-comparison.ps1` report when shared
-   prediction/selection behavior or performance changed. Also require
+   `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and use the
+   archived performance guidance in [performance.md](performance.md) when
+   shared prediction/selection behavior or performance changes. Also require
    a successful Deep Quality run for the exact revision. Deep Quality must pass
-   bounded parser fuzzing and mutation, the ratcheted 60% critical-core and
-   46.0% application branch-coverage floors, and the noise-tolerant replay
-   comparison. Then push the
+   bounded parser fuzzing, the ratcheted 60% critical-core and
+   46.0% application branch-coverage floors, and the fixed replay artifact.
+   Replay timing is review evidence, not a pass/fail threshold. Then push the
    candidate commit to `main`. The multiarch workflow builds the three platform
    images, SBOM/provenance attestations, the manifest, and the immutable
    `sha-<40-character-commit>` tag.

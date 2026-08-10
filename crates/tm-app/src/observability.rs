@@ -6,7 +6,7 @@ use tm_config::{AppPaths, ConfigFile};
 use tm_domain::{format_channel_points, format_drop_progress, progress_percent, Streamer};
 use tm_irc::{ChatEventKind, ChatLogger};
 use tm_observability::{
-    build_discord_request, new_discord_webhook, Anonymizer, DiscordClient, DiscordSettings,
+    discord_message, new_discord_webhook, Anonymizer, DiscordClient, DiscordSettings,
     Event as DiscordEvent,
 };
 use tm_twitch::InventoryDrop;
@@ -537,10 +537,10 @@ pub(crate) async fn send_discord_event(
     let Some(discord) = discord else {
         return;
     };
-    let Some(request) = build_discord_request(discord, message, Some(event)) else {
+    let Some(message) = discord_message(discord, message, Some(event)) else {
         return;
     };
-    if client.send(&request).await.is_err() {
+    if client.send(&discord.webhook_api, &message).await.is_err() {
         tracing::warn!(
             error_class = "delivery-failed",
             "failed to send discord event"

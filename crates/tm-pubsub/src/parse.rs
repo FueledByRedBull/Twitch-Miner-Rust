@@ -1,15 +1,17 @@
 use serde_json::{json, Value};
-use tm_domain::{CommunityGoal, Streamer};
+use tm_domain::{
+    CommunityGoal, CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind,
+    PredictionUserKind, Streamer,
+};
 
 use crate::errors::PubSubError;
 use crate::prediction::{parse_prediction_event, winning_outcome_id};
-use crate::types::{IncomingTransportMessage, PubSubEvent};
-use tm_events::{CommunityGoalKind, PlaybackType, PredictionChannelKind, PredictionUserKind};
+use crate::types::IncomingTransportMessage;
 
 pub fn parse_message(
     raw: &str,
     tracked_streamers: &[Streamer],
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     let envelope: Value = serde_json::from_str(raw)?;
     let envelope_type = envelope
         .get("type")
@@ -87,7 +89,7 @@ pub fn parse_message(
 fn parse_points_earned_event(
     payload: &Value,
     channel_id: String,
-) -> Result<PubSubEvent, PubSubError> {
+) -> Result<MinerEvent, PubSubError> {
     if channel_id.trim().is_empty() {
         return Err(PubSubError::Protocol("points-earned channel id is missing"));
     }
@@ -117,7 +119,7 @@ fn parse_points_earned_event(
         .ok_or(PubSubError::Protocol(
             "points-earned balance is missing or invalid",
         ))?;
-    Ok(PubSubEvent::PointsEarned {
+    Ok(MinerEvent::PointsEarned {
         channel_id,
         earned,
         reason,
@@ -129,7 +131,7 @@ fn parse_claim_available_event(
     payload: &Value,
     channel_id: String,
     tracked_streamers: &[Streamer],
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     let claim_id = payload
         .pointer("/data/claim/id")
         .and_then(Value::as_str)
@@ -147,7 +149,7 @@ fn parse_claim_available_event(
             "claim-available channel id is missing",
         ));
     }
-    Ok(Some(PubSubEvent::ClaimAvailable {
+    Ok(Some(MinerEvent::ClaimAvailable {
         channel_id: resolved_channel_id,
         claim_id,
     }))
@@ -156,7 +158,7 @@ fn parse_claim_available_event(
 fn parse_playback_event(
     payload_type: &str,
     channel_id: String,
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     let kind = match payload_type {
         "stream-up" => PlaybackType::StreamUp,
         "viewcount" => PlaybackType::Viewcount,
@@ -166,13 +168,13 @@ fn parse_playback_event(
     if channel_id.trim().is_empty() {
         return Err(PubSubError::Protocol("playback channel id is missing"));
     }
-    Ok(Some(PubSubEvent::Playback { channel_id, kind }))
+    Ok(Some(MinerEvent::Playback { channel_id, kind }))
 }
 
 fn parse_raid_event(
     payload: &Value,
     channel_id: String,
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     if channel_id.trim().is_empty() {
         return Err(PubSubError::Protocol("raid channel id is missing"));
     }
@@ -192,7 +194,7 @@ fn parse_raid_event(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or(PubSubError::Protocol("raid target login is missing"))?;
-    Ok(Some(PubSubEvent::Raid {
+    Ok(Some(MinerEvent::Raid {
         channel_id,
         raid_id,
         target_login: target_login.to_string(),
@@ -203,7 +205,7 @@ fn parse_moment_event(
     payload: &Value,
     payload_type: &str,
     channel_id: String,
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     if payload_type != "active" {
         return Ok(None);
     }
@@ -219,7 +221,7 @@ fn parse_moment_event(
     if moment_id.is_empty() {
         return Err(PubSubError::Protocol("moment id is missing"));
     }
-    Ok(Some(PubSubEvent::Moment {
+    Ok(Some(MinerEvent::Moment {
         channel_id,
         moment_id,
     }))
@@ -230,7 +232,7 @@ fn parse_prediction_channel_event(
     payload_type: &str,
     channel_id: &str,
     tracked_streamers: &[Streamer],
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     let kind = match payload_type {
         "event-created" => PredictionChannelKind::EventCreated,
         "event-updated" => PredictionChannelKind::EventUpdated,
@@ -254,7 +256,7 @@ fn parse_prediction_channel_event(
     )
     .map_err(PubSubError::Protocol)?;
     let winning_outcome_id = winning_outcome_id(raw_event);
-    Ok(Some(PubSubEvent::PredictionChannel {
+    Ok(Some(MinerEvent::PredictionChannel {
         kind: kind.clone(),
         event: Box::new(event),
         winning_outcome_id,
@@ -264,7 +266,7 @@ fn parse_prediction_channel_event(
 fn parse_prediction_user_event(
     payload: &Value,
     payload_type: &str,
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     let kind = match payload_type {
         "prediction-made" => PredictionUserKind::PredictionMade,
         "prediction-result" => PredictionUserKind::PredictionResult,
@@ -307,7 +309,7 @@ fn parse_prediction_user_event(
     } else {
         None
     };
-    Ok(Some(PubSubEvent::PredictionUser {
+    Ok(Some(MinerEvent::PredictionUser {
         event_id: event_id.to_string(),
         result,
         kind,
@@ -318,7 +320,7 @@ fn parse_community_goal_event(
     payload: &Value,
     payload_type: &str,
     channel_id: String,
-) -> Result<Option<PubSubEvent>, PubSubError> {
+) -> Result<Option<MinerEvent>, PubSubError> {
     let kind = match payload_type {
         "community-goal-created" => CommunityGoalKind::Created,
         "community-goal-updated" => CommunityGoalKind::Updated,
@@ -361,7 +363,7 @@ fn parse_community_goal_event(
         }
         CommunityGoalKind::Deleted => {}
     }
-    Ok(Some(PubSubEvent::CommunityGoal {
+    Ok(Some(MinerEvent::CommunityGoal {
         channel_id,
         kind,
         goal,

@@ -2,9 +2,8 @@
 
 ## Unreleased
 
-- Adds a newcomer architecture path: source-linked walkthroughs for an ordinary
-  WATCH reward and the prediction actor/effect/mutation loop, a compact
-  ownership/dependency map, expanded `tm-app` crate documentation, and a
+- Adds a newcomer architecture path: one source-linked ownership map and
+  effect-capable event-flow walkthrough, expanded `tm-app` crate documentation, and a
   focused first-change tutorial. The README now uses the canonical
   architecture map and correctly distinguishes the ten-minute streak-priority
   budget from the 15-minute fair-rotation window. Operator guidance also records
@@ -22,15 +21,22 @@
   explicitly injects a loopback endpoint for local tests; the app's production
   construction path cannot be redirected to localhost. URL credentials are
   rejected and dynamic request errors retain only a sanitized failure class.
-- Shares immutable prediction outcome IDs with owned actor decisions through
+- Shares immutable prediction outcome IDs with owned runtime decisions through
   `Arc<str>`, removing the per-decision string allocation while preserving
-  exact arithmetic, actor ownership, and string-identical JSON/wire fields.
+  exact arithmetic, owned decisions, and string-identical JSON/wire fields.
   These crates are internal and unpublished; downstream serialized data does
   not change.
-- Extends branch coverage, bounded mutation, and structured-input fuzzing to
+- Extends branch coverage and structured-input fuzzing to
   the new auth, endpoint-policy, prediction-decision, and application paths.
   The existing 60% critical-core branch floor remains intact and `tm-app` now
   has its own 46.0% ratchet instead of diluting the core aggregate.
+- Removes the runtime command actor in favor of one serialized state mutex,
+  merges transport-neutral events into `tm-domain`, and collapses test-only
+  workspace packages into their owning crates. It also removes redundant
+  transport-policy, pending-claim, build-script, mutation-matrix, duplicate
+  advisory-audit, language-comparison, replay-wrapper, console-helper, regex,
+  and Discord form-encoding surfaces while retaining coverage, fuzzing,
+  replay, parity, `cargo-deny`, reproducible builds, and runtime behavior.
 - Logs the sanitized concrete `EventSub` failure beside its stable error class
   and classifies a missed keepalive deadline as `keepalive-timeout` instead of
   conflating normal liveness recovery with a rejected protocol payload.

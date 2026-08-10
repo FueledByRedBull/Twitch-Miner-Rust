@@ -117,7 +117,6 @@ fn build_eventsub_client(context: &EventSubTaskContext) -> EventSubClient {
         websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
         subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
         allow_prediction_scope_fallback: true,
-        source_policy: tm_pubsub::TransportSourcePolicy::viewer_compatibility(),
         authorized_prediction_broadcaster_id: context
             .prediction_eventsub_authorized
             .then(|| context.effects.persistent_user_id.clone()),
@@ -293,7 +292,7 @@ async fn poll_presence_fallback(
                     .await
                 {
                     Ok(true) => {
-                        let event = tm_pubsub::PubSubEvent::Playback {
+                        let event = tm_domain::MinerEvent::Playback {
                             channel_id,
                             kind: if online {
                                 tm_pubsub::PlaybackType::StreamUp

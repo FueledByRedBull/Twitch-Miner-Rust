@@ -21,7 +21,7 @@ mod tests {
     };
     use crate::context::{
         collect_context_refresh_results, record_context_refresh_health, refresh_snapshot_streamers,
-        spawn_pending_claim_loop, ContextRefreshSummary,
+        ContextRefreshSummary,
     };
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
@@ -1704,136 +1704,6 @@ mod tests {
             1
         );
         assert_eq!(channel_points, 1234);
-    }
-
-    #[tokio::test]
-    async fn pending_claim_loop_waits_for_interval_before_refreshing() {
-        let (endpoints, requests, server) = spawn_json_response_server(vec![
-            fixture_json("twitch.channel_points_context.json"),
-            serde_json::json!({
-                "data": {
-                    "claimCommunityPoints": {
-                        "balance": 1550
-                    }
-                }
-            })
-            .to_string(),
-        ]);
-        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-            "token",
-            "ua",
-            endpoints,
-        ));
-        let config = ConfigFile {
-            username: String::from("tester"),
-            streamers: vec![String::from("alice")],
-            ..ConfigFile::default()
-        };
-        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
-        state.streamers = vec![Streamer {
-            username: String::from("alice"),
-            channel_id: String::from("100"),
-            ..Streamer::default()
-        }];
-        let runtime = tm_runtime::spawn_runtime_state(state);
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let task = spawn_pending_claim_loop(
-            stop_rx,
-            runtime.clone(),
-            twitch,
-            String::from("user-1"),
-            test_observability(),
-            HealthTracker::default(),
-        );
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            runtime.state_snapshot().await.unwrap().streamers[0].channel_points,
-            0
-        );
-
-        stop_tx.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .unwrap()
-            .unwrap();
-
-        server.join().unwrap();
-        let requests = requests.lock().unwrap();
-        assert!(requests.is_empty());
-    }
-
-    #[tokio::test]
-    async fn pending_claim_loop_stays_idle_without_immediate_bonus_sweep() {
-        let (endpoints, requests, server) = spawn_json_response_server(vec![serde_json::json!({
-            "data": {
-                "community": {
-                    "channel": {
-                        "self": {
-                            "communityPoints": {
-                                "balance": 1234,
-                                "availableClaim": null,
-                                "activeMultipliers": []
-                            }
-                        },
-                        "communityPointsSettings": {
-                            "goals": []
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()]);
-        let twitch = Arc::new(TwitchClient::with_client_and_endpoints(
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
-            "token",
-            "ua",
-            endpoints,
-        ));
-        let config = ConfigFile {
-            username: String::from("tester"),
-            streamers: vec![String::from("alice")],
-            ..ConfigFile::default()
-        };
-        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
-        state.streamers = vec![Streamer {
-            username: String::from("alice"),
-            channel_id: String::from("100"),
-            ..Streamer::default()
-        }];
-        let runtime = tm_runtime::spawn_runtime_state(state);
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let task = spawn_pending_claim_loop(
-            stop_rx,
-            runtime.clone(),
-            twitch,
-            String::from("user-1"),
-            test_observability(),
-            HealthTracker::default(),
-        );
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            runtime.state_snapshot().await.unwrap().streamers[0].channel_points,
-            0
-        );
-
-        stop_tx.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .unwrap()
-            .unwrap();
-
-        server.join().unwrap();
-        let requests = requests.lock().unwrap();
-        assert!(requests.is_empty());
     }
 
     #[allow(clippy::too_many_lines)]

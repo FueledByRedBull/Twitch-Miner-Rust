@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +9,7 @@ use tm_runtime::RuntimeState;
 
 pub fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fixtures")
+        .join("../../tests/fixtures")
         .join(name)
 }
 

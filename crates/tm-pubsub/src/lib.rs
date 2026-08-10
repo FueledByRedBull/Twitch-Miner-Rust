@@ -11,7 +11,6 @@ mod client;
 mod errors;
 mod eventsub;
 mod parse;
-mod policy;
 mod prediction;
 mod topics;
 mod types;
@@ -27,17 +26,16 @@ pub use eventsub::{
 pub use parse::{
     bad_auth_cookie_file, channel_id_from_payload, parse_message, parse_transport_message,
 };
-pub use policy::{PredictionSource, TransportSourcePolicy};
-pub use tm_events::{
+pub use tm_domain::{
     CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
 };
 pub use topics::{
-    build_topic_batches, build_topic_batches_with_policy, build_topics, build_topics_with_policy,
-    chunk_topics, listen_payload, listen_payload_with_nonce, listen_payloads, ping_payload,
-    pubsub_setup_report, pubsub_topic_class, topic_requires_auth, PubSubCapabilityStatus,
-    PubSubSetupReport, PUBSUB_MAX_CONNECTIONS, PUBSUB_MAX_TOPICS, PUBSUB_MAX_TOPICS_PER_CONNECTION,
+    build_topic_batches, build_topics, chunk_topics, listen_payload, listen_payload_with_nonce,
+    listen_payloads, ping_payload, pubsub_setup_report, pubsub_topic_class, topic_requires_auth,
+    PubSubCapabilityStatus, PubSubSetupReport, PUBSUB_MAX_CONNECTIONS, PUBSUB_MAX_TOPICS,
+    PUBSUB_MAX_TOPICS_PER_CONNECTION,
 };
-pub use types::{IncomingTransportMessage, PubSubEvent};
+pub use types::IncomingTransportMessage;
 
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]

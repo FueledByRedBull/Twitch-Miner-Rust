@@ -4,9 +4,8 @@ use anyhow::{anyhow, Result};
 use tm_config::ConfigFile;
 use tm_domain::Streamer;
 use tm_pubsub::{
-    build_topic_batches_with_policy, EventSubClient, EventSubClientSettings,
-    EventSubConnectionEvent, EventSubSetupReport, PubSubClient, PubSubConnectionEvent,
-    TransportSourcePolicy,
+    build_topic_batches, EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
+    EventSubSetupReport, PubSubClient, PubSubConnectionEvent,
 };
 use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
@@ -341,7 +340,6 @@ async fn run_eventsub_canary(
         websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
         subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
         allow_prediction_scope_fallback: false,
-        source_policy: TransportSourcePolicy::viewer_compatibility(),
         authorized_prediction_broadcaster_id: prediction_eventsub_authorized
             .then(|| own_channel_id.to_string()),
         verify_subscriptions: true,
@@ -396,11 +394,7 @@ async fn run_pubsub_canary(
     user_id: &str,
     tracked: &[Streamer],
 ) -> Result<()> {
-    let topic_batches = build_topic_batches_with_policy(
-        user_id,
-        tracked,
-        TransportSourcePolicy::viewer_compatibility(),
-    )?;
+    let topic_batches = build_topic_batches(user_id, tracked)?;
     if topic_batches.is_empty() {
         return Err(anyhow!("PubSub canary has no configured topics"));
     }
