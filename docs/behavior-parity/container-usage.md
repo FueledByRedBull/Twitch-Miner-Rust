@@ -7,11 +7,14 @@ Recommended layout:
 - Let the app create `cookies/` and `log/` under the same root.
 
 The published image is a static Rust binary in a `scratch` runtime. It has no
-shell, package manager, or OS certificate bundle. Direct `docker exec` of the
-binary still works for diagnostics, for example
-`docker exec twitch-miner /twitch-miner --status --data-dir /data`; an exec of
-`sh` or `bash` cannot work, so use logs, mounted `/data` files, and host Docker
-tooling for interactive inspection.
+shell, package manager, or OS certificate bundle. For a shipped Compose
+service, run diagnostics through the service name, for example
+`docker compose exec twitch-miner /twitch-miner --status --data-dir /data`;
+Compose resolves the generated container name. Direct `docker exec` is also
+valid when you supply the actual container name or ID, but `twitch-miner` is
+not guaranteed to be that name outside Compose. An exec of `sh` or `bash`
+cannot work, so use logs, mounted `/data` files, and host Docker tooling for
+interactive inspection.
 
 Example:
 

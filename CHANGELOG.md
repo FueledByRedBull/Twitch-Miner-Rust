@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Rejects unsupported prediction, filter, chat-presence, and watch-priority
+  configuration values with their exact JSON paths before write-back, while
+  preserving every accepted alias and empty-priority default. Container and
+  cadence documentation now matches the shipped Compose and scheduler behavior.
+  Redundant runtime/Twitch contract tests and `tm-runtime`'s unused direct
+  `tracing` dependency edge are removed without reducing unique coverage.
 - Adds a newcomer architecture path: one source-linked ownership map and
   effect-capable event-flow walkthrough, expanded `tm-app` crate documentation, and a
   focused first-change tutorial. The README now uses the canonical

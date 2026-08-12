@@ -9,12 +9,17 @@ use super::{BetConfig, ConfigFile, StreamerSettingsOverride};
 
 #[must_use]
 pub fn parse_chat_presence(mode: &str, fallback: IrcMode) -> IrcMode {
-    match mode.trim().to_uppercase().as_str() {
-        "ALWAYS" => IrcMode::Always,
-        "NEVER" => IrcMode::Never,
-        "ONLINE" => IrcMode::Online,
-        "OFFLINE" => IrcMode::Offline,
-        _ => fallback,
+    parse_chat_presence_value(mode).unwrap_or(fallback)
+}
+
+#[must_use]
+pub(crate) fn parse_chat_presence_value(raw: &str) -> Option<IrcMode> {
+    match raw.trim().to_uppercase().as_str() {
+        "ALWAYS" => Some(IrcMode::Always),
+        "NEVER" => Some(IrcMode::Never),
+        "ONLINE" => Some(IrcMode::Online),
+        "OFFLINE" => Some(IrcMode::Offline),
+        _ => None,
     }
 }
 
@@ -142,7 +147,7 @@ fn merge_bet_settings(base: &BetSettings, override_settings: &BetConfig) -> BetS
     bet
 }
 
-fn parse_strategy(raw: &str) -> Option<Strategy> {
+pub(crate) fn parse_strategy(raw: &str) -> Option<Strategy> {
     match raw.trim().to_uppercase().as_str() {
         "MOST_VOTED" => Some(Strategy::MostVoted),
         "HIGH_ODDS" => Some(Strategy::HighOdds),
@@ -161,7 +166,7 @@ fn parse_strategy(raw: &str) -> Option<Strategy> {
     }
 }
 
-fn parse_delay_mode(raw: &str) -> Option<DelayMode> {
+pub(crate) fn parse_delay_mode(raw: &str) -> Option<DelayMode> {
     match raw.trim().to_uppercase().as_str() {
         "FROM_START" => Some(DelayMode::FromStart),
         "FROM_END" => Some(DelayMode::FromEnd),
@@ -170,7 +175,7 @@ fn parse_delay_mode(raw: &str) -> Option<DelayMode> {
     }
 }
 
-fn parse_outcome_key(raw: &str) -> Option<OutcomeKey> {
+pub(crate) fn parse_outcome_key(raw: &str) -> Option<OutcomeKey> {
     match raw.trim().to_uppercase().as_str() {
         "PERCENTAGE_USERS" => Some(OutcomeKey::PercentageUsers),
         "ODDS" => Some(OutcomeKey::Odds),
@@ -184,7 +189,7 @@ fn parse_outcome_key(raw: &str) -> Option<OutcomeKey> {
     }
 }
 
-fn parse_condition(raw: &str) -> Option<Condition> {
+pub(crate) fn parse_condition(raw: &str) -> Option<Condition> {
     match raw.trim().to_uppercase().as_str() {
         "GT" => Some(Condition::Gt),
         "LT" => Some(Condition::Lt),

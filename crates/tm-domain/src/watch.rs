@@ -45,17 +45,7 @@ pub fn parse_watch_priorities(priority_names: &[String]) -> Vec<WatchPriority> {
     let mut parsed = Vec::new();
     let mut seen = HashSet::new();
     for raw_name in priority_names {
-        let parsed_priority = match raw_name.trim().to_uppercase().as_str() {
-            "ORDER" => Some(WatchPriority::Order),
-            "STREAK" => Some(WatchPriority::Streak),
-            "DROPS" => Some(WatchPriority::Drops),
-            "SUBSCRIBED" | "SUBS" | "MULTIPLIER" => Some(WatchPriority::Subscribed),
-            "POINTS_ASC" | "POINTS_ASCENDING" => Some(WatchPriority::PointsAscending),
-            "POINTS_DESC" | "POINTS_DESCENDING" => Some(WatchPriority::PointsDescending),
-            "LONGEST_STREAK" | "STREAK_LONGEST" => Some(WatchPriority::LongestStreak),
-            "EXPIRING_STREAK" | "STREAK_EXPIRING" => Some(WatchPriority::ExpiringStreak),
-            _ => None,
-        };
+        let parsed_priority = parse_watch_priority(raw_name);
         if let Some(priority) = parsed_priority {
             if seen.insert(priority) {
                 parsed.push(priority);
@@ -66,6 +56,21 @@ pub fn parse_watch_priorities(priority_names: &[String]) -> Vec<WatchPriority> {
         default_watch_priorities()
     } else {
         parsed
+    }
+}
+
+#[must_use]
+pub fn parse_watch_priority(raw_name: &str) -> Option<WatchPriority> {
+    match raw_name.trim().to_uppercase().as_str() {
+        "ORDER" => Some(WatchPriority::Order),
+        "STREAK" => Some(WatchPriority::Streak),
+        "DROPS" => Some(WatchPriority::Drops),
+        "SUBSCRIBED" | "SUBS" | "MULTIPLIER" => Some(WatchPriority::Subscribed),
+        "POINTS_ASC" | "POINTS_ASCENDING" => Some(WatchPriority::PointsAscending),
+        "POINTS_DESC" | "POINTS_DESCENDING" => Some(WatchPriority::PointsDescending),
+        "LONGEST_STREAK" | "STREAK_LONGEST" => Some(WatchPriority::LongestStreak),
+        "EXPIRING_STREAK" | "STREAK_EXPIRING" => Some(WatchPriority::ExpiringStreak),
+        _ => None,
     }
 }
 

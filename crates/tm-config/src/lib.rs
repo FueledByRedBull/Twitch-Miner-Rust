@@ -15,11 +15,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use thiserror::Error;
-use tm_domain::FollowersOrder;
 #[cfg(test)]
 use tm_domain::IrcMode;
+use tm_domain::{parse_watch_priority, FollowersOrder};
 
 mod settings;
+
+use settings::{
+    parse_chat_presence_value, parse_condition, parse_delay_mode, parse_outcome_key, parse_strategy,
+};
 
 pub use settings::{build_base_streamer_settings, build_override_settings, parse_chat_presence};
 
@@ -271,6 +275,7 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     validate_nested_object(&value, "bet", "filter_condition")?;
     validate_streamer_override_shapes(&value)?;
     validate_known_keys(&value)?;
+    validate_enum_values(&value)?;
 
     changed |= fill_missing_top_level(&mut value, &default_config_value());
     let privacy_defaults = privacy_defaults();
@@ -337,8 +342,27 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
             "config.disable_ssl_cert_verification is no longer supported; remove it or set it to false",
         )));
     }
+    validate_required_enum(
+        "config.chat_presence",
+        &config.chat_presence,
+        parse_chat_presence_value,
+    )?;
+    for (index, priority) in config.watch_priority.iter().enumerate() {
+        validate_required_enum(
+            &format!("config.watch_priority[{index}]"),
+            priority,
+            parse_watch_priority,
+        )?;
+    }
     validate_bet_config("config.bet", &config.bet)?;
     for (login, override_settings) in &config.streamer_overrides {
+        if let Some(chat_presence) = override_settings.chat_presence.as_deref() {
+            validate_optional_enum(
+                &format!("config.streamer_overrides.{login}.chat_presence"),
+                Some(chat_presence),
+                parse_chat_presence_value,
+            )?;
+        }
         validate_bet_config(
             &format!("config.streamer_overrides.{login}.bet"),
             &override_settings.bet,
@@ -348,6 +372,28 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
 }
 
 fn validate_bet_config(path: &str, bet: &BetConfig) -> Result<(), ConfigError> {
+    validate_optional_enum(
+        &format!("{path}.strategy"),
+        bet.strategy.as_deref(),
+        parse_strategy,
+    )?;
+    validate_optional_enum(
+        &format!("{path}.delay_mode"),
+        bet.delay_mode.as_deref(),
+        parse_delay_mode,
+    )?;
+    if let Some(filter_condition) = bet.filter_condition.as_ref() {
+        validate_optional_enum(
+            &format!("{path}.filter_condition.by"),
+            filter_condition.by.as_deref(),
+            parse_outcome_key,
+        )?;
+        validate_optional_enum(
+            &format!("{path}.filter_condition.where"),
+            filter_condition.condition.as_deref(),
+            parse_condition,
+        )?;
+    }
     if bet.percentage.is_some_and(|value| value > 100) {
         return Err(ConfigError::Validation(format!(
             "{path}.percentage must be between 0 and 100"
@@ -386,6 +432,148 @@ fn validate_bet_config(path: &str, bet: &BetConfig) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
+}
+
+fn validate_enum_values(value: &Value) -> Result<(), ConfigError> {
+    let Some(root) = value.as_object() else {
+        return Ok(());
+    };
+
+    validate_value_enum(
+        root,
+        "chat_presence",
+        "config.chat_presence",
+        parse_chat_presence_value,
+        false,
+    )?;
+    if let Some(watch_priority) = root.get("watch_priority") {
+        let Some(values) = watch_priority.as_array() else {
+            return Err(unsupported_enum_value(
+                "config.watch_priority",
+                watch_priority,
+            ));
+        };
+        for (index, value) in values.iter().enumerate() {
+            let path = format!("config.watch_priority[{index}]");
+            validate_enum_value(&path, value, parse_watch_priority, false)?;
+        }
+    }
+    if let Some(bet) = root.get("bet").and_then(Value::as_object) {
+        validate_bet_values(bet, "config.bet")?;
+    }
+    if let Some(overrides) = root.get("streamer_overrides").and_then(Value::as_object) {
+        for (login, override_value) in overrides {
+            let Some(override_object) = override_value.as_object() else {
+                continue;
+            };
+            let override_path = format!("config.streamer_overrides.{login}");
+            validate_value_enum(
+                override_object,
+                "chat_presence",
+                &format!("{override_path}.chat_presence"),
+                parse_chat_presence_value,
+                true,
+            )?;
+            if let Some(bet) = override_object.get("bet").and_then(Value::as_object) {
+                validate_bet_values(bet, &format!("{override_path}.bet"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_bet_values(bet: &Map<String, Value>, path: &str) -> Result<(), ConfigError> {
+    validate_value_enum(
+        bet,
+        "strategy",
+        &format!("{path}.strategy"),
+        parse_strategy,
+        true,
+    )?;
+    validate_value_enum(
+        bet,
+        "delay_mode",
+        &format!("{path}.delay_mode"),
+        parse_delay_mode,
+        true,
+    )?;
+    if let Some(filter) = bet.get("filter_condition").and_then(Value::as_object) {
+        validate_value_enum(
+            filter,
+            "by",
+            &format!("{path}.filter_condition.by"),
+            parse_outcome_key,
+            true,
+        )?;
+        validate_value_enum(
+            filter,
+            "where",
+            &format!("{path}.filter_condition.where"),
+            parse_condition,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_value_enum<T>(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    parser: impl Fn(&str) -> Option<T>,
+    allow_null: bool,
+) -> Result<(), ConfigError> {
+    let Some(value) = object.get(key) else {
+        return Ok(());
+    };
+    validate_enum_value(path, value, parser, allow_null)
+}
+
+fn validate_enum_value<T>(
+    path: &str,
+    value: &Value,
+    parser: impl Fn(&str) -> Option<T>,
+    allow_null: bool,
+) -> Result<(), ConfigError> {
+    if allow_null && value.is_null() {
+        return Ok(());
+    }
+    let Some(raw) = value.as_str() else {
+        return Err(unsupported_enum_value(path, value));
+    };
+    if parser(raw).is_none() {
+        return Err(unsupported_enum_value(path, value));
+    }
+    Ok(())
+}
+
+fn validate_required_enum<T>(
+    path: &str,
+    value: &str,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Result<(), ConfigError> {
+    validate_optional_enum(path, Some(value), parser)
+}
+
+fn validate_optional_enum<T>(
+    path: &str,
+    value: Option<&str>,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Result<(), ConfigError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if parser(value).is_none() {
+        return Err(unsupported_enum_value(
+            path,
+            &Value::String(value.to_owned()),
+        ));
+    }
+    Ok(())
+}
+
+fn unsupported_enum_value(path: &str, value: &Value) -> ConfigError {
+    ConfigError::Validation(format!("{path} has unsupported value {value}"))
 }
 
 fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), ConfigError> {

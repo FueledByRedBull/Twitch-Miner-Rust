@@ -71,7 +71,7 @@ If you want to watch logs in the foreground, run the command directly in the ter
 
 ## Docker Run
 
-The repo ships two compose examples:
+The repo ships three Compose examples:
 
 - `docker-compose.yml` for a bind-mount layout at `./data`.
 - `deploy/docker-compose.volume.yml` for a named-volume layout.
@@ -105,13 +105,15 @@ The container expects:
 For automation and diagnostics:
 
 ```powershell
-docker exec twitch-miner /twitch-miner --check-config --json --data-dir /data
-docker exec twitch-miner /twitch-miner --status --data-dir /data
-docker exec twitch-miner /twitch-miner --health --data-dir /data
+docker compose exec -T twitch-miner /twitch-miner --check-config --json --data-dir /data
+docker compose exec -T twitch-miner /twitch-miner --status --data-dir /data
+docker compose exec -T twitch-miner /twitch-miner --health --data-dir /data
 ```
 
-The image is `scratch`: direct `docker exec` of `/twitch-miner` works, but
-there is no `sh` or `bash` to start for an interactive shell.
+These commands target the Compose service, so they do not depend on the
+generated container name. The image is `scratch`: direct `docker exec` of
+`/twitch-miner` also works when you provide the actual container name or ID,
+but there is no `sh` or `bash` to start for an interactive shell.
 
 `--status` prints only the sanitized runtime-status document. It includes each
 task's last successful work and last activity, bounded

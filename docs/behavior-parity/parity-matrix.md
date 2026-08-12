@@ -22,6 +22,14 @@ gap before each release.
 | Automatic updater | Deliberately removed | Legacy `auto_update=true` is rejected; no dormant binary replacement code remains. |
 | Config mutation | Improved | Versioned preview, atomic write, and rollback backup. |
 
+Configuration validation is a separate robustness property, not a parity
+reclassification. Unsupported enum-like values in global or per-streamer
+strategy, delay mode, filter condition, chat presence, and watch-priority
+settings are rejected with their exact JSON paths before runtime or write-back;
+currently supported aliases and empty-list defaults remain compatible. This
+hardening does not change prediction strategy or filter behavior, which remains
+`Parity` above.
+
 Twitch's current [Watch Streaks requirements](https://help.twitch.tv/s/article/recover-watch-streaks)
 state that at least 30 minutes must pass between the end of one stream and the
 start of the next. That platform rule, rather than parent-miner lineage, is the

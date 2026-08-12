@@ -28,6 +28,6 @@ pub use types::{
 };
 pub use watch::{
     default_watch_priorities, normalize_game_list, normalize_streamer_list, parse_watch_priorities,
-    pick_streamers_to_watch, should_join_chat, should_prioritize_streak, streak_priority_limit,
-    watch_interval, WatchPriority,
+    parse_watch_priority, pick_streamers_to_watch, should_join_chat, should_prioritize_streak,
+    streak_priority_limit, watch_interval, WatchPriority,
 };

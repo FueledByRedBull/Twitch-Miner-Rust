@@ -11,7 +11,6 @@ rust-version.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 tm-config = { path = "../tm-config", version = "0.1.0" }
 tm-domain = { path = "../tm-domain", version = "0.1.0" }
 
