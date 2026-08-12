@@ -106,31 +106,33 @@ fn classify_response(status: Option<u16>, body: &[u8]) -> ProbeStatus {
         return ProbeStatus::Inconclusive;
     };
 
-    let mut has_error_detail = false;
-    for error in errors {
-        let values = [
+    let details = errors.iter().flat_map(|error| {
+        [
             error.get("message").and_then(serde_json::Value::as_str),
             error.get("code").and_then(serde_json::Value::as_str),
             error
                 .get("extensions")
                 .and_then(|extensions| extensions.get("code"))
                 .and_then(serde_json::Value::as_str),
-        ];
-        for value in values.into_iter().flatten().map(str::to_ascii_lowercase) {
-            has_error_detail = true;
-            if value.contains("persistedquerynotfound")
-                || value.contains("persisted_query_not_found")
-            {
-                return ProbeStatus::Broken;
-            }
-            if value.contains("persistedquerynotsupported")
-                || value.contains("persisted_query_not_supported")
-            {
-                return ProbeStatus::Inconclusive;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::to_ascii_lowercase)
+    });
+    let mut saw_detail = false;
+    for detail in details {
+        saw_detail = true;
+        if detail.contains("persistedquerynotfound") || detail.contains("persisted_query_not_found")
+        {
+            return ProbeStatus::Broken;
+        }
+        if detail.contains("persistedquerynotsupported")
+            || detail.contains("persisted_query_not_supported")
+        {
+            return ProbeStatus::Inconclusive;
         }
     }
-    if object.contains_key("data") || has_error_detail {
+    if object.contains_key("data") || saw_detail {
         ProbeStatus::Registered
     } else {
         ProbeStatus::Inconclusive
@@ -150,14 +152,16 @@ fn probe_payload(contract: &tm_twitch::PersistedOperationContract) -> serde_json
 }
 
 fn parse_operation_filter() -> Result<Option<String>, String> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [] => Ok(None),
-        [flag] if flag == "--help" || flag == "-h" => {
+    let mut args = std::env::args().skip(1);
+    match (args.next(), args.next(), args.next()) {
+        (None, None, None) => Ok(None),
+        (Some(flag), None, None) if flag == "--help" || flag == "-h" => {
             println!("Usage: cargo run -p tm-twitch --example apq_probe -- [--operation NAME]");
             std::process::exit(0);
         }
-        [flag, name] if flag == "--operation" && !name.is_empty() => Ok(Some(name.clone())),
+        (Some(flag), Some(name), None) if flag == "--operation" && !name.is_empty() => {
+            Ok(Some(name))
+        }
         _ => Err("usage: apq_probe [--operation NAME]".to_string()),
     }
 }
@@ -186,48 +190,31 @@ mod tests {
 
     #[test]
     fn classifier_is_conservative_and_body_free() {
-        assert_eq!(
-            classify_response(Some(200), br#"{"data":{"ok":true}}"#),
-            ProbeStatus::Registered
-        );
-        assert_eq!(
-            classify_response(
+        for (status, body, expected) in [
+            (
                 Some(200),
-                br#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#
+                br#"{"data":{"ok":true}}"#.as_slice(),
+                ProbeStatus::Registered,
             ),
-            ProbeStatus::Broken
-        );
-        assert_eq!(
-            classify_response(
+            (
                 Some(200),
-                br#"{"errors":[{"extensions":{"code":"PERSISTED_QUERY_NOT_SUPPORTED"}}]}"#
+                br#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#,
+                ProbeStatus::Broken,
             ),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(
-            classify_response(Some(200), br"not-json"),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(
-            classify_response(Some(200), br#"{"errors":[{}]}"#),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(
-            classify_response(Some(200), br#"{}"#),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(
-            classify_response(Some(200), br#"[]"#),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(
-            classify_response(Some(200), br#"{"errors":{}}"#),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(
-            classify_response(Some(503), br"{}"),
-            ProbeStatus::Inconclusive
-        );
-        assert_eq!(classify_response(None, &[]), ProbeStatus::Inconclusive);
+            (
+                Some(200),
+                br#"{"errors":[{"extensions":{"code":"PERSISTED_QUERY_NOT_SUPPORTED"}}]}"#,
+                ProbeStatus::Inconclusive,
+            ),
+            (Some(200), br"not-json", ProbeStatus::Inconclusive),
+            (Some(200), br#"{"errors":[{}]}"#, ProbeStatus::Inconclusive),
+            (Some(200), br#"{}"#, ProbeStatus::Inconclusive),
+            (Some(200), br#"[]"#, ProbeStatus::Inconclusive),
+            (Some(200), br#"{"errors":{}}"#, ProbeStatus::Inconclusive),
+            (Some(503), br#"{}"#, ProbeStatus::Inconclusive),
+            (None, &[], ProbeStatus::Inconclusive),
+        ] {
+            assert_eq!(classify_response(status, body), expected);
+        }
     }
 }
