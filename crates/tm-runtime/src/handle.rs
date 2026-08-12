@@ -9,8 +9,7 @@ use tokio::sync::{watch, Mutex, MutexGuard};
 use crate::effect::RuntimeEffect;
 use crate::error::{Result, RuntimeError};
 use crate::types::{
-    ContextUpdate, EventApplication, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary,
-    StreamUpdate,
+    ContextUpdate, EventApplication, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
 };
 
 /// Cloneable handle for the sole mutable [`RuntimeState`] owner.
@@ -85,10 +84,14 @@ impl RuntimeMetrics {
     }
 }
 
-pub(crate) fn spawn_runtime_session(session: RuntimeSession) -> RuntimeHandle {
+pub(crate) fn spawn_runtime_state(mut state: RuntimeState) -> RuntimeHandle {
     let (state_revision_tx, state_revision) = watch::channel(0_u64);
     let metrics = Arc::new(RuntimeMetrics::default());
-    let RuntimeSession { summary, state } = session;
+    state.capture_initial_points();
+    let summary = RuntimeSummary {
+        configured_streamers: state.streamers.len(),
+        follower_mode: state.follower_mode,
+    };
     RuntimeHandle {
         state: Arc::new(Mutex::new(state)),
         summary,

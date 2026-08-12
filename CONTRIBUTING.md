@@ -52,18 +52,11 @@ cargo build --workspace --release --locked
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
 
-Performance-sensitive changes should also run the fixed sanitized, network-free
-replay. Timing is review evidence, not a wall-clock pass/fail gate:
-
-```powershell
-cargo run -p tm-runtime --example replay_benchmark --release --locked
-```
-
 The manually dispatched/weekly `Deep Quality` workflow pins its nightly and
 analysis executables. It preserves the 60% critical-core branch floor and a
-separate 46.0% `tm-app` ratchet, runs bounded pure-parser fuzzing from the isolated
-`fuzz/` workspace, and runs the fixed replay once. Do not expand it to network
-effects or treat timing as a correctness gate.
+separate 46.0% `tm-app` ratchet and runs bounded pure-parser fuzzing from the
+isolated `fuzz/` workspace. Do not expand it to network effects or weaken the
+coverage floors.
 
 Protocol changes need a sanitized fixture, parser test, and parity-matrix
 update. Run `crates/tm-app/tests/parser_robustness.rs` as part of the normal

@@ -1540,6 +1540,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tm-twitch",
+ "tokio",
 ]
 
 [[package]]
@@ -1600,7 +1601,6 @@ dependencies = [
  "thiserror",
  "time",
  "tm-domain",
- "tm-twitch",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -1611,7 +1611,6 @@ name = "tm-runtime"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
  "thiserror",
  "tm-config",
  "tm-domain",

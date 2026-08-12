@@ -23,7 +23,7 @@ $expectedInternalDependencies = [ordered]@{
     'tm-domain' = @()
     'tm-irc' = @()
     'tm-observability' = @('tm-domain')
-    'tm-pubsub' = @('tm-domain', 'tm-twitch')
+    'tm-pubsub' = @('tm-domain')
     'tm-runtime' = @('tm-config', 'tm-domain', 'tm-pubsub')
     'tm-twitch' = @('tm-domain')
 }

@@ -1335,6 +1335,13 @@ mod tests {
         assert_eq!(session.auth_token(), Some("token-123"));
         assert_eq!(session.user_id(), Some("user-123"));
         assert!(session.has_scope("channel:read:predictions"));
+        let reloaded = AuthSession::load_from_dir(&temp_dir, "tester").unwrap();
+        assert_eq!(reloaded.auth_token(), session.auth_token());
+        assert_eq!(reloaded.user_id(), session.user_id());
+        assert_eq!(
+            reloaded.cookie_header_for_host("gql.twitch.tv"),
+            session.cookie_header_for_host("gql.twitch.tv")
+        );
 
         let (twitch_endpoints, requests, twitch_server) = spawn_twitch_server(8);
         let twitch = TwitchClient::with_client_and_cookie_header_and_endpoints(
