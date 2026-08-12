@@ -2162,7 +2162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minute_watched_reuses_refreshed_snapshot_and_updates_watch_progress() {
+    async fn disabled_drop_minute_watch_succeeds_without_local_point_progress() {
         let (endpoints, requests, twitch_server) = spawn_twitch_server(5);
         let twitch = TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
@@ -2192,12 +2192,18 @@ mod tests {
             username: String::from("alice"),
             channel_id: String::from("100"),
             is_online: true,
+            channel_points_enabled: Some(false),
+            settings: tm_domain::StreamerSettings {
+                farm_drops: true,
+                ..tm_domain::StreamerSettings::default()
+            },
             stream: Some(tm_domain::Stream {
                 broadcast_id: String::from("stream-1"),
                 title: String::from("Title"),
                 game: Some(Game::from_name("Game Name")),
                 game_id: Some(String::from("42")),
                 viewers_count: 1,
+                drop_campaign_eligible: Some(true),
                 stream_up_at: Some(tm_domain::OffsetDateTime::now_utc()),
                 // Fresh enough that the send path reuses the snapshot instead of
                 // refreshing stream info inline.
@@ -2229,13 +2235,89 @@ mod tests {
             .stream
             .as_ref()
             .and_then(|stream| stream.last_minute_update)
-            .is_some());
+            .is_none());
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .map(|stream| stream.minute_watched),
+            Some(0.0)
+        );
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 5);
         assert!(!requests
             .iter()
             .any(|request| request
                 .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
+    }
+
+    #[tokio::test]
+    async fn disabled_drop_minute_watch_stops_when_refresh_clears_campaign() {
+        let (endpoints, requests, twitch_server) = spawn_twitch_server(2);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let spade_urls = tokio::sync::Mutex::new(HashMap::new());
+        let config = ConfigFile {
+            username: String::from("tester"),
+            streamers: vec![String::from("alice")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers = vec![Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            is_online: true,
+            presence_known: true,
+            channel_points_enabled: Some(false),
+            settings: tm_domain::StreamerSettings {
+                farm_drops: true,
+                ..tm_domain::StreamerSettings::default()
+            },
+            stream: Some(tm_domain::Stream {
+                broadcast_id: String::from("stale-stream"),
+                drop_campaign_eligible: Some(true),
+                last_update: Some(
+                    tm_domain::OffsetDateTime::now_utc() - Duration::from_secs(30 * 60),
+                ),
+                ..tm_domain::Stream::default()
+            }),
+            ..Streamer::default()
+        }];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let streamer = runtime.state_snapshot().await.unwrap().streamers.remove(0);
+
+        send_minute_watched_for_streamer(
+            &runtime,
+            &twitch,
+            &spade_urls,
+            &streamer,
+            "user-1",
+            &test_observability(),
+        )
+        .await
+        .unwrap();
+
+        twitch_server.join().unwrap();
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.streamers[0]
+                .stream
+                .as_ref()
+                .and_then(|stream| stream.drop_campaign_eligible),
+            None
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests
+            .iter()
+            .any(|request| request.contains(r#""operationName":"PlaybackAccessToken""#)));
     }
 
     #[test]

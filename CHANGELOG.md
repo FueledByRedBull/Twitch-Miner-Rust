@@ -4,8 +4,18 @@
 
 - Tracks Twitch's optional channel-points-enabled marker. Confirmed-disabled
   channels remain presence-monitored but cannot consume a credited watch slot
-  or trigger point-dependent work; an omitted marker remains compatible, and
-  a disabled channel without a balance no longer aborts startup.
+  or trigger point-dependent work. A verified active Drop campaign remains
+  watchable because Drops are independent of Channel Points, without advancing
+  local point/streak progress. An omitted marker remains compatible, and a
+  disabled channel without a balance no longer aborts startup.
+- Validates Twitch-supplied EventSub reconnect URLs before use and follows the
+  documented handoff: the existing socket remains active until the replacement
+  receives Welcome, inherited subscriptions are not recreated, and overlap
+  notifications remain available to the existing deduper.
+- Adds an on-demand credential-free APQ registration probe for all inventoried
+  read and mutation hashes. It sends no variables or mutation input, reports
+  only `REGISTERED`, `BROKEN`, or `INCONCLUSIVE`, and is intentionally not a CI
+  gate or runtime fallback.
 - Pairs each streamer's two independent initial identity/context reads after
   one client-version warmup. Streamer ordering, mutations, presence checks, and
   streak-cache writes remain sequential; a clean delayed-I/O benchmark measured

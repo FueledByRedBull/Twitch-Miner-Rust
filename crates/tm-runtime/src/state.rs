@@ -115,20 +115,16 @@ impl RuntimeState {
 
     #[must_use]
     pub fn campaign_watch_logins(&self, now: OffsetDateTime) -> Vec<String> {
-        if !self.watch_priorities.contains(&WatchPriority::Drops) {
+        if !self.watch_priorities.is_empty()
+            && !self.watch_priorities.contains(&WatchPriority::Drops)
+        {
             return Vec::new();
         }
 
         self.watch_target_indices(now)
             .into_iter()
             .filter_map(|idx| self.streamers.get(idx))
-            .filter(|streamer| {
-                streamer.settings.farm_drops
-                    && streamer
-                        .stream
-                        .as_ref()
-                        .is_some_and(Stream::has_active_drop_campaign)
-            })
+            .filter(|streamer| streamer.can_watch_drop_campaign())
             .map(|streamer| streamer.username.clone())
             .collect()
     }
@@ -603,6 +599,9 @@ impl RuntimeState {
         let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
             return;
         };
+        if !streamer.can_earn_channel_points() {
+            return;
+        }
         let Some(stream) = streamer.stream.as_mut() else {
             return;
         };

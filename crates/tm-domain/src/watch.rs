@@ -149,6 +149,7 @@ pub fn pick_streamers_to_watch(
         position: usize,
         priority_game: bool,
         streak_ready: bool,
+        campaign_only: bool,
     }
 
     fn add_candidate(candidate: Candidate, selected: &mut Vec<usize>, seen: &mut HashSet<usize>) {
@@ -175,7 +176,9 @@ pub fn pick_streamers_to_watch(
     let mut has_priority_game_streak = false;
 
     for (idx, streamer) in streamers.iter().enumerate() {
-        if !streamer.is_online || !streamer.can_earn_channel_points() {
+        if !streamer.is_online
+            || (!streamer.can_earn_channel_points() && !streamer.can_watch_drop_campaign())
+        {
             continue;
         }
         if streamer
@@ -204,13 +207,15 @@ pub fn pick_streamers_to_watch(
         let priority_game = game
             .as_ref()
             .is_some_and(|game| game_priority_index.contains_key(game));
-        let streak_ready = should_prioritize_streak(streamer, now);
+        let campaign_only = !streamer.can_earn_channel_points();
+        let streak_ready = !campaign_only && should_prioritize_streak(streamer, now);
         let candidate = Candidate {
             idx,
             rank,
             position: candidates.len(),
             priority_game,
             streak_ready,
+            campaign_only,
         };
         candidates.push(candidate);
         candidate_by_idx.insert(idx, candidate);
@@ -229,14 +234,7 @@ pub fn pick_streamers_to_watch(
     let mut drop_candidates = candidates
         .iter()
         .copied()
-        .filter(|candidate| {
-            let streamer = &streamers[candidate.idx];
-            streamer.settings.farm_drops
-                && streamer
-                    .stream
-                    .as_ref()
-                    .is_some_and(Stream::has_active_drop_campaign)
-        })
+        .filter(|candidate| streamers[candidate.idx].can_watch_drop_campaign())
         .collect::<Vec<_>>();
     drop_candidates.sort_by(|left, right| {
         left.rank
@@ -272,14 +270,20 @@ pub fn pick_streamers_to_watch(
             WatchPriority::Subscribed => candidates
                 .iter()
                 .copied()
-                .filter(|candidate| streamers[candidate.idx].has_active_multipliers())
+                .filter(|candidate| {
+                    !candidate.campaign_only && streamers[candidate.idx].has_active_multipliers()
+                })
                 .collect(),
             WatchPriority::LongestStreak | WatchPriority::ExpiringStreak => {
                 streak_candidates.clone()
             }
             WatchPriority::Order
             | WatchPriority::PointsAscending
-            | WatchPriority::PointsDescending => candidates.clone(),
+            | WatchPriority::PointsDescending => candidates
+                .iter()
+                .copied()
+                .filter(|candidate| !candidate.campaign_only)
+                .collect(),
         };
 
         ordered.sort_by(|left, right| match priority {
@@ -366,7 +370,11 @@ pub fn pick_streamers_to_watch(
         }
     }
 
-    let mut fallback = candidates.clone();
+    let mut fallback = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| !candidate.campaign_only)
+        .collect::<Vec<_>>();
     fallback.sort_by(|left, right| {
         left.rank
             .cmp(&right.rank)
@@ -703,6 +711,47 @@ mod tests {
         );
 
         assert_eq!(selected, vec![0]);
+    }
+
+    #[test]
+    fn disabled_channel_can_watch_only_verified_drop_campaign_until_it_clears() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let disabled_campaign = Streamer {
+            username: String::from("campaign"),
+            is_online: true,
+            channel_points_enabled: Some(false),
+            settings: StreamerSettings {
+                farm_drops: true,
+                ..StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                drop_campaign_eligible: Some(true),
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        };
+        let ordinary = Streamer {
+            username: String::from("ordinary"),
+            is_online: true,
+            channel_points_enabled: Some(true),
+            ..Streamer::default()
+        };
+        let mut streamers = vec![disabled_campaign, ordinary];
+
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Drops], &[], &[], now),
+            vec![0, 1]
+        );
+
+        streamers[0]
+            .stream
+            .as_mut()
+            .expect("campaign stream")
+            .drop_campaign_eligible = Some(false);
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Drops], &[], &[], now),
+            vec![1]
+        );
     }
 
     #[test]

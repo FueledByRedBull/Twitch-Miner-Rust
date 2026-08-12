@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -10,8 +10,8 @@ use time::format_description::well_known::Rfc2822;
 use time::OffsetDateTime;
 use tm_domain::{MinerEvent, Streamer};
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 mod planning;
 mod protocol;
@@ -40,6 +40,8 @@ const EVENTSUB_WELCOME_TIMEOUT: Duration = Duration::from_secs(15);
 const EVENTSUB_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 const EVENTSUB_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const EVENTSUB_KEEPALIVE_GRACE: Duration = Duration::from_secs(5);
+
+type EventSubSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Clone, Copy)]
 struct EventSubDeadlines {
@@ -299,62 +301,18 @@ impl EventSubClient {
         }
 
         let mut deduper = MessageDeduper::default();
-        let mut websocket_url = self.settings.websocket_url.clone();
-        let mut inherited_subscriptions: Option<EventSubSetupReport> = None;
-        loop {
-            let setup = async {
-                let (mut socket, _) =
-                    tokio::time::timeout(deadlines.connect, connect_async(&websocket_url))
-                        .await
-                        .map_err(|_| {
-                            EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect)
-                        })??;
-                let welcome = tokio::time::timeout(
-                    deadlines.welcome,
-                    read_welcome(&mut socket, tracked_streamers),
-                )
-                .await
-                .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::Welcome))??;
-                let EventSubMessage::Welcome {
-                    session_id,
-                    keepalive_timeout,
-                    ..
-                } = welcome
-                else {
-                    return Err(EventSubError::Protocol("welcome message was not decoded"));
-                };
-                let report = match inherited_subscriptions.take() {
-                    // Twitch carries the subscriptions to the reconnect URL, but the
-                    // count must be re-derived for the new session rather than
-                    // reported from memory.
-                    Some(previous) => {
-                        self.reconcile_inherited_report(&session_id, previous)
-                            .await?
-                    }
-                    None => {
-                        self.create_subscriptions(&session_id, tracked_streamers)
-                            .await?
-                    }
-                };
-                if report.active_subscriptions == 0 {
-                    return Err(EventSubError::NoSubscriptions);
-                }
-                Ok((socket, keepalive_timeout, report))
-            };
-            let (mut socket, keepalive_timeout, report) =
-                tokio::time::timeout(deadlines.session_setup, setup)
-                    .await
-                    .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::SessionSetup))??;
-            let carried_report = report.clone();
-            sender
-                .send(EventSubConnectionEvent::Setup(Box::new(report)))
-                .await
-                .map_err(|_| EventSubError::Protocol("event channel closed"))?;
-            sender
-                .send(EventSubConnectionEvent::Heartbeat)
-                .await
-                .map_err(|_| EventSubError::Protocol("event channel closed"))?;
+        let (mut socket, mut keepalive_timeout, mut report) = self
+            .connect_socket(
+                &self.settings.websocket_url,
+                tracked_streamers,
+                deadlines,
+                None,
+            )
+            .await?;
+        send_setup(&sender, &report).await?;
 
+        loop {
+            let carried_report = report.clone();
             match listen_socket(
                 &mut socket,
                 tracked_streamers,
@@ -365,14 +323,98 @@ impl EventSubClient {
             .await
             {
                 Err(EventSubError::ReconnectRequested { reconnect_url }) => {
-                    // Twitch keeps the subscriptions attached to the reconnect URL. Do not
-                    // recreate them, which would produce duplicate-subscription errors.
-                    websocket_url = reconnect_url;
-                    inherited_subscriptions = Some(carried_report);
+                    validate_reconnect_url(&reconnect_url)?;
+
+                    // Twitch carries subscriptions to the supplied reconnect URL. Keep the
+                    // old socket alive while the replacement reaches Welcome; no resubscribe
+                    // calls are made, and only then does assignment drop the old socket.
+                    let mut replacement = Box::pin(self.connect_socket(
+                        &reconnect_url,
+                        tracked_streamers,
+                        deadlines,
+                        Some(carried_report),
+                    ));
+                    let mut old_socket = Box::pin(listen_socket(
+                        &mut socket,
+                        tracked_streamers,
+                        &sender,
+                        &mut deduper,
+                        keepalive_timeout,
+                    ));
+                    let (replacement_socket, replacement_keepalive, replacement_report) = tokio::select! {
+                        biased;
+                        result = &mut old_socket => match result {
+                            // The old socket is no longer usable, but the replacement
+                            // remains the authoritative connection attempt. A peer may
+                            // reset it without a close handshake during this overlap.
+                            Err(EventSubError::Protocol(message))
+                                if message == "event channel closed" =>
+                            {
+                                return Err(EventSubError::Protocol(message));
+                            }
+                            _ => replacement.await?,
+                        },
+                        result = &mut replacement => result?,
+                    };
+                    drop(old_socket);
+                    send_setup(&sender, &replacement_report).await?;
+                    socket = replacement_socket;
+                    keepalive_timeout = replacement_keepalive;
+                    report = replacement_report;
                 }
                 result => return result,
             }
         }
+    }
+
+    async fn connect_socket(
+        &self,
+        websocket_url: &str,
+        tracked_streamers: &[Streamer],
+        deadlines: EventSubDeadlines,
+        inherited_subscriptions: Option<EventSubSetupReport>,
+    ) -> Result<(EventSubSocket, Duration, EventSubSetupReport), EventSubError> {
+        let setup = async {
+            let (mut socket, _) =
+                tokio::time::timeout(deadlines.connect, connect_async(websocket_url))
+                    .await
+                    .map_err(|_| {
+                        EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect)
+                    })??;
+            let welcome = tokio::time::timeout(
+                deadlines.welcome,
+                read_welcome(&mut socket, tracked_streamers),
+            )
+            .await
+            .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::Welcome))??;
+            let EventSubMessage::Welcome {
+                session_id,
+                keepalive_timeout,
+                ..
+            } = welcome
+            else {
+                return Err(EventSubError::Protocol("welcome message was not decoded"));
+            };
+            let report = match inherited_subscriptions {
+                // Twitch carries the subscriptions to the reconnect URL, but the count must be
+                // re-derived for the new session rather than reported from memory.
+                Some(previous) => {
+                    self.reconcile_inherited_report(&session_id, previous)
+                        .await?
+                }
+                None => {
+                    self.create_subscriptions(&session_id, tracked_streamers)
+                        .await?
+                }
+            };
+            if report.active_subscriptions == 0 {
+                return Err(EventSubError::NoSubscriptions);
+            }
+            Ok((socket, keepalive_timeout, report))
+        };
+        tokio::time::timeout(deadlines.session_setup, setup)
+            .await
+            .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::SessionSetup))?
     }
 
     async fn create_subscriptions(
@@ -454,28 +496,41 @@ impl EventSubClient {
         session_id: &str,
         previous: EventSubSetupReport,
     ) -> Result<EventSubSetupReport, EventSubError> {
+        let mut expected_types = previous
+            .capabilities
+            .iter()
+            .flat_map(|capability| capability.active_subscription_types.iter().cloned())
+            .collect::<Vec<_>>();
+        expected_types.sort_unstable();
         let mut report = previous;
-        let mut active_subscriptions = 0_usize;
+        let mut active_types = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..EVENTSUB_MAX_LIST_PAGES {
             let response = self.list_subscriptions_page(cursor.as_deref()).await?;
             report.total_cost = response.total_cost;
             report.max_total_cost = response.max_total_cost;
-            active_subscriptions += response
-                .data
-                .iter()
-                .filter(|subscription| {
-                    subscription.transport.method == "websocket"
-                        && subscription.transport.session_id == session_id
-                        && subscription.status == "enabled"
-                })
-                .count();
+            active_types.extend(response.data.iter().filter_map(|subscription| {
+                if subscription.transport.method == "websocket"
+                    && subscription.transport.session_id == session_id
+                    && subscription.status == "enabled"
+                {
+                    Some(subscription.subscription_type.clone())
+                } else {
+                    None
+                }
+            }));
             cursor = response
                 .pagination
                 .cursor
                 .filter(|value| !value.trim().is_empty());
             if cursor.is_none() {
-                report.active_subscriptions = active_subscriptions;
+                active_types.sort_unstable();
+                if active_types != expected_types {
+                    return Err(EventSubError::Protocol(
+                        "inherited EventSub subscriptions did not match prior session",
+                    ));
+                }
+                report.active_subscriptions = active_types.len();
                 report.verified = true;
                 return Ok(report);
             }
@@ -677,6 +732,47 @@ fn validate_created_subscription(
         return Err(EventSubError::Protocol(
             "create subscription response does not match the request",
         ));
+    }
+    Ok(())
+}
+
+async fn send_setup(
+    sender: &mpsc::Sender<EventSubConnectionEvent>,
+    report: &EventSubSetupReport,
+) -> Result<(), EventSubError> {
+    sender
+        .send(EventSubConnectionEvent::Setup(Box::new(report.clone())))
+        .await
+        .map_err(|_| EventSubError::Protocol("event channel closed"))?;
+    sender
+        .send(EventSubConnectionEvent::Heartbeat)
+        .await
+        .map_err(|_| EventSubError::Protocol("event channel closed"))
+}
+
+fn validate_reconnect_url(reconnect_url: &str) -> Result<(), EventSubError> {
+    let url = Url::parse(reconnect_url)
+        .map_err(|_| EventSubError::Protocol("invalid EventSub reconnect URL"))?;
+
+    #[cfg(test)]
+    if url.scheme() == "ws" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "::1")) {
+        // Local WebSocket servers exercise the reconnect state machine without a public
+        // EventSub endpoint. This branch is compiled only into tests.
+        return Ok(());
+    }
+
+    let host_is_twitch = url
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("eventsub.wss.twitch.tv"));
+    let safe_port = url.port().is_none_or(|port| port == 443);
+    if url.scheme() != "wss"
+        || !host_is_twitch
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !safe_port
+        || url.fragment().is_some()
+    {
+        return Err(EventSubError::Protocol("invalid EventSub reconnect URL"));
     }
     Ok(())
 }
