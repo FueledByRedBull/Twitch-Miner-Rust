@@ -11,10 +11,7 @@ use tm_domain::{
 use crate::effect::RuntimeEffect;
 use crate::prediction::{build_prediction_settlement_effect, prediction_status_is_resolved};
 use crate::summary::{apply_pubsub_gain, build_session_summary};
-use crate::types::{
-    ContextUpdate, EventApplication, RuntimeSession, RuntimeState, RuntimeSummary, SessionSummary,
-    StreamUpdate,
-};
+use crate::types::{ContextUpdate, EventApplication, RuntimeState, SessionSummary, StreamUpdate};
 
 const MAX_COMPLETED_PREDICTIONS: usize = 256;
 
@@ -24,23 +21,6 @@ const STREAK_RESTART_CARRYOVER_SECONDS: i64 = 30 * 60;
 // request plus 10 seconds on its scheduler interval. Two complete passes allow
 // one failed tick before a later success stops proving continuous watch time.
 const MAX_CONFIRMED_WATCH_INTERVAL_SECONDS: i64 = 400;
-
-impl RuntimeSession {
-    #[must_use]
-    pub fn from_state(mut state: RuntimeState) -> Self {
-        state.capture_initial_points();
-        let summary = RuntimeSummary {
-            configured_streamers: state.streamers.len(),
-            follower_mode: state.follower_mode,
-        };
-        Self { summary, state }
-    }
-
-    #[must_use]
-    pub fn session_summary(&self, anonymize: bool, now: OffsetDateTime) -> SessionSummary {
-        self.state.session_summary(anonymize, now)
-    }
-}
 
 impl RuntimeState {
     #[must_use]

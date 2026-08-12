@@ -1,8 +1,4 @@
 use std::path::Path;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -247,7 +243,7 @@ impl TwitchAuthClient {
                 .await?
             {
                 Some(token) => break token,
-                None => sleep_without_blocking_runtime(prompt.interval).await,
+                None => tokio::time::sleep(prompt.interval).await,
             }
         };
 
@@ -307,17 +303,6 @@ impl Default for AuthEndpoints {
     }
 }
 
-fn sleep_without_blocking_runtime(duration: Duration) -> ThreadSleep {
-    ThreadSleep {
-        shared: Arc::new(ThreadSleepShared {
-            done: AtomicBool::new(duration.is_zero()),
-            started: AtomicBool::new(false),
-            waker: Mutex::new(None),
-            duration,
-        }),
-    }
-}
-
 fn headers_from_pairs(
     pairs: &[(String, String)],
 ) -> Result<reqwest::header::HeaderMap, AuthClientError> {
@@ -339,54 +324,6 @@ fn headers_from_pairs(
         );
     }
     Ok(headers)
-}
-
-struct ThreadSleep {
-    shared: Arc<ThreadSleepShared>,
-}
-
-struct ThreadSleepShared {
-    done: AtomicBool,
-    started: AtomicBool,
-    waker: Mutex<Option<Waker>>,
-    duration: Duration,
-}
-
-impl std::future::Future for ThreadSleep {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.shared.done.load(Ordering::SeqCst) {
-            return Poll::Ready(());
-        }
-
-        {
-            let mut waker = self
-                .shared
-                .waker
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *waker = Some(cx.waker().clone());
-        }
-
-        if !self.shared.started.swap(true, Ordering::SeqCst) {
-            let shared = Arc::clone(&self.shared);
-            std::thread::spawn(move || {
-                std::thread::sleep(shared.duration);
-                shared.done.store(true, Ordering::SeqCst);
-                if let Some(waker) = shared
-                    .waker
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    waker.wake();
-                }
-            });
-        }
-
-        Poll::Pending
-    }
 }
 
 #[cfg(test)]

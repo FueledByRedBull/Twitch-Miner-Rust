@@ -264,24 +264,6 @@ fn runtime_state_builds_from_config_with_overrides() {
 }
 
 #[test]
-fn bootstraps_runtime_session_and_captures_initial_points() {
-    let config = ConfigFile {
-        streamers: vec!["StreamerOne".into(), "ignored".into()],
-        streamers_exclude: vec!["ignored".into()],
-        ..ConfigFile::default()
-    };
-
-    let session = bootstrap(&config, ts(1_000));
-    assert!(!session.summary.follower_mode);
-    assert_eq!(session.summary.configured_streamers, 1);
-    assert_eq!(session.state.streamers.len(), 1);
-    assert_eq!(
-        session.state.initial_points.get("streamerone"),
-        Some(&session.state.streamers[0].channel_points)
-    );
-}
-
-#[test]
 fn playback_presence_drives_watch_and_chat_targets() {
     let mut state = RuntimeState {
         started_at: ts(0),
@@ -919,7 +901,7 @@ async fn spawned_runtime_is_single_writer_for_pubsub_and_shutdown() {
         streamers: vec!["tester".into()],
         ..ConfigFile::default()
     };
-    let runtime = spawn_runtime(&config, ts(10));
+    let runtime = spawn_runtime_state(RuntimeState::from_config(&config, ts(10)));
     let summary = runtime.runtime_summary().await.unwrap();
     assert_eq!(summary.configured_streamers, 1);
 
@@ -945,7 +927,7 @@ async fn spawned_runtime_notifies_state_change_subscribers() {
         streamers: vec!["tester".into()],
         ..ConfigFile::default()
     };
-    let runtime = spawn_runtime(&config, ts(10));
+    let runtime = spawn_runtime_state(RuntimeState::from_config(&config, ts(10)));
     let mut changes = runtime.subscribe_state_changes();
 
     runtime.set_presence("100", true, ts(20)).await.unwrap();
@@ -1547,7 +1529,7 @@ async fn runtime_metrics_capture_event_processing_and_compatibility_fields() {
         streamers: vec!["tester".into()],
         ..ConfigFile::default()
     };
-    let runtime = spawn_runtime(&config, ts(10));
+    let runtime = spawn_runtime_state(RuntimeState::from_config(&config, ts(10)));
     runtime
         .apply_event(
             MinerEvent::Playback {
@@ -1569,7 +1551,7 @@ async fn runtime_handle_returns_typed_closed_error_after_shutdown() {
         streamers: vec!["tester".into()],
         ..ConfigFile::default()
     };
-    let runtime = spawn_runtime(&config, ts(10));
+    let runtime = spawn_runtime_state(RuntimeState::from_config(&config, ts(10)));
 
     let _ = runtime.shutdown(false, ts(70)).await.unwrap();
     let error = runtime.state_snapshot().await.unwrap_err();

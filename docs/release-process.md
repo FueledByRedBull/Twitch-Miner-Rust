@@ -42,14 +42,13 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
 2. Run the local QA commands in `CONTRIBUTING.md`, including the architecture
    boundary check, run
    `scripts/verify-go-baseline.ps1` against the pinned Go baseline, and use the
-   archived performance guidance in [performance.md](performance.md) when
+   performance guidance in [performance.md](performance.md) when
    shared prediction/selection behavior or performance changes. Also require
    a successful Deep Quality run for the exact revision. Deep Quality must pass
    bounded parser fuzzing, the ratcheted 60% critical-core and
-   46.0% application branch-coverage floors, and the fixed replay artifact.
-   Replay timing is review evidence, not a pass/fail threshold. Then push the
-   candidate commit to `main`. The multiarch workflow builds the three platform
-   images, SBOM/provenance attestations, the manifest, and the immutable
+   46.0% application branch-coverage floors. Then push the candidate commit to
+   `main`. The multiarch workflow builds the three platform images,
+   SBOM/provenance attestations, the manifest, and the immutable
    `sha-<40-character-commit>` tag.
 3. Retrieve the `published-manifest-digest` artifact, run the read-only canary
    against that exact digest, deploy it by digest, and complete the required

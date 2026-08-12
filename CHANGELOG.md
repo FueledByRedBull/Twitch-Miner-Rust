@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Removes the non-gating sanitized replay benchmark and its Deep Quality,
+  multiarch-artifact, Docker, and active documentation paths. Performance
+  guidance now covers the maintained startup, image, bootstrap, and runtime
+  sampling measurements only.
 - Tracks Twitch's optional channel-points-enabled marker. Confirmed-disabled
   channels remain presence-monitored but cannot consume a credited watch slot
   or trigger point-dependent work. A verified active Drop campaign remains
@@ -65,7 +69,7 @@
   transport-policy, pending-claim, build-script, mutation-matrix, duplicate
   advisory-audit, language-comparison, replay-wrapper, console-helper, regex,
   and Discord form-encoding surfaces while retaining coverage, fuzzing,
-  replay, parity, `cargo-deny`, reproducible builds, and runtime behavior.
+  parity, `cargo-deny`, reproducible builds, and runtime behavior.
 - Logs the sanitized concrete `EventSub` failure beside its stable error class
   and classifies a missed keepalive deadline as `keepalive-timeout` instead of
   conflating normal liveness recovery with a rejected protocol payload.

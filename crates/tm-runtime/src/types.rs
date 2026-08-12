@@ -14,12 +14,6 @@ pub struct RuntimeSummary {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeSession {
-    pub summary: RuntimeSummary,
-    pub state: RuntimeState,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeState {
     pub started_at: OffsetDateTime,
     pub follower_mode: bool,
