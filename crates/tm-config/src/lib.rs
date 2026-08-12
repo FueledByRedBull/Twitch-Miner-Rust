@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 #[cfg(test)]
 use tm_domain::IrcMode;
-use tm_domain::{parse_watch_priority, FollowersOrder};
+use tm_domain::{parse_watch_priority, FollowersOrder, MAX_PREDICTION_POINTS};
 
 mod settings;
 
@@ -404,6 +404,14 @@ fn validate_bet_config(path: &str, bet: &BetConfig) -> Result<(), ConfigError> {
             "{path}.percentage_gap must be between 0 and 100"
         )));
     }
+    if bet
+        .max_points
+        .is_some_and(|value| value > MAX_PREDICTION_POINTS)
+    {
+        return Err(ConfigError::Validation(format!(
+            "{path}.max_points must be at most {MAX_PREDICTION_POINTS}"
+        )));
+    }
     if let Some(delay) = bet.delay {
         if !delay.is_finite() || delay < 0.0 {
             return Err(ConfigError::Validation(format!(
@@ -483,6 +491,15 @@ fn validate_enum_values(value: &Value) -> Result<(), ConfigError> {
 }
 
 fn validate_bet_values(bet: &Map<String, Value>, path: &str) -> Result<(), ConfigError> {
+    if let Some(value) = bet.get("max_points") {
+        if let Some(max_points) = value.as_u64() {
+            if max_points > u64::from(MAX_PREDICTION_POINTS) {
+                return Err(ConfigError::Validation(format!(
+                    "{path}.max_points must be at most {MAX_PREDICTION_POINTS}"
+                )));
+            }
+        }
+    }
     validate_value_enum(
         bet,
         "strategy",

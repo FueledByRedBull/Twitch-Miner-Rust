@@ -182,6 +182,9 @@ impl RuntimeState {
                 let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
                     return EventApplication::unchanged();
                 };
+                if !streamer.can_earn_channel_points() {
+                    return EventApplication::unchanged();
+                }
                 let event_key = format!("{earned}:{balance}:{}:{reason}", reason.len());
                 let current_state_key = format!("{event_key}:{}", streamer.channel_points);
                 if streamer
@@ -207,6 +210,9 @@ impl RuntimeState {
                 let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
                     return EventApplication::unchanged();
                 };
+                if !streamer.can_earn_channel_points() {
+                    return EventApplication::unchanged();
+                }
                 if !remember_mutation_id(&mut streamer.processed_claim_ids, claim_id) {
                     return EventApplication::unchanged();
                 }
@@ -270,9 +276,15 @@ impl RuntimeState {
                 winning_outcome_id,
             } => match kind {
                 PredictionChannelKind::EventCreated => {
+                    let can_earn = self
+                        .streamers
+                        .iter()
+                        .find(|streamer| streamer.channel_id == event.streamer.channel_id)
+                        .is_some_and(Streamer::can_earn_channel_points);
                     if event.event_id.is_empty()
                         || event.status != "ACTIVE"
                         || !event.streamer.settings.make_predictions
+                        || !can_earn
                         || !remember_mutation_id(
                             &mut self.processed_prediction_ids,
                             &event.event_id,
@@ -390,7 +402,7 @@ impl RuntimeState {
                 let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
                     return EventApplication::unchanged();
                 };
-                if !streamer.settings.community_goals {
+                if !streamer.settings.community_goals || !streamer.can_earn_channel_points() {
                     return EventApplication::unchanged();
                 }
                 match kind {
@@ -516,11 +528,15 @@ impl RuntimeState {
         let Some(streamer) = self.streamer_mut_by_channel_id(&update.channel_id) else {
             return Vec::new();
         };
-        streamer.apply_channel_points_context(
+        streamer.apply_channel_points_context_with_status(
+            update.channel_points_enabled,
             update.balance,
             &update.active_multipliers,
             &update.community_goals,
         );
+        if !streamer.can_earn_channel_points() {
+            return Vec::new();
+        }
         if streamer.settings.community_goals
             && streamer
                 .community_goals
@@ -648,6 +664,17 @@ impl RuntimeState {
                 self.remember_completed_prediction(event);
             }
         }
+    }
+
+    pub fn release_claim_bonus(&mut self, channel_id: &str, claim_id: &str) {
+        if let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) {
+            streamer.processed_claim_ids.retain(|id| id != claim_id);
+        }
+    }
+
+    pub fn release_prediction(&mut self, event_id: &str) {
+        self.predictions.remove(event_id);
+        self.processed_prediction_ids.retain(|id| id != event_id);
     }
 
     fn remember_completed_prediction(&mut self, mut event: PredictionEvent) {

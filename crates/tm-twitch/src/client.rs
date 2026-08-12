@@ -8,7 +8,7 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use time::format_description::well_known::Rfc2822;
 use time::OffsetDateTime;
-use tm_domain::Stream;
+use tm_domain::{Stream, MAX_PREDICTION_POINTS};
 
 use crate::contracts::{extract_build_id, extract_settings_script_url, extract_spade_url};
 use crate::cookies::{claim_bonus_cookie_header, is_twitch_cookie_url, merge_cookie_headers};
@@ -588,10 +588,13 @@ impl TwitchClient {
         outcome_id: &str,
         points: i64,
     ) -> Result<(), TwitchClientError> {
-        if event_id.trim().is_empty() || outcome_id.trim().is_empty() || points < 10 {
+        if event_id.trim().is_empty()
+            || outcome_id.trim().is_empty()
+            || !(10..=i64::from(MAX_PREDICTION_POINTS)).contains(&points)
+        {
             return Err(invalid_mutation(
                 "MakePrediction",
-                "event_id, outcome_id, and points >= 10 are required",
+                "event_id, outcome_id, and points must be between 10 and 250000",
             ));
         }
         let _: EmptyMutationData = self

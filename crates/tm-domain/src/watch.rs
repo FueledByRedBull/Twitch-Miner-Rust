@@ -175,7 +175,7 @@ pub fn pick_streamers_to_watch(
     let mut has_priority_game_streak = false;
 
     for (idx, streamer) in streamers.iter().enumerate() {
-        if !streamer.is_online {
+        if !streamer.is_online || !streamer.can_earn_channel_points() {
             continue;
         }
         if streamer
@@ -521,6 +521,29 @@ mod tests {
         assert!(!should_join_chat(IrcMode::Online, false));
         assert!(!should_join_chat(IrcMode::Offline, true));
         assert!(should_join_chat(IrcMode::Offline, false));
+    }
+
+    #[test]
+    fn watch_selection_excludes_only_confirmed_disabled_channels() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let make_streamer = |username: &str, enabled: Option<bool>, points_init: bool| Streamer {
+            username: username.to_string(),
+            is_online: true,
+            points_init,
+            channel_points_enabled: enabled,
+            stream: Some(Stream::default()),
+            ..Streamer::default()
+        };
+        let streamers = vec![
+            make_streamer("enabled", Some(true), true),
+            make_streamer("disabled", Some(false), true),
+            make_streamer("unknown", None, true),
+            make_streamer("pre-context", None, false),
+        ];
+
+        let selected = pick_streamers_to_watch(&streamers, &[WatchPriority::Order], &[], &[], now);
+
+        assert_eq!(selected, vec![0, 2, 3]);
     }
 
     #[test]

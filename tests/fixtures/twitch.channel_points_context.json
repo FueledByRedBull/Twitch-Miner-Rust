@@ -19,6 +19,7 @@
           }
         },
         "communityPointsSettings": {
+          "isEnabled": true,
           "goals": [
             {
               "id": "goal-1",

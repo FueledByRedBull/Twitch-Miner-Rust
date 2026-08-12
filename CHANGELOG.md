@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Tracks Twitch's optional channel-points-enabled marker. Confirmed-disabled
+  channels remain presence-monitored but cannot consume a credited watch slot
+  or trigger point-dependent work; an omitted marker remains compatible, and
+  a disabled channel without a balance no longer aborts startup.
+- Pairs each streamer's two independent initial identity/context reads after
+  one client-version warmup. Streamer ordering, mutations, presence checks, and
+  streak-cache writes remain sequential; a clean delayed-I/O benchmark measured
+  a 12.8%-13.8% median improvement for 17 streamers.
+- Enforces Twitch's documented `250000`-point per-viewer prediction maximum
+  in domain decisions and the mutation boundary. Explicit global or
+  per-streamer `bet.max_points` values above that limit now fail validation
+  with their exact configuration path; lower configured limits and the
+  serialized prediction shape remain unchanged.
 - Rejects unsupported prediction, filter, chat-presence, and watch-priority
   configuration values with their exact JSON paths before write-back, while
   preserving every accepted alias and empty-priority default. Container and

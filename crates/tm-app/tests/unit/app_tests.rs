@@ -35,8 +35,8 @@ mod tests {
     use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
     use crate::runtime_effects::{
-        evaluate_prediction, maybe_skip_prediction_for_balance, stealth_offset_from_entropy,
-        RuntimeEffectContext,
+        evaluate_prediction, handle_claim_bonus_effect, maybe_skip_prediction_for_balance,
+        stealth_offset_from_entropy, RuntimeEffectContext,
     };
     use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
     use crate::status::HealthTracker;
@@ -426,13 +426,50 @@ mod tests {
                                                 "activeMultipliers": []
                                             }
                                         },
-                                        "communityPointsSettings": {"goals": []}
+                                        "communityPointsSettings": {"isEnabled": true, "goals": []}
                                     }
                                 }
                             }
                         })
                         .to_string(),
                     )
+                };
+                stream.write_all(&response).unwrap();
+            }
+        });
+        (
+            TwitchEndpoints {
+                twitch_url: format!("http://{address}"),
+                gql_url: format!("http://{address}/gql"),
+                playback_url: format!("http://{address}/hls/"),
+            },
+            server,
+        )
+    }
+
+    fn spawn_disabled_points_server() -> (TwitchEndpoints, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                let response = if request.starts_with("GET / ") {
+                    http_response(
+                        "200 OK",
+                        r#"<!doctype html><script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#,
+                    )
+                } else if request.contains(r#""operationName":"GetIDFromLogin""#) {
+                    http_response("200 OK", r#"{"data":{"user":{"id":"100"}}}"#)
+                } else if request.contains(r#""operationName":"ChannelPointsContext""#) {
+                    http_response(
+                        "200 OK",
+                        r#"{"data":{"community":{"channel":{"self":{"communityPoints":null},"communityPointsSettings":{"isEnabled":false,"goals":[]}}}}}"#,
+                    )
+                } else if request.contains(r#""operationName":"WithIsStreamLiveQuery""#) {
+                    http_response("200 OK", r#"{"data":{"user":{"stream":null}}}"#)
+                } else {
+                    panic!("unexpected request: {request}");
                 };
                 stream.write_all(&response).unwrap();
             }
@@ -1235,6 +1272,42 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#)));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_keeps_confirmed_disabled_channel_without_point_work() {
+        let (endpoints, server) = spawn_disabled_points_server();
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let config = ConfigFile {
+            streamers: vec![String::from("disabled")],
+            ..ConfigFile::default()
+        };
+        let mut streak_cache = crate::streak_cache::StreakCache::default();
+
+        let state = bootstrap_runtime_state(
+            &config,
+            &twitch,
+            Some("user-1"),
+            ts(0),
+            &test_observability(),
+            &mut streak_cache,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(state.streamers.len(), 1);
+        assert_eq!(state.streamers[0].channel_points_enabled, Some(false));
+        assert_eq!(state.streamers[0].channel_points, 0);
+        assert!(!state.streamers[0].is_online);
     }
 
     #[tokio::test]
@@ -2685,6 +2758,49 @@ mod tests {
         for event_id in ["low-amount", "minimum-skip", "filter-skip"] {
             assert!(!snapshot.predictions.contains_key(event_id));
         }
+    }
+
+    #[tokio::test]
+    async fn delayed_point_effects_stop_after_channel_points_are_disabled() {
+        let disabled = Streamer {
+            username: String::from("disabled"),
+            channel_id: String::from("700"),
+            channel_points: 1_000,
+            channel_points_enabled: Some(false),
+            ..Streamer::default()
+        };
+        let (runtime, context) = prediction_effect_context(
+            vec![disabled.clone()],
+            vec![prediction_fixture("disabled-prediction", disabled.clone())],
+        );
+
+        evaluate_prediction(&context, "disabled-prediction")
+            .await
+            .unwrap();
+        handle_claim_bonus_effect(
+            &runtime,
+            &context.twitch,
+            "user-1",
+            "700",
+            "claim-1",
+            &context.observability,
+            &context.health,
+        )
+        .await
+        .unwrap();
+        send_minute_watched_for_streamer(
+            &runtime,
+            &context.twitch,
+            &tokio::sync::Mutex::new(HashMap::new()),
+            &disabled,
+            "user-1",
+            &context.observability,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert!(!snapshot.predictions.contains_key("disabled-prediction"));
     }
 
     #[tokio::test]

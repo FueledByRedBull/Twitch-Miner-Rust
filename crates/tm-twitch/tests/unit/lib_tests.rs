@@ -1269,6 +1269,14 @@ async fn mutation_inputs_fail_closed_before_network_io() {
             .make_prediction("event", "outcome", 9)
             .await
             .unwrap_err(),
+        client
+            .make_prediction(
+                "event",
+                "outcome",
+                i64::from(tm_domain::MAX_PREDICTION_POINTS) + 1,
+            )
+            .await
+            .unwrap_err(),
         client.claim_drop("").await.unwrap_err(),
         client
             .contribute_community_goal(0, "channel", "goal")
@@ -1464,6 +1472,7 @@ fn parses_channel_points_context_shape() {
                         }
                     },
                     "communityPointsSettings": {
+                        "isEnabled": true,
                         "goals": [{
                             "id": "goal-1",
                             "title": "Goal",
@@ -1480,6 +1489,7 @@ fn parses_channel_points_context_shape() {
     });
     let context = parse_channel_points_context(&payload).unwrap();
     assert_eq!(context.balance, 1234);
+    assert_eq!(context.channel_points_enabled, Some(true));
     assert_eq!(context.claim_id.as_deref(), Some("claim-1"));
     assert_eq!(context.active_multiplier_count, 2);
     assert_eq!(context.active_multipliers.len(), 2);
@@ -1758,6 +1768,7 @@ fn typed_context_fails_closed_on_missing_or_invalid_goal_financial_fields() {
     let context: types::GqlResponse<types::ChannelPointsData> =
         serde_json::from_value(protocol_fixture("twitch.channel_points_context.json")).unwrap();
     let context = channel_points_context_from_typed(context.data.unwrap()).unwrap();
+    assert_eq!(context.channel_points_enabled, Some(true));
     assert_eq!(context.community_goals[0].points_contributed, 5);
     assert_eq!(context.community_goals[0].amount_needed, 10);
 
@@ -1811,6 +1822,90 @@ fn typed_context_fails_closed_on_missing_or_invalid_goal_financial_fields() {
             "data.community.channel.communityPointsSettings.goals.pointsContributed"
         ))
     ));
+}
+
+#[test]
+fn channel_points_disabled_allows_missing_balance_without_becoming_creditable() {
+    let payload = serde_json::json!({
+        "data": {
+            "community": {
+                "channel": {
+                    "self": { "communityPoints": null },
+                    "communityPointsSettings": { "isEnabled": false, "goals": [] }
+                }
+            }
+        }
+    });
+    let typed: types::GqlResponse<types::ChannelPointsData> =
+        serde_json::from_value(payload.clone()).unwrap();
+    let context = channel_points_context_from_typed(typed.data.unwrap()).unwrap();
+    assert_eq!(context.balance, 0);
+    assert_eq!(context.channel_points_enabled, Some(false));
+    assert!(context.claim_id.is_none());
+    assert!(parse_channel_points_context(&payload)
+        .unwrap()
+        .channel_points_enabled
+        .is_some_and(|enabled| !enabled));
+}
+
+#[test]
+fn channel_points_enabled_unknown_is_preserved_and_malformed_is_rejected() {
+    let payload = serde_json::json!({
+        "data": {
+            "community": {
+                "channel": {
+                    "self": { "communityPoints": { "balance": 10 } },
+                    "communityPointsSettings": { "goals": [] }
+                }
+            }
+        }
+    });
+    let typed: types::GqlResponse<types::ChannelPointsData> =
+        serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(
+        channel_points_context_from_typed(typed.data.unwrap())
+            .unwrap()
+            .channel_points_enabled,
+        None
+    );
+
+    let mut null_marker = payload.clone();
+    null_marker["data"]["community"]["channel"]["communityPointsSettings"]["isEnabled"] =
+        serde_json::Value::Null;
+    assert_eq!(
+        parse_channel_points_context(&null_marker)
+            .unwrap()
+            .channel_points_enabled,
+        None
+    );
+    let null_typed: types::GqlResponse<types::ChannelPointsData> =
+        serde_json::from_value(null_marker).unwrap();
+    assert_eq!(
+        channel_points_context_from_typed(null_typed.data.unwrap())
+            .unwrap()
+            .channel_points_enabled,
+        None
+    );
+
+    let malformed = serde_json::json!({
+        "data": {
+            "community": {
+                "channel": {
+                    "self": { "communityPoints": { "balance": 10 } },
+                    "communityPointsSettings": { "isEnabled": "yes", "goals": [] }
+                }
+            }
+        }
+    });
+    assert!(matches!(
+        parse_channel_points_context(&malformed),
+        Err(TwitchClientError::InvalidField(
+            "data.community.channel.communityPointsSettings.isEnabled"
+        ))
+    ));
+    let malformed_typed: Result<types::GqlResponse<types::ChannelPointsData>, _> =
+        serde_json::from_value(malformed);
+    assert!(malformed_typed.is_err());
 }
 
 #[test]

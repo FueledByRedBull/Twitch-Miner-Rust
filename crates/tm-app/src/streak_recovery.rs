@@ -83,7 +83,8 @@ fn select_recovery_candidate(
             let stream = streamer.stream.as_ref()?;
             let offline_at = streamer.offline_at?;
             let age = (now - offline_at).whole_seconds();
-            let eligible = streamer.presence_known
+            let eligible = streamer.can_earn_channel_points()
+                && streamer.presence_known
                 && !streamer.is_online
                 && streamer.settings.watch_streak
                 && streamer.settings.watch_streak_vod_recovery
@@ -516,6 +517,14 @@ mod tests {
                 .map(|streamer| streamer.username),
             Some(String::from("newer"))
         );
+    }
+
+    #[test]
+    fn selection_ignores_channels_with_points_disabled() {
+        let now = ts(100_000);
+        let mut disabled = candidate("disabled", "broadcast-1", 99_000, 2);
+        disabled.channel_points_enabled = Some(false);
+        assert!(select_recovery_candidate(&[disabled], &HashMap::new(), now).is_none());
     }
 
     #[test]

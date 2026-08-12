@@ -62,6 +62,30 @@ binary layer and roughly 8 KB of `/data` directory metadata. Removing the
 non-root user, health command, writable-data path, or volume semantics to save
 that metadata is not an acceptable optimization.
 
+## Streamer bootstrap reads
+
+A one-time, Twitch-free delayed-I/O harness on clean revision `8e9491b2` tested
+the smallest concurrency change that preserves startup semantics: within each
+still-sequential streamer, pair only the independent channel-ID and initial
+channel-points-context reads. Claims, goal contributions, presence, stream
+metadata, streak recovery, cache writes, and streamer order stayed sequential.
+Five runs per case produced these medians:
+
+| Streamers | Per-request delay | Sequential | Paired reads | Reduction |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 5 ms | 42.04 ms | 36.55 ms | 13.1% |
+| 5 | 5 ms | 210.89 ms | 185.47 ms | 12.1% |
+| 17 | 5 ms | 721.02 ms | 628.88 ms | 12.8% |
+| 50 | 5 ms | 2,119.37 ms | 1,851.76 ms | 12.6% |
+| 17 | 20 ms | 2,506.04 ms | 2,158.96 ms | 13.8% |
+| 50 | 20 ms | 7,374.33 ms | 6,354.99 ms | 13.8% |
+
+The harness asserted identical final streamer state and request-kind counts.
+The deployed 17-streamer image took 26.4 seconds for full live bootstrap; that
+includes real Twitch latency and every ordered mutation/presence step, so it is
+not an apples-to-apples estimate of the isolated saving. The temporary harness
+was removed instead of becoming permanent benchmark surface.
+
 To sample resident memory and CPU for an already running local process, pass its
 PID and a workload label (for example, `idle`, `normal`, or `burst`):
 

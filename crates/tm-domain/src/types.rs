@@ -386,6 +386,10 @@ pub struct Streamer {
     pub watch_suspended_until: Option<OffsetDateTime>,
     pub stream: Option<Stream>,
     pub points_init: bool,
+    /// `None` means Twitch did not provide the optional capability marker.
+    /// Only an explicit `Some(false)` disables point work.
+    #[serde(default)]
+    pub channel_points_enabled: Option<bool>,
     pub active_multipliers: Vec<ActiveMultiplier>,
     pub last_raid_id: String,
     #[serde(skip)]
@@ -425,6 +429,21 @@ impl Streamer {
         active_multipliers: &[ActiveMultiplier],
         community_goals: &[CommunityGoal],
     ) {
+        self.apply_channel_points_context_with_status(
+            Some(true),
+            balance,
+            active_multipliers,
+            community_goals,
+        );
+    }
+
+    pub fn apply_channel_points_context_with_status(
+        &mut self,
+        channel_points_enabled: Option<bool>,
+        balance: i64,
+        active_multipliers: &[ActiveMultiplier],
+        community_goals: &[CommunityGoal],
+    ) {
         let balance = balance.max(0);
         if self.channel_points != balance {
             self.processed_point_event_keys.clear();
@@ -438,7 +457,13 @@ impl Streamer {
             .cloned()
             .map(|goal| (goal.id.clone(), goal))
             .collect();
+        self.channel_points_enabled = channel_points_enabled;
         self.points_init = true;
+    }
+
+    #[must_use]
+    pub fn can_earn_channel_points(&self) -> bool {
+        self.channel_points_enabled != Some(false)
     }
 }
 

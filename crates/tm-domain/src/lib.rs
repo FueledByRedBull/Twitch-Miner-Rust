@@ -19,6 +19,7 @@ pub use formatting::{
 };
 pub use prediction::{
     select_outcome, PredictionDecision, PredictionEvent, PredictionOutcome, PredictionSettlement,
+    MAX_PREDICTION_POINTS,
 };
 pub use time::OffsetDateTime;
 pub use types::{

@@ -357,4 +357,26 @@ impl RuntimeHandle {
         self.notify_state_change();
         Ok(())
     }
+
+    pub async fn release_claim_bonus(
+        &self,
+        channel_id: impl Into<String>,
+        claim_id: impl Into<String>,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let mut state = self.lock_open("ReleaseClaimBonus").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        state.release_claim_bonus(&channel_id.into(), &claim_id.into());
+        self.notify_state_change();
+        Ok(())
+    }
+
+    pub async fn release_prediction(&self, event_id: impl Into<String>) -> Result<()> {
+        let started = Instant::now();
+        let mut state = self.lock_open("ReleasePrediction").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        state.release_prediction(&event_id.into());
+        self.notify_state_change();
+        Ok(())
+    }
 }

@@ -111,6 +111,14 @@ fn validation_rejects_unsafe_prediction_bet_values() {
     ));
 
     config.bet.filter_condition = None;
+    config.bet.max_points = Some(tm_domain::MAX_PREDICTION_POINTS + 1);
+    assert!(matches!(
+        validate_config(&config),
+        Err(ConfigError::Validation(message))
+            if message.contains("config.bet.max_points") && message.contains("250000")
+    ));
+
+    config.bet.max_points = None;
     config.streamer_overrides.insert(
         String::from("alice"),
         StreamerSettingsOverride {
@@ -126,6 +134,43 @@ fn validation_rejects_unsafe_prediction_bet_values() {
         Err(ConfigError::Validation(message))
             if message.contains("config.streamer_overrides.alice.bet.percentage_gap")
     ));
+}
+
+#[test]
+fn load_rejects_prediction_maximum_without_rewriting() {
+    for (path_fragment, value) in [
+        (
+            "config.bet.max_points",
+            serde_json::json!({
+                "username": "Alice",
+                "bet": {"max_points": tm_domain::MAX_PREDICTION_POINTS + 1}
+            }),
+        ),
+        (
+            "config.streamer_overrides.alice.bet.max_points",
+            serde_json::json!({
+                "username": "Alice",
+                "streamer_overrides": {
+                    "alice": {"bet": {"max_points": tm_domain::MAX_PREDICTION_POINTS + 1}}
+                }
+            }),
+        ),
+    ] {
+        let dir = unique_temp_dir("prediction-max");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let original = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let error = preview_config(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(message)
+                if message.contains(path_fragment) && message.contains("250000")
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!config_backup_path(&path).exists());
+    }
 }
 
 #[test]

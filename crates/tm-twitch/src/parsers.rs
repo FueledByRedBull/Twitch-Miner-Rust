@@ -47,9 +47,19 @@ pub fn parse_channel_points_context(
     let channel = payload
         .pointer("/data/community/channel")
         .ok_or(TwitchClientError::MissingField("data.community.channel"))?;
+    let channel_points_enabled = match channel.pointer("/communityPointsSettings/isEnabled") {
+        Some(serde_json::Value::Bool(value)) => Some(*value),
+        Some(serde_json::Value::Null) | None => None,
+        Some(_) => {
+            return Err(TwitchClientError::InvalidField(
+                "data.community.channel.communityPointsSettings.isEnabled",
+            ));
+        }
+    };
     let balance = channel
         .pointer("/self/communityPoints/balance")
         .and_then(serde_json::Value::as_i64)
+        .or_else(|| (channel_points_enabled == Some(false)).then_some(0))
         .ok_or(TwitchClientError::MissingField(
             "data.community.channel.self.communityPoints.balance",
         ))?;
@@ -80,6 +90,7 @@ pub fn parse_channel_points_context(
 
     Ok(ChannelPointsContext {
         balance,
+        channel_points_enabled,
         claim_id,
         active_multiplier_count,
         active_multipliers,
