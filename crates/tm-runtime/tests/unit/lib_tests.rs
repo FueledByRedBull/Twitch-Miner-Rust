@@ -622,6 +622,7 @@ fn context_update_emits_goal_contribution_effect_for_active_goals() {
 
     let effects = state.apply_context_update(&ContextUpdate {
         channel_id: "123".into(),
+        channel_points_enabled: Some(true),
         balance: 500,
         active_multipliers: Vec::new(),
         community_goals: vec![CommunityGoal {
@@ -988,6 +989,106 @@ fn duplicate_points_event_does_not_double_balance_or_history() {
 }
 
 #[test]
+fn disabled_channel_ignores_point_events_and_goal_effects() {
+    let config = ConfigFile {
+        streamers: vec![String::from("disabled")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    let streamer = &mut state.streamers[0];
+    streamer.channel_id = String::from("100");
+    streamer.points_init = true;
+    streamer.channel_points_enabled = Some(false);
+    streamer.settings.community_goals = true;
+
+    let points = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: 50,
+        reason: String::from("WATCH"),
+        balance: 50,
+    };
+    assert!(!state.apply_event_with_outcome(&points, ts(1)).changed);
+    assert_eq!(state.streamers[0].channel_points, 0);
+    assert!(state
+        .apply_context_update(&ContextUpdate {
+            channel_id: String::from("100"),
+            channel_points_enabled: Some(false),
+            balance: 0,
+            active_multipliers: Vec::new(),
+            community_goals: vec![CommunityGoal {
+                id: String::from("goal"),
+                title: String::from("Goal"),
+                is_in_stock: true,
+                points_contributed: 0,
+                amount_needed: 100,
+                per_stream_user_maximum_contribution: 50,
+                status: String::from("STARTED"),
+            }],
+        })
+        .is_empty());
+}
+
+#[test]
+fn skipped_point_effects_can_be_retried_after_channel_reenable() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points_enabled = Some(true);
+    state.streamers[0].settings.make_predictions = true;
+    let claim = MinerEvent::ClaimAvailable {
+        channel_id: String::from("100"),
+        claim_id: String::from("claim-1"),
+    };
+    let prediction = MinerEvent::PredictionChannel {
+        kind: PredictionChannelKind::EventCreated,
+        event: Box::new(PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: String::from("prediction-1"),
+            title: String::from("Prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: vec![PredictionOutcome {
+                id: String::from("outcome-1").into(),
+                title: String::from("Outcome"),
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        }),
+        winning_outcome_id: None,
+    };
+
+    assert_eq!(state.apply_event(&claim, ts(1)).len(), 1);
+    assert_eq!(state.apply_event(&prediction, ts(1)).len(), 1);
+    state.apply_context_update(&ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(false),
+        balance: 0,
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    });
+    state.release_claim_bonus("100", "claim-1");
+    state.release_prediction("prediction-1");
+    state.apply_context_update(&ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(true),
+        balance: 100,
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    });
+
+    assert_eq!(state.apply_event(&claim, ts(2)).len(), 1);
+    assert_eq!(state.apply_event(&prediction, ts(2)).len(), 1);
+}
+
+#[test]
 fn points_replay_dedupe_property_tracks_post_application_balance() {
     for earned in [1, 12, 50, 1_000, i64::from(u32::MAX)] {
         for starting_balance in [0, 100, 1_000_000] {
@@ -1261,6 +1362,21 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
     state
         .predictions
         .insert(active.event_id.clone(), active.clone());
+    state.apply_context_update(&ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(false),
+        balance: 0,
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    });
+    assert!(state.predictions.contains_key("prediction-1"));
+    state.apply_context_update(&ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(true),
+        balance: 100,
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    });
     let mut resolved = active;
     resolved.status = String::from("RESOLVED");
     resolved.outcomes.clear();

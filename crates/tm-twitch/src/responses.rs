@@ -130,26 +130,36 @@ pub(crate) fn channel_points_context_from_typed(
         .ok_or(TwitchClientError::MissingField("data.community"))?
         .channel
         .ok_or(TwitchClientError::MissingField("data.community.channel"))?;
-    let points = channel
-        .self_data
+    let crate::types::ChannelPointsChannel {
+        self_data,
+        settings,
+    } = channel;
+    let channel_points_enabled = settings.as_ref().and_then(|settings| settings.is_enabled);
+    let points = self_data
+        .as_ref()
+        .and_then(|self_data| self_data.points.as_ref());
+    let balance = points
+        .and_then(|points| points.balance)
+        .or_else(|| (channel_points_enabled == Some(false)).then_some(0))
         .ok_or(TwitchClientError::MissingField(
-            "data.community.channel.self",
-        ))?
-        .points
-        .ok_or(TwitchClientError::MissingField(
-            "data.community.channel.self.communityPoints",
+            "data.community.channel.self.communityPoints.balance",
         ))?;
-    let balance = points.balance.ok_or(TwitchClientError::MissingField(
-        "data.community.channel.self.communityPoints.balance",
-    ))?;
-    let claim_id = points.available_claim.and_then(|claim| claim.id);
-    let active_multipliers = points.active_multipliers;
-    let community_goals = channel
-        .settings
+    let claim_id = points.and_then(|points| {
+        points
+            .available_claim
+            .as_ref()
+            .and_then(|claim| claim.id.clone())
+    });
+    let active_multipliers = points
+        .map(|points| points.active_multipliers.clone())
+        .unwrap_or_default();
+    let community_goals = settings
+        .filter(|_| channel_points_enabled != Some(false))
         .map(|settings| {
             settings
                 .goals
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|goal| {
                     let id = goal.id.filter(|id| !id.trim().is_empty()).ok_or(
                         TwitchClientError::MissingField(
@@ -203,6 +213,7 @@ pub(crate) fn channel_points_context_from_typed(
 
     Ok(ChannelPointsContext {
         balance,
+        channel_points_enabled,
         claim_id,
         active_multiplier_count: active_multipliers.len(),
         active_multipliers,

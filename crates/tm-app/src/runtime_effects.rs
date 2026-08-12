@@ -148,13 +148,17 @@ pub(crate) async fn handle_claim_bonus_effect(
     observability: &AppObservability,
     health: &HealthTracker,
 ) -> Result<()> {
+    let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
+        return Ok(());
+    };
+    if !streamer.can_earn_channel_points() {
+        runtime.release_claim_bonus(channel_id, claim_id).await?;
+        return Ok(());
+    }
     twitch
         .claim_bonus(channel_id, claim_id, Some(persistent_user_id))
         .await?;
     health.record_claim();
-    let Some(streamer) = runtime_streamer_by_channel_id(runtime, channel_id).await? else {
-        return Ok(());
-    };
     if observability.show_claimed_bonus {
         let message = observability.bonus_claim_message(&streamer, false);
         tracing::info!(operation = "claim_bonus", "{message}");
@@ -427,6 +431,15 @@ pub(crate) async fn maybe_skip_prediction_for_status(
     streamer: &Streamer,
     observability: &AppObservability,
 ) -> Result<bool> {
+    if !streamer.can_earn_channel_points() {
+        tracing::info!(
+            event_id = %event_id,
+            "skip prediction: channel points disabled for {}",
+            observability.streamer_name(streamer)
+        );
+        runtime.release_prediction(event_id).await?;
+        return Ok(true);
+    }
     if event.status == "ACTIVE" {
         return Ok(false);
     }

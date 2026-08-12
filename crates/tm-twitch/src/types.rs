@@ -159,6 +159,9 @@ pub struct GqlRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChannelPointsContext {
     pub balance: i64,
+    /// `Some(false)` means the channel cannot earn points. `None` means Twitch
+    /// omitted this optional capability marker and is retained as unknown.
+    pub channel_points_enabled: Option<bool>,
     pub claim_id: Option<String>,
     pub active_multiplier_count: usize,
     pub active_multipliers: Vec<ActiveMultiplier>,
@@ -287,6 +290,8 @@ pub(crate) struct AvailableClaim {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CommunityPointsSettings {
+    #[serde(rename = "isEnabled", default)]
+    pub(crate) is_enabled: Option<bool>,
     #[serde(default)]
     pub(crate) goals: Vec<ProtocolCommunityGoal>,
 }

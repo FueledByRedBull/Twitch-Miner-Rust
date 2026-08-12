@@ -45,6 +45,14 @@ baseline retains the retired hash for an operation it does not issue.
 | `DropsPage_ClaimDropRewards` | Mutation |
 | `ContributeCommunityPointsCommunityGoal` | Mutation |
 
+`ChannelPointsContext` also reads Twitch's optional
+`communityPointsSettings.isEnabled` marker. An explicit `false` makes the
+channel ineligible for credited watch slots and point-dependent actions while
+presence monitoring continues. Missing remains unknown/compatible because the
+private response does not always include the marker; explicit `null` has the
+same unknown meaning, while any other non-boolean value is a typed protocol
+error.
+
 Twitch can replace undocumented persisted-query contracts at any time. Before
 each release, run the credential-safe canary on a dedicated account:
 

@@ -36,6 +36,7 @@ pub struct RuntimeState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextUpdate {
     pub channel_id: String,
+    pub channel_points_enabled: Option<bool>,
     pub balance: i64,
     pub active_multipliers: Vec<ActiveMultiplier>,
     pub community_goals: Vec<CommunityGoal>,

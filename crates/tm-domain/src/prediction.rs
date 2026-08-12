@@ -11,6 +11,10 @@ use crate::types::{BetSettings, Condition, OutcomeKey, Strategy, Streamer};
 const MIN_STEALTH_OFFSET: u8 = 1;
 const MAX_STEALTH_OFFSET: u8 = 5;
 
+/// Twitch's documented maximum number of Channel Points a viewer may stake in
+/// one prediction.
+pub const MAX_PREDICTION_POINTS: u32 = 250_000;
+
 fn safe_duration_from_seconds(seconds: f64) -> std::time::Duration {
     if !seconds.is_finite() || seconds <= 0.0 {
         return std::time::Duration::ZERO;
@@ -139,7 +143,7 @@ impl PredictionEvent {
         if let Some(max_points) = settings.max_points {
             amount = amount.min(i64::from(max_points));
         }
-        amount = amount.min(balance);
+        amount = amount.min(balance).min(i64::from(MAX_PREDICTION_POINTS));
 
         let minimum = settings
             .max_points
@@ -155,6 +159,10 @@ impl PredictionEvent {
                 amount = top_points.saturating_sub(offset).max(effective_minimum);
             }
         }
+
+        // Keep the platform cap after the stealth adjustment as a final
+        // invariant for decisions constructed from unvalidated state.
+        amount = amount.min(i64::from(MAX_PREDICTION_POINTS));
 
         let decision = PredictionDecision {
             choice: Some(choice),
@@ -873,6 +881,38 @@ mod tests {
 
         event.streamer.settings.bet.max_points = Some(8);
         assert_eq!(event.decide_with_stealth_offset(5, 5).amount, 5);
+    }
+
+    #[test]
+    fn decision_never_exceeds_twitch_prediction_maximum() {
+        let mut event = PredictionEvent {
+            streamer: Streamer::default(),
+            event_id: String::new(),
+            title: String::new(),
+            status: String::from("ACTIVE"),
+            created_at: datetime!(2026-03-27 06:00 UTC),
+            window_seconds: 10.0,
+            outcomes: vec![PredictionOutcome {
+                id: Arc::from("a"),
+                total_users: 1,
+                ..PredictionOutcome::default()
+            }],
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        };
+        event.streamer.settings.bet.percentage = Some(100);
+        event.streamer.settings.bet.max_points = Some(u32::MAX);
+
+        let decision = event.decide(i64::MAX);
+
+        assert_eq!(
+            decision.amount,
+            i64::from(MAX_PREDICTION_POINTS),
+            "a decision must remain within Twitch's platform maximum"
+        );
     }
 
     #[test]

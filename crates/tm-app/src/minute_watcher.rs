@@ -474,6 +474,9 @@ pub(crate) async fn send_minute_watched_for_streamer(
     user_id: &str,
     observability: &AppObservability,
 ) -> Result<()> {
+    if !streamer.can_earn_channel_points() {
+        return Ok(());
+    }
     let now = time_now();
     let streamer = match watch_metadata_defect(streamer, now) {
         None => streamer.clone(),

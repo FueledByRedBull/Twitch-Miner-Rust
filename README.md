@@ -132,7 +132,11 @@ Notes:
 
 - Remove `password` from older configs if it is still present; device-code login does not use it and startup will reject a non-empty value.
 - `disable_ssl_cert_verification` is intentionally unsupported and will be rejected at startup/config validation.
-- Prediction bet percentages must be `0`-`100`; delays must be finite and non-negative, and `PERCENTAGE` delay mode accepts `0`-`1`. Invalid values are rejected before runtime.
+- Prediction bet percentages must be `0`-`100`; each stake is bounded by
+  Twitch's `10`-point minimum and `250000`-point per-viewer maximum, and an
+  explicit `bet.max_points` above that maximum is rejected. Delays must be
+  finite and non-negative, and `PERCENTAGE` delay mode accepts `0`-`1`.
+  Invalid values are rejected before runtime.
 - `farm_drops` controls campaign discovery, `DROPS` priority, and drop-shaped
   minute-watch metadata. `claim_drops` independently controls claim mutations.
   `watch_one_stream_when_drops_active` limits the watch set to one deterministic

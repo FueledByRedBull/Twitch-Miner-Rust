@@ -43,6 +43,12 @@ pub(crate) async fn bootstrap_runtime_state(
         "{}",
         observability.loading_streamers_message(state.streamers.len())
     );
+    if !state.streamers.is_empty() {
+        twitch
+            .update_client_version()
+            .await
+            .context("load Twitch client version")?;
+    }
 
     for streamer in &mut state.streamers {
         bootstrap_streamer(
@@ -80,7 +86,23 @@ pub(crate) async fn bootstrap_streamer(
     observability: &AppObservability,
     streak_cache: &mut StreakCache,
 ) -> Result<()> {
-    bootstrap_channel_context(streamer, twitch, user_id, observability).await?;
+    let username = &streamer.username;
+    let (channel_id, context) = tokio::try_join!(
+        async {
+            twitch
+                .fetch_channel_id(username)
+                .await
+                .with_context(|| format!("load channel id for {username}"))
+        },
+        async {
+            twitch
+                .fetch_channel_points_context(username)
+                .await
+                .with_context(|| format!("load channel points context for {username}"))
+        }
+    )?;
+    streamer.channel_id = channel_id;
+    bootstrap_channel_context(streamer, twitch, user_id, observability, context).await?;
     bootstrap_presence(streamer, twitch, started_at, observability, streak_cache).await
 }
 
@@ -89,33 +111,29 @@ async fn bootstrap_channel_context(
     twitch: &TwitchClient,
     user_id: Option<&str>,
     observability: &AppObservability,
+    mut context: tm_twitch::ChannelPointsContext,
 ) -> Result<()> {
-    streamer.channel_id = twitch
-        .fetch_channel_id(&streamer.username)
-        .await
-        .with_context(|| format!("load channel id for {}", streamer.username))?;
-
-    let mut context = twitch
-        .fetch_channel_points_context(&streamer.username)
-        .await
-        .with_context(|| format!("load channel points context for {}", streamer.username))?;
     apply_context_to_streamer(streamer, &context);
 
-    if let Some(claim_id) = context.claim_id.as_deref() {
-        twitch
-            .claim_bonus(&streamer.channel_id, claim_id, user_id)
-            .await
-            .with_context(|| format!("claim startup bonus for {}", streamer.username))?;
-        if observability.show_claimed_bonus {
-            let message = observability.bonus_claim_message(streamer, true);
-            tracing::info!(operation = "claim_bonus", "{message}");
-            observability.spawn_event(DiscordEvent::BonusClaim, message);
+    if streamer.can_earn_channel_points() {
+        if let Some(claim_id) = context.claim_id.as_deref() {
+            twitch
+                .claim_bonus(&streamer.channel_id, claim_id, user_id)
+                .await
+                .with_context(|| format!("claim startup bonus for {}", streamer.username))?;
+            if observability.show_claimed_bonus {
+                let message = observability.bonus_claim_message(streamer, true);
+                tracing::info!(operation = "claim_bonus", "{message}");
+                observability.spawn_event(DiscordEvent::BonusClaim, message);
+            }
+            context = twitch
+                .fetch_channel_points_context(&streamer.username)
+                .await
+                .with_context(|| {
+                    format!("refresh claimed bonus context for {}", streamer.username)
+                })?;
+            apply_context_to_streamer(streamer, &context);
         }
-        context = twitch
-            .fetch_channel_points_context(&streamer.username)
-            .await
-            .with_context(|| format!("refresh claimed bonus context for {}", streamer.username))?;
-        apply_context_to_streamer(streamer, &context);
     }
 
     if contribute_streamer_community_goals(twitch, streamer).await? {
@@ -170,6 +188,7 @@ async fn bootstrap_online_stream(
         .fetch_stream_info(&streamer.username)
         .await
         .with_context(|| format!("load stream info for {}", streamer.username))?;
+    let recover_watch_streak = streamer.settings.watch_streak && streamer.can_earn_channel_points();
     let stream = streamer
         .stream
         .get_or_insert_with(tm_domain::Stream::default);
@@ -184,7 +203,7 @@ async fn bootstrap_online_stream(
         tm_twitch::DROP_ID,
         started_at,
     );
-    if streamer.settings.watch_streak {
+    if recover_watch_streak {
         reconcile_startup_watch_streak(
             twitch,
             &streamer.channel_id,

@@ -52,7 +52,8 @@ pub(crate) fn apply_context_to_streamer(
     streamer: &mut Streamer,
     context: &tm_twitch::ChannelPointsContext,
 ) {
-    streamer.apply_channel_points_context(
+    streamer.apply_channel_points_context_with_status(
+        context.channel_points_enabled,
         context.balance,
         &context.active_multipliers,
         &context.community_goals,
@@ -63,7 +64,7 @@ pub(crate) async fn contribute_streamer_community_goals(
     twitch: &TwitchClient,
     streamer: &Streamer,
 ) -> Result<bool> {
-    if !streamer.settings.community_goals {
+    if !streamer.settings.community_goals || !streamer.can_earn_channel_points() {
         return Ok(false);
     }
     let contributions = load_goal_contributions(twitch, &streamer.username).await?;
@@ -218,20 +219,23 @@ pub(crate) async fn refresh_streamer_context(
     streamer: &Streamer,
 ) -> Result<Vec<tm_runtime::RuntimeEffect>> {
     let context = fetch_streamer_context(twitch, streamer).await?;
+    let points_enabled = context.channel_points_enabled;
     let claim_id = context.claim_id.clone();
     let mut effects = apply_runtime_context(runtime, streamer, context).await?;
-    if let Some(claim_id) = claim_id {
-        effects.extend(
-            runtime
-                .apply_event(
-                    tm_runtime::MinerEvent::ClaimAvailable {
-                        channel_id: streamer.channel_id.clone(),
-                        claim_id,
-                    },
-                    time_now(),
-                )
-                .await?,
-        );
+    if points_enabled != Some(false) {
+        if let Some(claim_id) = claim_id {
+            effects.extend(
+                runtime
+                    .apply_event(
+                        tm_runtime::MinerEvent::ClaimAvailable {
+                            channel_id: streamer.channel_id.clone(),
+                            claim_id,
+                        },
+                        time_now(),
+                    )
+                    .await?,
+            );
+        }
     }
     Ok(effects)
 }
@@ -254,6 +258,7 @@ pub(crate) async fn apply_runtime_context(
     Ok(runtime
         .apply_context_update(tm_runtime::ContextUpdate {
             channel_id: streamer.channel_id.clone(),
+            channel_points_enabled: context.channel_points_enabled,
             balance: context.balance,
             active_multipliers: context.active_multipliers,
             community_goals: context.community_goals,
