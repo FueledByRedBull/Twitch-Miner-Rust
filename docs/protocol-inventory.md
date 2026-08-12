@@ -123,9 +123,11 @@ one refresh interval before the event transports or the next refresh clear it.
 Refresh failures are reported as one `metadata-refresh` task failure per cycle.
 No response payload, token, or cookie is logged.
 
-Playback priming deliberately remains uncached. The scheduler gives one
-selected channel a 20-second interval; with the normal two slots it serializes
-the sends 10 seconds apart, so each channel is revisited about every 20 seconds.
+Playback priming deliberately remains uncached. The scheduler gives each
+selected channel a nominal 20-second interval; with the normal two slots it
+serializes the sends 10 seconds apart. Because the interval sleep begins after
+each request finishes, a channel is revisited after both selected requests plus
+the two nominal sleeps (about 20 seconds when requests are short).
 Every successful tick therefore performs one `PlaybackAccessToken` GQL request,
 one master-playlist GET, one selected media-playlist GET, and one media-segment
 HEAD before the spade POST. A regression test calls the primer twice and proves

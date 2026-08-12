@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tempfile::tempdir;
-use tm_config::load_or_create_config;
+use tm_config::{load_or_create_config, preview_config};
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -118,4 +118,146 @@ fn non_object_top_level_fixture_is_rejected_without_write_back() {
     let error = load_or_create_config(&target).unwrap_err();
     assert!(matches!(error, tm_config::ConfigError::InvalidConfig(_)));
     assert_eq!(fs::read_to_string(&target).unwrap(), "null");
+}
+
+#[test]
+fn invalid_enum_values_are_rejected_without_write_or_backup() {
+    let cases = [
+        (
+            "config.bet.strategy",
+            serde_json::json!({"username": "tester", "bet": {"strategy": "INVALID"}}),
+        ),
+        (
+            "config.bet.delay_mode",
+            serde_json::json!({"username": "tester", "bet": {"delay_mode": "INVALID"}}),
+        ),
+        (
+            "config.bet.filter_condition.by",
+            serde_json::json!({
+                "username": "tester",
+                "bet": {"filter_condition": {"by": "INVALID"}}
+            }),
+        ),
+        (
+            "config.bet.filter_condition.where",
+            serde_json::json!({
+                "username": "tester",
+                "bet": {"filter_condition": {"where": "INVALID"}}
+            }),
+        ),
+        (
+            "config.chat_presence",
+            serde_json::json!({"username": "tester", "chat_presence": "INVALID"}),
+        ),
+        (
+            "config.watch_priority[1]",
+            serde_json::json!({
+                "username": "tester",
+                "watch_priority": ["ORDER", "INVALID"]
+            }),
+        ),
+        (
+            "config.streamer_overrides.alice.bet.strategy",
+            serde_json::json!({
+                "username": "tester",
+                "streamer_overrides": {"alice": {"bet": {"strategy": "INVALID"}}}
+            }),
+        ),
+        (
+            "config.streamer_overrides.alice.bet.delay_mode",
+            serde_json::json!({
+                "username": "tester",
+                "streamer_overrides": {"alice": {"bet": {"delay_mode": "INVALID"}}}
+            }),
+        ),
+        (
+            "config.streamer_overrides.alice.bet.filter_condition.by",
+            serde_json::json!({
+                "username": "tester",
+                "streamer_overrides": {
+                    "alice": {"bet": {"filter_condition": {"by": "INVALID"}}}
+                }
+            }),
+        ),
+        (
+            "config.streamer_overrides.alice.bet.filter_condition.where",
+            serde_json::json!({
+                "username": "tester",
+                "streamer_overrides": {
+                    "alice": {"bet": {"filter_condition": {"where": "INVALID"}}}
+                }
+            }),
+        ),
+        (
+            "config.streamer_overrides.alice.chat_presence",
+            serde_json::json!({
+                "username": "tester",
+                "streamer_overrides": {"alice": {"chat_presence": "INVALID"}}
+            }),
+        ),
+    ];
+
+    for (index, (path, value)) in cases.into_iter().enumerate() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config.json");
+        let original = serde_json::to_vec(&value).unwrap();
+        fs::write(&target, &original).unwrap();
+
+        let error = if index % 2 == 0 {
+            preview_config(&target).unwrap_err()
+        } else {
+            load_or_create_config(&target).unwrap_err()
+        };
+        assert!(matches!(
+            error,
+            tm_config::ConfigError::Validation(message)
+            if message.contains(path) && message.contains("\"INVALID\"")
+        ));
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert!(!target.with_extension("json.bak").exists());
+    }
+}
+
+#[test]
+fn empty_watch_priority_keeps_default_behavior() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    fs::write(
+        &target,
+        serde_json::json!({"username": "tester", "watch_priority": []}).to_string(),
+    )
+    .unwrap();
+
+    let config = load_or_create_config(&target).unwrap();
+    assert!(config.watch_priority.is_empty());
+}
+
+#[test]
+fn every_supported_watch_priority_alias_passes_loader_validation() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("config.json");
+    let priorities = [
+        "ORDER",
+        "STREAK",
+        "DROPS",
+        "SUBSCRIBED",
+        "SUBS",
+        "MULTIPLIER",
+        "POINTS_ASC",
+        "POINTS_ASCENDING",
+        "POINTS_DESC",
+        "POINTS_DESCENDING",
+        "LONGEST_STREAK",
+        "STREAK_LONGEST",
+        "EXPIRING_STREAK",
+        "STREAK_EXPIRING",
+    ];
+    fs::write(
+        &target,
+        serde_json::json!({"username": "tester", "watch_priority": priorities}).to_string(),
+    )
+    .unwrap();
+
+    let config = load_or_create_config(&target).unwrap();
+    assert_eq!(config.watch_priority, priorities);
 }

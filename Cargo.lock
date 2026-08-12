@@ -1617,7 +1617,6 @@ dependencies = [
  "tm-domain",
  "tm-pubsub",
  "tokio",
- "tracing",
 ]
 
 [[package]]
