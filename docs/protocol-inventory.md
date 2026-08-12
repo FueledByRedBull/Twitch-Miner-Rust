@@ -69,6 +69,26 @@ notifications. Record the source revision, image digest, date, and success or
 failure class in the release notes; never record cookies, account IDs, raw
 payloads, or request headers.
 
+For a credential-free, on-demand hash check, probe the inventoried hashes
+without starting the miner:
+
+```sh
+cargo run -p tm-twitch --example apq_probe --locked
+cargo run -p tm-twitch --example apq_probe --locked -- --operation PlaybackAccessToken
+```
+
+The probe sends only the public Client-ID, operation name, and persisted-query
+hash; it sends no authorization, cookies, variables, query text, or mutation
+input. Mutation rows are labeled `MUTATION-HASH`: the probe provides neither
+authorization nor mutation input and is not an account-action request.
+`REGISTERED` means HTTP 200 with a valid
+JSON response that is not a persisted query error. `BROKEN` is reserved for an
+explicit `PersistedQueryNotFound`. Transport failures, non-200 responses,
+invalid JSON, and `PersistedQueryNotSupported` are `INCONCLUSIVE`. This is
+diagnostic evidence, not a release gate or automatic hash-refresh mechanism;
+`REGISTERED` does not prove that an operation would execute with credentials or
+valid variables.
+
 Every request target that Twitch supplies inside a document rather than one the
 miner compiles in is checked before use: the settings script, playback master
 playlist, selected media playlist, newest complete media segment, and the spade
@@ -175,9 +195,13 @@ Message and subscription types this build does not model are ignored rather
 than treated as protocol violations, so an additive Twitch change cannot force a
 reconnect loop that shrinks the subscription set on each cycle; a payload for a
 subscription type the miner does act on still fails closed. A session inherited
-through a reconnect keeps its subscriptions, and its active count is re-derived
-from Twitch for the new session ID rather than carried over from the previous
-session's report.
+through a reconnect keeps its subscriptions. The supplied URL must use `wss`,
+the exact `eventsub.wss.twitch.tv` host, no user information, the default/443
+port, and no fragment; its opaque path and query are then used unchanged. The
+old socket continues delivering through the overlap until the replacement sends
+Welcome, no duplicate subscription POSTs are made, and the active count is
+re-derived from Twitch for the new session ID rather than carried over from the
+previous session's report.
 
 The isolated PubSub compatibility path connects to
 `wss://pubsub-edge.twitch.tv/v1`. It supplies viewer prediction discovery and

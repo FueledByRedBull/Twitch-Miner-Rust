@@ -465,6 +465,15 @@ impl Streamer {
     pub fn can_earn_channel_points(&self) -> bool {
         self.channel_points_enabled != Some(false)
     }
+
+    #[must_use]
+    pub fn can_watch_drop_campaign(&self) -> bool {
+        self.settings.farm_drops
+            && self
+                .stream
+                .as_ref()
+                .is_some_and(Stream::has_active_drop_campaign)
+    }
 }
 
 #[cfg(test)]

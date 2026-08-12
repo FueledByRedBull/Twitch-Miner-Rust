@@ -5,9 +5,9 @@ use std::sync::{
 
 use super::{
     event_from_notification, listen_socket, parse_eventsub_message,
-    subscription_plan_with_capacity, subscription_requests, EventSubClient, EventSubClientSettings,
-    EventSubConnectionEvent, EventSubDeadlines, EventSubError, EventSubMessage,
-    EventSubTimeoutStage, MessageDeduper, EVENTSUB_WEBSOCKET_URL,
+    subscription_plan_with_capacity, subscription_requests, validate_reconnect_url, EventSubClient,
+    EventSubClientSettings, EventSubConnectionEvent, EventSubDeadlines, EventSubError,
+    EventSubMessage, EventSubTimeoutStage, MessageDeduper, EVENTSUB_WEBSOCKET_URL,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -37,6 +37,28 @@ fn default_websocket_url_requests_setup_safe_keepalive_window() {
         EVENTSUB_WEBSOCKET_URL,
         "wss://eventsub.wss.twitch.tv/ws?keepalive_timeout_seconds=30"
     );
+}
+
+#[test]
+fn reconnect_url_validation_keeps_twitch_endpoint_and_opaque_query() {
+    for url in [
+        "wss://eventsub.wss.twitch.tv/ws?opaque=1%2F2",
+        "wss://EVENTSUB.WSS.TWITCH.TV/",
+        "wss://eventsub.wss.twitch.tv:443/ws?keepalive_timeout_seconds=30",
+        "wss://eventsub.wss.twitch.tv/opaque/reconnect?token=a%2Fb",
+    ] {
+        assert!(validate_reconnect_url(url).is_ok(), "{url}");
+    }
+    for url in [
+        "ws://eventsub.wss.twitch.tv/ws",
+        "wss://example.test/ws",
+        "wss://user:eventsub.wss.twitch.tv/ws",
+        "wss://eventsub.wss.twitch.tv:444/ws",
+        "wss://eventsub.wss.twitch.tv/ws#fragment",
+        "not a URL",
+    ] {
+        assert!(validate_reconnect_url(url).is_err(), "{url}");
+    }
 }
 
 #[tokio::test]
@@ -76,7 +98,7 @@ async fn keepalive_wait_allows_a_small_delivery_grace() {
     )
     .await;
 
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     assert!(matches!(
         receiver.recv().await,
         Some(EventSubConnectionEvent::Heartbeat)
@@ -192,13 +214,15 @@ fn accepted_subscription_response(request: &serde_json::Value, id: usize) -> Str
     .to_string()
 }
 
-fn inherited_list_response(session_id: &str, count: usize) -> String {
-    let data = (1..=count)
-        .map(|id| {
+fn inherited_list_response(session_id: &str, types: &[&str]) -> String {
+    let data = types
+        .iter()
+        .enumerate()
+        .map(|(index, subscription_type)| {
             json!({
-                "id": format!("subscription-{id}"),
+                "id": format!("subscription-{}", index + 1),
                 "status": "enabled",
-                "type": "stream.online",
+                "type": subscription_type,
                 "version": "1",
                 "cost": 1,
                 "condition": {"broadcaster_user_id": "100"},
@@ -209,8 +233,8 @@ fn inherited_list_response(session_id: &str, count: usize) -> String {
         .collect::<Vec<_>>();
     json!({
         "data": data,
-        "total": count,
-        "total_cost": count,
+        "total": types.len(),
+        "total_cost": types.len(),
         "max_total_cost": 10,
         "pagination": {}
     })
@@ -234,6 +258,39 @@ async fn write_json_response(stream: &mut tokio::net::TcpStream, status: &str, b
             body.len()
         );
     stream.write_all(response.as_bytes()).await.unwrap();
+}
+
+#[tokio::test]
+async fn inherited_session_rejects_partial_subscription_transfer() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert!(read_http_json(&mut stream).await.is_null());
+        write_json_response(
+            &mut stream,
+            "200 OK",
+            &inherited_list_response("session-2", &["stream.online"]),
+        )
+        .await;
+    });
+
+    let (_, mut previous) = subscription_plan_with_capacity(&[streamer()], Some("100"), 10, 0, 10);
+    previous.capabilities[0].active_subscription_types =
+        previous.capabilities[0].planned_subscription_types.clone();
+    previous.active_subscriptions = previous.capabilities[0].active_subscription_types.len();
+    let mut settings = EventSubClientSettings::new("client", "token");
+    settings.subscriptions_url = format!("http://{address}/eventsub");
+    let error = EventSubClient::new(settings)
+        .reconcile_inherited_report("session-2", previous)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        EventSubError::Protocol("inherited EventSub subscriptions did not match prior session")
+    ));
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -848,7 +905,17 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
         write_json_response(
             &mut stream,
             "200 OK",
-            &inherited_list_response("session-2", 6),
+            &inherited_list_response(
+                "session-2",
+                &[
+                    "stream.online",
+                    "stream.offline",
+                    "channel.prediction.begin",
+                    "channel.prediction.progress",
+                    "channel.prediction.lock",
+                    "channel.prediction.end",
+                ],
+            ),
         )
         .await;
     });
@@ -878,11 +945,26 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
             ))
             .await
             .unwrap();
-        drop(socket);
-
-        let (stream, _) = websocket_listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
+        // The old socket stays open while the replacement performs its Welcome
+        // handshake. This notification would be lost if the old socket were
+        // dropped as soon as the reconnect frame was parsed.
         socket
+            .send(Message::Text(
+                json!({
+                    "metadata": {"message_id":"old-event","message_type":"notification"},
+                    "payload": {
+                        "subscription": {"type":"stream.online"},
+                        "event": {"broadcaster_user_id":"100"}
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let (stream, _) = websocket_listener.accept().await.unwrap();
+        let mut replacement_socket = accept_async(stream).await.unwrap();
+        replacement_socket
                 .send(Message::Text(
                     json!({
                         "metadata": {"message_id":"welcome-2","message_type":"session_welcome"},
@@ -893,7 +975,12 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
                 ))
                 .await
                 .unwrap();
-        socket
+        // Closing the old connection after Welcome verifies the overlap contract.
+        // The binding is shadowed below only after the replacement is ready.
+        drop(socket);
+        // The first socket remains owned by the outer task until this point.
+        // (The server-side close is enough to let the client drop it after Welcome.)
+        replacement_socket
             .send(Message::Text(
                 json!({
                     "metadata": {"message_id":"event-1","message_type":"notification"},
@@ -907,7 +994,7 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
             ))
             .await
             .unwrap();
-        socket.close(None).await.unwrap();
+        replacement_socket.close(None).await.unwrap();
     });
 
     let mut settings = EventSubClientSettings::new("client", "token");
@@ -922,7 +1009,7 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
     )
     .await
     .unwrap();
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
 
     let mut messages = Vec::new();
     while let Ok(message) = receiver.try_recv() {
@@ -957,6 +1044,13 @@ async fn websocket_reconnect_during_subscription_creation_does_not_duplicate_sub
                     if matches!(event.as_ref(), MinerEvent::Playback { channel_id, .. } if channel_id == "100")
             )
         }));
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, super::EventSubConnectionEvent::Event(_)))
+            .count(),
+        2
+    );
 
     websocket_server.await.unwrap();
     subscriptions_server.await.unwrap();

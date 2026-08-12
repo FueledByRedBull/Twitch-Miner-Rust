@@ -1519,6 +1519,28 @@ fn confirmed_watch_progress_rejects_stale_and_nonpositive_intervals() {
     assert_eq!(stream.last_minute_update, Some(ts(900)));
 }
 
+#[test]
+fn confirmed_watch_progress_stops_after_channel_points_are_disabled() {
+    let config = ConfigFile {
+        streamers: vec!["alpha".into()],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(10));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points_enabled = Some(false);
+    state.streamers[0].stream = Some(Stream {
+        minute_watched: 2.0,
+        last_minute_update: Some(ts(100)),
+        ..Stream::default()
+    });
+
+    state.mark_minute_watched("100", ts(120));
+
+    let stream = state.streamers[0].stream.as_ref().unwrap();
+    assert_f64_eq(stream.minute_watched, 2.0);
+    assert_eq!(stream.last_minute_update, Some(ts(100)));
+}
+
 #[tokio::test]
 async fn runtime_metrics_capture_event_processing_and_compatibility_fields() {
     let config = ConfigFile {

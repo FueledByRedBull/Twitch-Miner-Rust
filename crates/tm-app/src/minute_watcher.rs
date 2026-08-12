@@ -474,7 +474,7 @@ pub(crate) async fn send_minute_watched_for_streamer(
     user_id: &str,
     observability: &AppObservability,
 ) -> Result<()> {
-    if !streamer.can_earn_channel_points() {
+    if !streamer.can_earn_channel_points() && !streamer.can_watch_drop_campaign() {
         return Ok(());
     }
     let now = time_now();
@@ -484,6 +484,10 @@ pub(crate) async fn send_minute_watched_for_streamer(
             recover_watch_metadata(runtime, twitch, streamer, observability, now, defect).await?
         }
     };
+    if !streamer.can_earn_channel_points() && !streamer.can_watch_drop_campaign() {
+        return Ok(());
+    }
+    let records_point_progress = streamer.can_earn_channel_points();
     let mut stream = streamer.stream.clone().unwrap_or_default();
     stream.payload = vec![build_minute_watched_event(&streamer, &stream, user_id)];
 
@@ -513,9 +517,11 @@ pub(crate) async fn send_minute_watched_for_streamer(
     )
     .await?;
     if status == StatusCode::NO_CONTENT {
-        runtime
-            .mark_minute_watched(streamer.channel_id.clone(), now)
-            .await?;
+        if records_point_progress {
+            runtime
+                .mark_minute_watched(streamer.channel_id.clone(), now)
+                .await?;
+        }
         return Ok(());
     }
 
