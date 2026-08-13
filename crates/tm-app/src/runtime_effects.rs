@@ -9,9 +9,7 @@ use tm_observability::{event_from_bet_result, Event as DiscordEvent};
 use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
 use crate::context::{contribute_streamer_community_goals, refresh_streamer_context};
-use crate::effects::runtime_streamer_by_channel_id;
 use crate::observability::AppObservability;
-use crate::prediction::prediction_wait_duration;
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
@@ -40,6 +38,36 @@ impl RuntimeEffectContext {
             health,
         }
     }
+}
+
+async fn runtime_streamer_by_channel_id(
+    runtime: &tm_runtime::RuntimeHandle,
+    channel_id: &str,
+) -> Result<Option<Streamer>> {
+    let snapshot = runtime.state_snapshot().await?;
+    Ok(snapshot
+        .streamers
+        .into_iter()
+        .find(|streamer| streamer.channel_id == channel_id))
+}
+
+#[must_use]
+pub(crate) fn prediction_wait_duration(
+    event: &tm_domain::PredictionEvent,
+    now: tm_runtime::RuntimeTime,
+) -> Duration {
+    let target_seconds = event
+        .streamer
+        .prediction_window_seconds(event.window_seconds);
+    let target_duration = if target_seconds.is_finite() && target_seconds > 0.0 {
+        Duration::from_secs_f64(target_seconds.min(Duration::MAX.as_secs_f64() - 2.0))
+    } else {
+        Duration::ZERO
+    };
+    let target_millis = i128::try_from(target_duration.as_millis()).unwrap_or(i128::MAX);
+    let elapsed_millis = (now - event.created_at).whole_milliseconds();
+    let remaining_millis = (target_millis - elapsed_millis).max(0);
+    Duration::from_millis(u64::try_from(remaining_millis).unwrap_or(u64::MAX))
 }
 
 pub(crate) async fn execute_runtime_effects(

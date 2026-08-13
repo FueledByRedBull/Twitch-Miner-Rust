@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Confirms offline streak recovery only when Twitch's typed streak count
+  increases with a fresh achievement timestamp; missing counts remain
+  unconfirmed.
+- Corrects the `PlaybackAccessToken` APQ hash to the SHA-256 of the bundled
+  full query after Twitch began rejecting mismatched hash/query pairs. The
+  experimental broadcast cache was removed before release because local
+  request savings did not prove equivalent credited WATCH behavior.
+- Adds one anonymized-output secret-canary regression spanning saved logs,
+  runtime status, and support bundles without adding a second anonymizer or
+  request-redaction framework.
+- Removes the non-gating performance script, duplicate PubSub fixture contract,
+  two single-helper application modules, and separate architecture walkthrough;
+  native PowerShell measurement and the owning source/docs retain the behavior.
 - Removes the non-gating sanitized replay benchmark and its Deep Quality,
   multiarch-artifact, Docker, and active documentation paths. Performance
   guidance now covers the maintained startup, image, bootstrap, and runtime
@@ -36,7 +49,7 @@
   Redundant runtime/Twitch contract tests and `tm-runtime`'s unused direct
   `tracing` dependency edge are removed without reducing unique coverage.
 - Adds a newcomer architecture path: one source-linked ownership map and
-  effect-capable event-flow walkthrough, expanded `tm-app` crate documentation, and a
+  effect-capable event flow, expanded `tm-app` crate documentation, and a
   focused first-change tutorial. The README now uses the canonical
   architecture map and correctly distinguishes the ten-minute streak-priority
   budget from the 15-minute fair-rotation window. Operator guidance also records
@@ -107,9 +120,8 @@
   running the miner already means watching; `false` and non-boolean values are
   rejected rather than silently changing operator intent.
 - Keeps playback priming uncached after measuring the roughly 20-second
-  selected-channel cadence and pinning the four-request preflight contract.
-  No credited WATCH/WATCH_STREAK A/B evidence currently proves that reuse is
-  safe.
+  selected-channel cadence and pinning the four-request preflight contract;
+  local request-count savings alone did not prove credited-reward equivalence.
 - Refreshes Twitch's retired `PlaybackAccessToken` persisted hash and sends the
   verified full read-only query in the same request. This restores playback
   priming immediately and keeps future hash retirement from stopping WATCH

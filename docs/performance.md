@@ -1,18 +1,16 @@
 # Performance Measurement
 
 Performance changes are evidence-driven. Build the release binary first, then
-run the repeatable startup smoke measurement:
+use PowerShell's native timing when a concrete comparison is needed:
 
 ```powershell
 cargo build --workspace --release --locked
-./scripts/measure-performance.ps1 -OutputPath ./performance-report.json
+Measure-Command { ./target/release/tm-app.exe --version }
 ```
 
-The report records the binary version and size, base revision, dirty-worktree
-state, host architecture, Rust version, logical processor count, workspace
-package count, and resolved dependency-package count. A dirty report is useful
-for development comparison but is not release evidence; release baselines must
-come from a clean checkout of the recorded revision.
+Record the exact clean revision, binary version and size, host architecture,
+Rust version, and repeated median. A dirty measurement is useful during
+development but is not release evidence.
 
 ## Container image footprint
 
@@ -46,11 +44,10 @@ includes real Twitch latency and every ordered mutation/presence step, so it is
 not an apples-to-apples estimate of the isolated saving. The temporary harness
 was removed instead of becoming permanent benchmark surface.
 
-To sample resident memory and CPU for an already running local process, pass its
-PID and a workload label (for example, `idle`, `normal`, or `burst`):
+To sample an already running local process, use `Get-Process`:
 
 ```powershell
-./scripts/measure-performance.ps1 -ProcessId 1234 -SampleSeconds 60 -Label normal
+Get-Process -Id 1234 | Select-Object CPU, WorkingSet64, PeakWorkingSet64
 ```
 
 During a real session, `runtime-status.json` exposes bounded measurements for

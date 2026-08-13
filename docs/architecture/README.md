@@ -24,11 +24,26 @@ Discord is the sole built-in outbound notifier. Generic notifier backends and
 analytics exporters are intentionally out of scope unless a concrete operator
 requirement justifies adding them.
 
-## Architecture overview
+## Event flow
 
-The concise [architecture walkthrough](walkthrough.md) keeps the ownership
-map and one effect-capable event-flow diagram. This page records the broader
-crate boundaries and invariants without repeating that diagram.
+```mermaid
+flowchart LR
+    W[watcher or transport] -->|typed MinerEvent| R[tm-runtime state]
+    R -->|snapshot/effects| A[tm-app]
+    A -->|HTTP/GQL mutation| T[tm-twitch]
+    R -->|log/notification effect| O[tm-observability]
+```
+
+For an ordinary WATCH credit, `tm-pubsub` parses the authenticated
+`points-earned` message into `MinerEvent::PointsEarned`; the runtime updates
+the tracked streamer and emits no network effect. Predictions use the same
+boundary but can return an evaluation effect for `tm-app` to execute once.
+
+Source pointers: [runtime state](../../crates/tm-runtime/src/state.rs),
+[runtime handle](../../crates/tm-runtime/src/handle.rs),
+[PubSub parser](../../crates/tm-pubsub/src/parse.rs),
+[EventSub parser](../../crates/tm-pubsub/src/eventsub/protocol.rs), and
+[effect execution](../../crates/tm-app/src/runtime_effects.rs).
 
 ## Internal module layout
 

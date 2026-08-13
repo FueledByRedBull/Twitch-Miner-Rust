@@ -39,7 +39,7 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
     },
     PersistedOperationContract {
         operation_name: "PlaybackAccessToken",
-        sha256_hash: "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
+        sha256_hash: "2261fa3d1bca5600e62abfacd4bd9a62c5aeca2c5a7a03ddde2b9870f1b7eb57",
         read_only: true,
     },
     PersistedOperationContract {
@@ -158,7 +158,7 @@ pub fn stream_info_overlay(channel_login: &str) -> GqlPersistedOperation {
 pub fn playback_access_token(channel_login: &str) -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "PlaybackAccessToken",
-        "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
+        "2261fa3d1bca5600e62abfacd4bd9a62c5aeca2c5a7a03ddde2b9870f1b7eb57",
         json!({
             "isLive": true,
             "isVod": false,
