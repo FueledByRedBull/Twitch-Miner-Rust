@@ -349,9 +349,7 @@ async fn reconcile_typed_recovery(
     else {
         return false;
     };
-    let changed = baseline
-        .is_none_or(|before| milestone.achievement_timestamp > before.achievement_timestamp);
-    if !changed || milestone.achievement_timestamp < started_at - Duration::from_secs(5 * 60) {
+    if !streak_count_increased(baseline, &milestone, started_at) {
         return false;
     }
     if runtime
@@ -372,6 +370,21 @@ async fn reconcile_typed_recovery(
         "Typed milestone confirmed offline streak recovery for {name}"
     );
     true
+}
+
+fn streak_count_increased(
+    baseline: Option<&WatchStreakMilestone>,
+    milestone: &WatchStreakMilestone,
+    started_at: OffsetDateTime,
+) -> bool {
+    baseline.is_some_and(|before| {
+        before
+            .value
+            .zip(milestone.value)
+            .is_some_and(|(before, after)| after > before)
+            && milestone.achievement_timestamp > before.achievement_timestamp
+            && milestone.achievement_timestamp >= started_at - Duration::from_secs(5 * 60)
+    })
 }
 
 async fn preempted(runtime: &tm_runtime::RuntimeHandle, streamer: &Streamer) -> bool {
@@ -572,5 +585,48 @@ mod tests {
             progress["properties"]["content_mode"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn recovery_requires_a_fresh_streak_count_increase() {
+        let started_at = ts(10_000);
+        let baseline = WatchStreakMilestone {
+            value: Some(4),
+            achievement_timestamp: ts(9_900),
+            expires_at: None,
+        };
+        let confirmed = WatchStreakMilestone {
+            value: Some(5),
+            achievement_timestamp: ts(10_001),
+            expires_at: None,
+        };
+        assert!(streak_count_increased(
+            Some(&baseline),
+            &confirmed,
+            started_at
+        ));
+
+        for unconfirmed in [
+            WatchStreakMilestone {
+                value: Some(4),
+                ..confirmed.clone()
+            },
+            WatchStreakMilestone {
+                value: None,
+                ..confirmed.clone()
+            },
+            WatchStreakMilestone {
+                value: Some(5),
+                achievement_timestamp: ts(9_000),
+                expires_at: None,
+            },
+        ] {
+            assert!(!streak_count_increased(
+                Some(&baseline),
+                &unconfirmed,
+                started_at
+            ));
+        }
+        assert!(!streak_count_increased(None, &confirmed, started_at));
     }
 }

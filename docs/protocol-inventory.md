@@ -156,22 +156,16 @@ selected channel a nominal 20-second interval; with the normal two slots it
 serializes the sends 10 seconds apart. Because the interval sleep begins after
 each request finishes, a channel is revisited after both selected requests plus
 the two nominal sleeps (about 20 seconds when requests are short).
-Every successful tick therefore performs one `PlaybackAccessToken` GQL request,
-one master-playlist GET, one selected media-playlist GET, and one media-segment
-HEAD before the spade POST. A regression test calls the primer twice and proves
-that all four requests are repeated for each call. Production failure counts
-are recorded with each release's acceptance evidence. Successful per-stage
-requests are not logged, so their volume comes from the deterministic scheduler
-and request path rather than invented telemetry. No credited WATCH/WATCH_STREAK
-A/B or canary evidence currently proves that reusing a playback session
-preserves credit. Adding a broadcast-bound cache on request volume alone would
-therefore weaken a working private protocol contract without evidence, and is
-rejected.
+Every tick performs one `PlaybackAccessToken` GQL request, one master-playlist
+GET, one selected media-playlist GET, and one newest-complete-segment HEAD before
+the spade POST. Local request-count savings did not establish credited
+WATCH/WATCH_STREAK equivalence, so the experimental broadcast cache was removed.
 
 The playback-token request includes both the audited persisted hash and its full
-read-only query. Twitch accepts that combined shape, so a future persisted-hash
-retirement does not stop WATCH while raw queries remain supported; a schema
-change or raw-query rejection still fails strict health and requires a release.
+read-only query. The hash is the SHA-256 of those exact query bytes; inventory
+tests keep both call sites aligned. Twitch accepts that combined shape, while a
+query/hash mismatch, schema change, or raw-query rejection fails strict health
+and requires a release.
 
 The preferred EventSub WebSocket path handles stream presence and observes
 raids. Broadcaster prediction subscriptions are requested only when a tracked

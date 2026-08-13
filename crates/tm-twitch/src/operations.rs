@@ -3,6 +3,8 @@ use serde_json::json;
 use crate::types::GqlPersistedOperation;
 
 const PLAYBACK_ACCESS_TOKEN_QUERY: &str = "query PlaybackAccessToken($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!, $platform: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } videoPlaybackAccessToken(id: $vodID, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isVod) { value signature __typename } }";
+const PLAYBACK_ACCESS_TOKEN_HASH: &str =
+    "2261fa3d1bca5600e62abfacd4bd9a62c5aeca2c5a7a03ddde2b9870f1b7eb57";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersistedOperationContract {
@@ -39,7 +41,7 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
     },
     PersistedOperationContract {
         operation_name: "PlaybackAccessToken",
-        sha256_hash: "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
+        sha256_hash: PLAYBACK_ACCESS_TOKEN_HASH,
         read_only: true,
     },
     PersistedOperationContract {
@@ -158,7 +160,7 @@ pub fn stream_info_overlay(channel_login: &str) -> GqlPersistedOperation {
 pub fn playback_access_token(channel_login: &str) -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "PlaybackAccessToken",
-        "ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9",
+        PLAYBACK_ACCESS_TOKEN_HASH,
         json!({
             "isLive": true,
             "isVod": false,

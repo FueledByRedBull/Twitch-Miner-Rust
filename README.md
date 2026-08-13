@@ -177,9 +177,8 @@ Use `tm-app --check-config --json --data-dir ./data` for scripts, and
 ## Workspace map
 
 The canonical crate ownership and dependency-direction map lives in
-[docs/architecture/README.md](docs/architecture/README.md). For a concrete
-request-to-reward trace, start with
-[docs/architecture/walkthrough.md](docs/architecture/walkthrough.md).
+[docs/architecture/README.md](docs/architecture/README.md), together with the
+request-to-reward event flow and source pointers.
 
 ## Project status
 
@@ -188,7 +187,6 @@ The public repo docs focus on operating and understanding the Rust implementatio
 - operator guide: [docs/behavior-parity/operator-guide.md](docs/behavior-parity/operator-guide.md)
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
 - architecture notes: [docs/architecture/README.md](docs/architecture/README.md)
-- end-to-end WATCH walkthrough: [docs/architecture/walkthrough.md](docs/architecture/walkthrough.md)
 - behavioral differences and limits, including typed playback-token/HLS
   preflight: [docs/behavior-parity/parity-matrix.md](docs/behavior-parity/parity-matrix.md)
 - protocol inventory and canary: [docs/protocol-inventory.md](docs/protocol-inventory.md)

@@ -32,11 +32,10 @@ mod tests {
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
     };
-    use crate::prediction::prediction_wait_duration;
     use crate::pubsub::pubsub_reconnect_delay;
     use crate::runtime_effects::{
         evaluate_prediction, handle_claim_bonus_effect, maybe_skip_prediction_for_balance,
-        stealth_offset_from_entropy, RuntimeEffectContext,
+        prediction_wait_duration, stealth_offset_from_entropy, RuntimeEffectContext,
     };
     use crate::startup::{bootstrap_runtime_state, build_canary_logger_settings, load_targets};
     use crate::status::HealthTracker;

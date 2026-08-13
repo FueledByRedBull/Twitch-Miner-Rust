@@ -544,6 +544,7 @@ mod tests {
         write_support_bundle, HealthTracker, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus,
         StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
     };
+    use tm_observability::{init_tracing, LoggerSettings, TracingInitOptions};
 
     #[test]
     fn ready_status_passes_health_check() -> anyhow::Result<()> {
@@ -764,24 +765,50 @@ mod tests {
     }
 
     #[test]
-    fn support_bundle_contains_metadata_not_file_contents() -> anyhow::Result<()> {
+    fn privacy_canaries_do_not_escape_anonymized_outputs() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let config_marker = "SHOULD_NOT_APPEAR_CONFIG";
-        let cookie_marker = "SHOULD_NOT_APPEAR_COOKIE";
-        let webhook_marker = "SHOULD_NOT_APPEAR_WEBHOOK";
-        let response_marker = "SHOULD_NOT_APPEAR_RESPONSE";
+        let markers = [
+            "CANARY_USERNAME",
+            "CANARY_CHANNEL_ID",
+            "CANARY_BALANCE",
+            "CANARY_AUTH_TOKEN",
+            "CANARY_COOKIE",
+            "CANARY_WEBHOOK",
+            "CANARY_FILESYSTEM_PATH",
+            "CANARY_CHAT_MESSAGE",
+            "CANARY_RAW_PAYLOAD",
+        ];
+        init_tracing(&TracingInitOptions {
+            settings: LoggerSettings {
+                save: true,
+                anonymize_logs: true,
+                ..LoggerSettings::default()
+            },
+            base_dir: directory.path().to_path_buf(),
+            username: markers[0].to_string(),
+            timezone: None,
+        })?;
+        tracing::info!(
+            operation = "privacy-canary",
+            channel_id = markers[1],
+            balance = markers[2],
+            auth_token = markers[3],
+            cookie = markers[4],
+            webhook = markers[5],
+            filesystem_path = markers[6],
+            chat_message = markers[7],
+            raw_payload = markers[8],
+            "privacy canary"
+        );
         std::fs::write(
             directory.path().join("config.json"),
-            format!(r#"{{"private_config":"{config_marker}"}}"#),
+            format!(r#"{{"private_config":"{}"}}"#, markers[3]),
         )?;
         std::fs::create_dir_all(directory.path().join("cookies"))?;
-        std::fs::write(directory.path().join("cookies/fixture.json"), cookie_marker)?;
-        std::fs::create_dir_all(directory.path().join("log"))?;
+        std::fs::write(directory.path().join("cookies/fixture.json"), markers[4])?;
         std::fs::write(
             directory.path().join("log/fixture.log"),
-            format!(
-                "Authorization: {cookie_marker}\nhttps://example.invalid/hooks/{webhook_marker}"
-            ),
+            format!("Authorization: {}\n{}", markers[3], markers[5]),
         )?;
         let reporter = StatusReporter::ready(
             directory.path(),
@@ -790,24 +817,19 @@ mod tests {
         )?;
         reporter.heartbeat()?;
         let status_path = directory.path().join(STATUS_FILE_NAME);
-        let mut raw_status: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&status_path)?)?;
-        raw_status["raw_twitch_response"] = serde_json::Value::String(response_marker.to_string());
-        atomic_json_write(&status_path, &raw_status)?;
+        let log = std::fs::read_to_string(directory.path().join("log/miner.log"))?;
+        let status = std::fs::read_to_string(&status_path)?;
 
         let destination = directory.path().join("support.json");
         write_support_bundle(directory.path(), &destination)?;
         let bundle = std::fs::read_to_string(destination)?;
-        for marker in [
-            config_marker,
-            cookie_marker,
-            webhook_marker,
-            response_marker,
-            "Authorization",
-            "raw_twitch_response",
-        ] {
+        for marker in markers {
+            assert!(!log.contains(marker));
+            assert!(!status.contains(marker));
             assert!(!bundle.contains(marker));
         }
+        assert!(!bundle.contains("Authorization"));
+        assert!(!bundle.contains("raw_twitch_response"));
         assert!(bundle.contains("config_size_bytes"));
         assert!(bundle.contains("cookie_file_count"));
         assert!(bundle.contains("log_file_count"));
