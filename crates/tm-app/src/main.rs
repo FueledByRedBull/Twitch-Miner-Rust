@@ -128,7 +128,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
     }
     let loaded_config = load_active_config(&cli, &requested_paths, has_override)?;
     if cli.canary {
-        let http_client = build_http_client(loaded_config.config.disable_ssl_cert_verification)?;
+        let http_client = build_http_client()?;
         return canary::run_read_only_canary(
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
@@ -262,7 +262,7 @@ async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
         observability.start_session_message(&session_id)
     );
     let started_at = time_now();
-    let http_client = build_http_client(config.disable_ssl_cert_verification)?;
+    let http_client = build_http_client()?;
     let session =
         load_or_login_session(&config, &active_paths.work_dir, http_client.clone()).await?;
     let auth_token = session

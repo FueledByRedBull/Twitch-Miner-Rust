@@ -19,6 +19,11 @@ jobs:
           toolchain: 1.94.0
           components: clippy,rustfmt
 
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-qa
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -44,6 +49,5 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --locked --no-deps
 
-      - name: Verify deterministic release metadata and build integrity
-        shell: pwsh
-        run: ./scripts/verify-build-integrity.ps1
+      - name: Build release workspace
+        run: cargo build --workspace --release --locked

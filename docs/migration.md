@@ -5,9 +5,10 @@ the supported Go configuration and cookie layouts in place; Python cookie jars
 are intentionally kept outside the active Rust data directory and are not
 auto-converted.
 
-For behavior-level differences from Go, including Rust's typed
-playback-token/HLS preflight before minute-watch submission, see the
-[behavior-parity matrix](behavior-parity/parity-matrix.md).
+For behavior-level differences from Go, see the
+[behavior-parity matrix](behavior-parity/parity-matrix.md). The
+[protocol inventory](protocol-inventory.md) is the normative source for live
+Twitch operation, playback, and transport contracts.
 
 The Rust miner can reuse the Go layout when its data directory is mounted at
 `/data`, including a legacy host directory named `twitch-miner-go`. The name is
@@ -30,6 +31,8 @@ normal Rust startup performs a versioned config migration only when necessary:
   value, including per-streamer overrides, and adds the default single-watcher
   campaign control;
 - it removes a legacy `auto_update=false` field;
+- it removes empty `password`, `disable_ssl_cert_verification=false`, and
+  `watch_queue_logging` fields; unsafe or malformed legacy values are rejected;
 - it removes the Go `watch_streak_warm_start_cache` boolean because Rust always
   manages its bounded streak cache internally; and
 - it converts the former `betting.make_predictions` wrapper to the canonical

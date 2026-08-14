@@ -16,7 +16,6 @@ fn creates_default_config() {
     let path = dir.join("config.json");
     let config = load_or_create_config(&path).unwrap();
     assert_eq!(config.chat_presence, "ONLINE");
-    assert_eq!(config.password, "");
     assert_eq!(config.config_schema_version, CONFIG_SCHEMA_VERSION);
     assert!(path.exists());
     let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -59,17 +58,82 @@ fn validation_rejects_default_username_placeholder() {
 }
 
 #[test]
-fn validation_rejects_disabling_tls_certificate_verification() {
-    let config = ConfigFile {
-        username: String::from("Alice"),
-        disable_ssl_cert_verification: true,
-        ..ConfigFile::default()
-    };
+fn migrates_removed_security_and_logging_fields_with_backup() {
+    let dir = unique_temp_dir("removed-fields");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","password":"","disable_ssl_cert_verification":false,"watch_queue_logging":true}"#;
+    fs::write(&path, original).unwrap();
 
-    let error = validate_config(&config).unwrap_err();
-    assert!(
-        matches!(error, ConfigError::Validation(message) if message.contains("disable_ssl_cert_verification"))
-    );
+    let config = load_or_create_config(&path).unwrap();
+    assert_eq!(config.username, "Alice");
+    assert_eq!(fs::read(config_backup_path(&path)).unwrap(), original);
+    let migrated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for key in [
+        "password",
+        "disable_ssl_cert_verification",
+        "watch_queue_logging",
+    ] {
+        assert!(migrated.get(key).is_none());
+    }
+}
+
+#[test]
+fn previews_removed_security_and_logging_fields_without_writing() {
+    let dir = unique_temp_dir("removed-fields-preview");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    let original = br#"{"username":"Alice","password":"","disable_ssl_cert_verification":false,"watch_queue_logging":false}"#;
+    fs::write(&path, original).unwrap();
+
+    let preview = preview_config(&path).unwrap();
+    assert!(preview.migration_required);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!config_backup_path(&path).exists());
+}
+
+#[test]
+fn rejects_unsafe_or_malformed_removed_fields_without_writing() {
+    for (name, original, path_fragment) in [
+        (
+            "password-value",
+            br#"{"username":"Alice","password":"secret"}"#.as_slice(),
+            "password",
+        ),
+        (
+            "password-type",
+            br#"{"username":"Alice","password":1}"#.as_slice(),
+            "password",
+        ),
+        (
+            "tls-enabled",
+            br#"{"username":"Alice","disable_ssl_cert_verification":true}"#.as_slice(),
+            "disable_ssl_cert_verification",
+        ),
+        (
+            "tls-type",
+            br#"{"username":"Alice","disable_ssl_cert_verification":"false"}"#.as_slice(),
+            "disable_ssl_cert_verification",
+        ),
+        (
+            "queue-type",
+            br#"{"username":"Alice","watch_queue_logging":"yes"}"#.as_slice(),
+            "watch_queue_logging",
+        ),
+    ] {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, original).unwrap();
+
+        let error = load_or_create_config(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Validation(message) if message.contains(path_fragment)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!config_backup_path(&path).exists());
+    }
 }
 
 #[test]
@@ -597,10 +661,7 @@ fn strict_key_allowlists_match_the_serialized_schema() {
         names
     }
 
-    let mut root = default_config_value();
-    root.as_object_mut()
-        .unwrap()
-        .insert("password".to_owned(), Value::String(String::new()));
+    let root = default_config_value();
     assert_eq!(sorted_keys(&root), sorted_names(TOP_LEVEL_CONFIG_KEYS));
     assert_eq!(sorted_keys(&bet_defaults()), sorted_names(BET_CONFIG_KEYS));
     assert_eq!(

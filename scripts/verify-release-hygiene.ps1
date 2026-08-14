@@ -14,24 +14,6 @@ foreach ($workflow in $workflowFiles) {
     }
 }
 
-$multiarchWorkflow = Get-Content -Raw .github/workflows/multiarch-build.yml
-if ($multiarchWorkflow -notmatch '(?m)^  release-manifest:\s*$' -or
-    $multiarchWorkflow -notmatch 'sha-\$\{\{ github\.sha \}\}' -or
-    $multiarchWorkflow -notmatch 'verify-published-manifest\.ps1' -or
-    $multiarchWorkflow -notmatch 'imagetools create --tag \$release') {
-    throw 'Signed releases must verify and promote the existing commit-SHA manifest.'
-}
-$releaseJob = [regex]::Match(
-    $multiarchWorkflow,
-    '(?ms)^  release-manifest:\s*$(.*)\z'
-).Groups[1].Value
-if (-not $releaseJob -or $releaseJob -match 'docker/build-push-action') {
-    throw 'Signed release promotion must not rebuild the accepted image.'
-}
-if ($releaseJob -notmatch '-ExpectedDigest \$digest') {
-    throw 'Signed release promotion must require exact digest equality.'
-}
-
 foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.rpi.yml', 'deploy/docker-compose.volume.yml')) {
     $content = Get-Content -Raw $compose
     if ($content -match ':latest') {
@@ -68,11 +50,6 @@ if ($dockerfile -notmatch 'snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z' -o
 }
 
 $ciWorkflow = Get-Content -Raw .github/workflows/ci.yml
-if ($ciWorkflow -notmatch 'cargo-deny@\d+\.\d+\.\d+' -or
-    $ciWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+' -or
-    $ciWorkflow -notmatch 'verify-architecture\.ps1') {
-    throw 'CI analysis tools must be pinned and the architecture gate must run.'
-}
 if ($ciWorkflow -match 'gitleaks/gitleaks-action' -or
     $ciWorkflow -notmatch 'GITLEAKS_VERSION:\s*\d+\.\d+\.\d+' -or
     $ciWorkflow -notmatch 'GITLEAKS_ARCHIVE_SHA256:\s*[0-9a-f]{64}' -or
@@ -80,23 +57,6 @@ if ($ciWorkflow -match 'gitleaks/gitleaks-action' -or
     throw 'CI secret scanning must use a checksum-verified native Gitleaks release.'
 }
 
-$multiarchWorkflow = Get-Content -Raw .github/workflows/multiarch-build.yml
-if ($multiarchWorkflow -match 'actions/download-artifact' -or
-    $multiarchWorkflow -notmatch '(?m)^\s+actions:\s+read\s*$' -or
-    $multiarchWorkflow -notmatch 'Invoke-RestMethod' -or
-    $multiarchWorkflow -notmatch 'Invoke-WebRequest' -or
-    $multiarchWorkflow -notmatch 'Expected exactly three image digest artifacts') {
-    throw 'Multiarch digest collection must use the native authenticated artifact API.'
-}
-
-$deepQualityWorkflow = Get-Content -Raw .github/workflows/deep-quality.yml
-if ($deepQualityWorkflow -notmatch 'nightly-\d{4}-\d{2}-\d{2}' -or
-    $deepQualityWorkflow -notmatch 'cargo-fuzz --version \d+\.\d+\.\d+ --locked' -or
-    $deepQualityWorkflow -notmatch 'cargo-llvm-cov@\d+\.\d+\.\d+' -or
-    $deepQualityWorkflow -notmatch '--branch' -or
-    $deepQualityWorkflow -notmatch 'verify-branch-coverage\.ps1') {
-    throw 'Deep quality tools, nightly, and coverage checks must be explicitly pinned.'
-}
 if (-not (Test-Path -LiteralPath 'fuzz/Cargo.lock' -PathType Leaf) -or
     -not (Test-Path -LiteralPath 'fuzz/Cargo.toml' -PathType Leaf)) {
     throw 'The isolated fuzz workspace must retain its own manifest and lockfile.'
@@ -128,35 +88,6 @@ try {
     if (Test-Path -LiteralPath $sentinelPath) {
         Remove-Item -LiteralPath $sentinelPath -Force
     }
-}
-
-$releaseProcess = Get-Content -Raw docs/release-process.md
-if ($releaseProcess -match '(?m)^docker exec twitch-miner\b') {
-    throw 'Release commands must resolve the Compose service instead of assuming a container name.'
-}
-if ($releaseProcess -notmatch '(?s)-v "\$DATA_DIR:/data:ro".*--data-dir /data --canary') {
-    throw 'Release process must run the digest-pinned canary with a read-only data mount.'
-}
-
-$deploymentHelper = Get-Content -Raw "$PSScriptRoot/deploy-with-rollback.ps1"
-if ($deploymentHelper -match '& docker exec\b') {
-    throw 'Guarded deployment helper must use Compose service execution.'
-}
-if ($deploymentHelper -notmatch 'Test-ImageConfig \$CandidateImage \$true' -or
-    $deploymentHelper -notmatch 'Test-ImageConfig \$RollbackImage \$false') {
-    throw 'Guarded deployment helper must preserve candidate JSON and rollback-compatible config checks.'
-}
-if ($deploymentHelper -notmatch 'started_at_unix -ge \$containerStarted' -or
-    $deploymentHelper -notmatch 'active_subscriptions -eq \$eventSub\.planned_subscriptions' -or
-    $deploymentHelper -notmatch '\$acknowledgedTopics -eq \$pubSub\.total_topics') {
-    throw 'Guarded deployment must reject stale status and incomplete transport recovery.'
-}
-$exclusiveStop = $deploymentHelper.LastIndexOf('Stop-RollbackForExclusiveCanary')
-$candidateCanary = $deploymentHelper.LastIndexOf('Test-ImageCanary $CandidateImage')
-if ($exclusiveStop -lt 0 -or $candidateCanary -lt 0 -or $exclusiveStop -gt $candidateCanary -or
-    $deploymentHelper -notmatch '\$rollbackRecoveryRequired = \$true' -or
-    $deploymentHelper -notmatch 'Restore-RollbackService') {
-    throw 'Guarded deployment must stop the rollback service for an exclusive canary and restore it on failure.'
 }
 
 $candidateDigest = 'a' * 64

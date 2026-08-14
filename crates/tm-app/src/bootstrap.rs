@@ -124,12 +124,7 @@ pub(crate) fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_http_client(disable_ssl_cert_verification: bool) -> Result<reqwest::Client> {
-    if disable_ssl_cert_verification {
-        return Err(anyhow!(
-            "config.disable_ssl_cert_verification is no longer supported because it disables TLS certificate verification"
-        ));
-    }
+pub(crate) fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -423,16 +418,8 @@ mod tests {
     use tm_auth::AuthClientError;
 
     #[test]
-    fn build_http_client_rejects_insecure_tls_toggle() {
-        match build_http_client(true) {
-            Ok(_) => panic!("expected insecure TLS toggle to be rejected"),
-            Err(error) => assert!(error.to_string().contains("disable_ssl_cert_verification")),
-        }
-    }
-
-    #[test]
     fn build_http_client_accepts_secure_default() {
-        assert!(build_http_client(false).is_ok());
+        assert!(build_http_client().is_ok());
     }
 
     #[tokio::test]
@@ -453,7 +440,7 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        let response = build_http_client(false)
+        let response = build_http_client()
             .unwrap()
             .get(format!("http://{address}/start"))
             .send()

@@ -121,13 +121,9 @@ pub struct ConfigFile {
     #[serde(default = "current_schema_version")]
     pub config_schema_version: u64,
     pub username: String,
-    #[serde(default)]
-    pub password: String,
     pub debug: bool,
     pub debug_deep: bool,
-    pub watch_queue_logging: bool,
     pub smart_logging: bool,
-    pub disable_ssl_cert_verification: bool,
     pub show_seconds: bool,
     pub claim_drops_startup: bool,
     pub farm_drops: bool,
@@ -181,9 +177,7 @@ pub fn default_config_value() -> Value {
         "username": "your-twitch-username",
         "debug": false,
         "debug_deep": false,
-        "watch_queue_logging": false,
         "smart_logging": true,
-        "disable_ssl_cert_verification": false,
         "show_seconds": false,
         "claim_drops_startup": true,
         "farm_drops": true,
@@ -330,16 +324,6 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
     if username.is_empty() || username == "your-twitch-username" {
         return Err(ConfigError::Validation(String::from(
             "config.username must be set to a Twitch username",
-        )));
-    }
-    if !config.password.trim().is_empty() {
-        return Err(ConfigError::Validation(String::from(
-            "config.password is no longer used; remove it from config.json",
-        )));
-    }
-    if config.disable_ssl_cert_verification {
-        return Err(ConfigError::Validation(String::from(
-            "config.disable_ssl_cert_verification is no longer supported; remove it or set it to false",
         )));
     }
     validate_required_enum(
@@ -623,6 +607,7 @@ fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), 
         root.remove("watch_streak_warm_start_cache");
         *changed = true;
     }
+    migrate_removed_runtime_options(root, changed)?;
     if let Some(watch_streams) = root.get("watch_streams") {
         match watch_streams.as_bool() {
             Some(true) => {}
@@ -685,6 +670,56 @@ fn migrate_removed_options(value: &mut Value, changed: &mut bool) -> Result<(), 
     Ok(())
 }
 
+fn migrate_removed_runtime_options(
+    root: &mut Map<String, Value>,
+    changed: &mut bool,
+) -> Result<(), ConfigError> {
+    if let Some(password) = root.get("password") {
+        match password.as_str() {
+            Some("") => {}
+            Some(_) => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.password is no longer used; remove it from config.json",
+                )));
+            }
+            None => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.password must be an empty string when present",
+                )));
+            }
+        }
+        root.remove("password");
+        *changed = true;
+    }
+    if let Some(disable_tls) = root.get("disable_ssl_cert_verification") {
+        match disable_tls.as_bool() {
+            Some(false) => {}
+            Some(true) => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.disable_ssl_cert_verification is no longer supported; remove it or set it to false",
+                )));
+            }
+            None => {
+                return Err(ConfigError::Validation(String::from(
+                    "config.disable_ssl_cert_verification must be a boolean when present",
+                )));
+            }
+        }
+        root.remove("disable_ssl_cert_verification");
+        *changed = true;
+    }
+    if let Some(watch_queue_logging) = root.get("watch_queue_logging") {
+        if !watch_queue_logging.is_boolean() {
+            return Err(ConfigError::Validation(String::from(
+                "config.watch_queue_logging must be a boolean when present",
+            )));
+        }
+        root.remove("watch_queue_logging");
+        *changed = true;
+    }
+    Ok(())
+}
+
 fn migrate_drop_farming_options(value: &mut Value, changed: &mut bool) {
     let Some(root) = value.as_object_mut() else {
         return;
@@ -736,12 +771,9 @@ fn validate_schema_version(value: &Value) -> Result<(), ConfigError> {
 const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "config_schema_version",
     "username",
-    "password",
     "debug",
     "debug_deep",
-    "watch_queue_logging",
     "smart_logging",
-    "disable_ssl_cert_verification",
     "show_seconds",
     "claim_drops_startup",
     "farm_drops",

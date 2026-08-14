@@ -84,7 +84,8 @@ impl RuntimeMetrics {
     }
 }
 
-pub(crate) fn spawn_runtime_state(mut state: RuntimeState) -> RuntimeHandle {
+#[must_use]
+pub fn spawn_runtime_state(mut state: RuntimeState) -> RuntimeHandle {
     let (state_revision_tx, state_revision) = watch::channel(0_u64);
     let metrics = Arc::new(RuntimeMetrics::default());
     state.capture_initial_points();

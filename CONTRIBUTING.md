@@ -48,6 +48,7 @@ cargo check --manifest-path fuzz/Cargo.toml --locked --all-targets
 cargo build --workspace --release --locked
 ./scripts/verify-build-integrity.ps1
 ./scripts/verify-architecture.ps1
+./scripts/verify-docs.ps1
 ./scripts/verify-release-hygiene.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```

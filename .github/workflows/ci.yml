@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # main
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # main
         with:
           tool: cargo-deny@0.20.2
       - name: Check dependency policy
@@ -115,7 +115,7 @@ jobs:
         with:
           toolchain: 1.94.0
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # main
+      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # main
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Measure workspace coverage

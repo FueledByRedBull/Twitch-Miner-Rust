@@ -18,6 +18,26 @@ jobs:
       contents: read
     uses: ./.github/workflows/rust-qa.yml
 
+  reproducible-build:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    needs: rust-qa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+
+      - name: Verify reproducible release build
+        shell: pwsh
+        run: ./scripts/verify-build-integrity.ps1
+
   build:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     needs: rust-qa
@@ -113,7 +133,9 @@ jobs:
 
   manifest:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-    needs: build
+    needs:
+      - build
+      - reproducible-build
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -295,7 +317,7 @@ jobs:
           "digest=$digest" >> $env:GITHUB_OUTPUT
 
       - name: Attest release manifest
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.promote.outputs.digest }}

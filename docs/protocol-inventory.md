@@ -1,5 +1,10 @@
 # Twitch Protocol Inventory
 
+This is the normative reference for Twitch operations, playback submission,
+transport ownership, retries, campaign/watch selection boundaries, and typing
+policy. Other documents summarize or compare these contracts and link here
+rather than redefining them.
+
 The Rust client keeps persisted-operation names and SHA-256 hashes in
 `tm-twitch::PERSISTED_OPERATION_CONTRACTS`. A unit test verifies that every
 builder uses an inventoried, unique contract. The comparison source is the Go
@@ -161,10 +166,10 @@ GET, one selected media-playlist GET, and one newest-complete-segment HEAD befor
 the spade POST. Local request-count savings did not establish credited
 WATCH/WATCH_STREAK equivalence, so the experimental broadcast cache was removed.
 
-The playback-token request includes both the audited persisted hash and its full
-read-only query. The hash is the SHA-256 of those exact query bytes; inventory
-tests keep both call sites aligned. Twitch accepts that combined shape, while a
-query/hash mismatch, schema change, or raw-query rejection fails strict health
+The playback-token request sends the audited persisted hash alone. Only an exact
+`PersistedQueryNotFound` retries once with the audited full read-only query;
+other failures do not change the request shape. A hash rotation can therefore
+self-heal while a schema change or raw-query rejection still fails strict health
 and requires a release.
 
 The preferred EventSub WebSocket path handles stream presence and observes

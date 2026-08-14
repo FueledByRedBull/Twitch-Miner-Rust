@@ -34,27 +34,14 @@ If you want to watch logs in the foreground, run the command directly in the ter
   `data/config.json`; both are placeholders in the tracked example.
 - `auto_update` was removed. A legacy `false` value is migrated away and `true`
   is rejected.
-- Remove `password` from older configs; device-code login does not use it.
-- `claim_moments` is the global moment-discovery/claim default; a streamer
-  override can enable or disable it for one channel.
-- `farm_drops` controls drop progress and campaign-aware selection, while
-  `claim_drops` controls only claim mutations. Leave
-  `watch_one_stream_when_drops_active=true` to limit watching to the
-  highest-ranked eligible campaign; all three settings support per-streamer
-  overrides. Set it to `false` to pin the highest-ranked eligible campaign in
-  one slot while the other slot rotates fairly through non-campaign channels.
-  Competing campaign channels wait until the pinned campaign completes or goes
-  offline, preventing Twitch's single-channel Drop progress from being split.
-  Completion is determined by matching the channel's campaign IDs to typed
-  inventory progress; a fully claimed campaign releases its pin.
-  With no active campaign, both creditable slots rotate every 15 minutes through
-  the full eligible set.
-- `watch_streak_vod_recovery` is an opt-in global/per-streamer setting. It uses
-  one bounded offline worker, exact missed-broadcast VOD matching where
-  available, clip fallback, and immediate live-stream preemption. Accepted
-  playback events are progress evidence only; the miner requires a newer typed
-  streak milestone before it reports recovery. The private
-  `data/streak-cache.json` stores only bounded channel/streak metadata.
+- Empty legacy passwords are migrated away; a non-empty password is rejected
+  because device-code login does not use it. The obsolete secure-default TLS
+  flag and unused watch-queue logging flag are also migrated away.
+- `farm_drops`, `claim_drops`, `claim_moments`, streak recovery, campaign
+  selection, and prediction settings support the global/per-streamer boundaries
+  documented in the [parity matrix](parity-matrix.md). Their network and
+  scheduling contracts are defined once in the
+  [protocol inventory](../protocol-inventory.md).
 - `betting(make_predictions)` is the historical Go/Python field name retained
   for config compatibility. The tracked template leaves it `false`; set it to
   `true` only when prediction betting is intended. Do not rename the key.
@@ -190,32 +177,10 @@ without duplicating that comparison.
 
 ## Transport health
 
-EventSub and PubSub are separate health entries. EventSub `unauthorized`,
-`revoked`, or `no-subscriptions` means the official subscription path needs
-authorization or contract attention; `rate-limited`, `server-error`,
-`connection-reset`, `connect-timeout`, `welcome-timeout`, `setup-timeout`,
-`subscription-create-timeout`, `subscription-list-timeout`, and
-`keepalive-timeout` are bounded recovery states whose names identify the failed
-stage without exposing the endpoint or payload. Presence entries
-whose source is `gql-polling` are intentionally covered by the fallback poller.
-One fallback cycle may query many streamers, but health counts that batch as a
-single success or failure so a brief shared network outage cannot exhaust the
-consecutive-failure threshold in one minute.
-
-Read-only GQL operations also retry Twitch's fixed HTTP-200 `service error`
-envelope with the same bounded request budget. Other or mixed GraphQL errors
-remain contract failures, and points-changing mutations are never replayed.
-
-Repeated failures make `--health` fail and remain visible in `--status`, but an
-active retry loop no longer terminates the miner merely because it crossed the
-failure threshold. Supervision still requests a controlled restart if the task
-stops reporting activity past its task-specific deadline, exits, or panics.
-
-PubSub `bad-auth` requires a fresh session. `listen-rejected` means one topic
-class was not accepted. `pong-timeout`, `connection-error`, `connection-closed`,
-and `reconnect` trigger bounded independent reconnection. Check the redacted
-per-class configured versus acknowledged counts; do not copy cookies or raw
-responses into support reports.
+Use `--status` for the separate EventSub, PubSub, and polling health entries.
+The authoritative timeout, retry, fallback, and mutation-replay rules are in the
+[protocol inventory](../protocol-inventory.md); never include cookies, request
+headers, endpoint query strings, or raw responses in a support report.
 
 ## Notes
 

@@ -1,6 +1,17 @@
 # Twitch Miner Rust
 
-An unofficial Twitch channel points miner rebuilt in Rust as a rewrite of [0x8fv/Twitch-Channel-Points-Miner](https://github.com/0x8fv/Twitch-Channel-Points-Miner), with the goal of keeping the useful behavior while making the codebase easier to reason about, test, ship, and operate.
+<p align="center">
+<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/FueledByRedBull/Twitch-Miner-Rust/ci.yml?branch=main&style=flat&label=CI&logo=githubactions&logoColor=white"></a>
+<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=black&logo=gnu&logoColor=white"></a>
+<a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.94.0-orange?style=flat&logo=rust&logoColor=white"></a>
+<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/pkgs/container/twitch-miner-rust"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-amd64%20%7C%20arm64%20%7C%20armv7-blue?style=flat&logo=docker&logoColor=white"></a>
+<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=lightyellow&logo=github&logoColor=white"></a>
+<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=limegreen&logo=github&logoColor=white"></a>
+</p>
+
+An unofficial Twitch channel points miner implemented in Rust, packaged for Docker and Raspberry Pi.
+
+Its mining behavior follows the lineage established by the GPL-3.0 [0x8fv/Twitch-Channel-Points-Miner-v2](https://github.com/0x8fv/Twitch-Channel-Points-Miner-v2); behavioral parity is verified against the [Go port](https://github.com/0x8fv/Twitch-Channel-Points-Miner) through shared test vectors.
 
 This project keeps the behavior that matters in day-to-day use:
 
@@ -10,19 +21,9 @@ This project keeps the behavior that matters in day-to-day use:
 - prediction betting with configurable strategies and delays
 - campaign-aware drop-priority watching and claims, raid observation,
   chat-presence, Discord notifications, and privacy-aware logging
-- Docker-friendly runtime layout and multi-arch delivery paths
+- Docker-friendly runtime layout and multi-arch Docker images
 
-It is not a toy rewrite. The workspace is split into focused crates, the Twitch parsers are fixture-backed, and the runtime is organized around a single-writer state model instead of a pile of ad-hoc side effects.
-
-## Why this rewrite exists
-
-The point was not to rewrite working behavior for the sake of language preference. The point was to keep the miner useful while making the internals less fragile.
-
-- one serialized runtime state owns mutable data instead of scattering it across the process
-- decision logic stays pure and testable
-- protocol boundaries remain isolated from domain state
-- startup, persistence, and local operation use explicit contracts
-- logging, anonymization, and Discord plumbing stay outside the hot path
+The workspace is split into focused crates, the Twitch parsers are fixture-backed, and the runtime is organized around a single-writer state model.
 
 ## What it does
 
@@ -39,6 +40,17 @@ flowchart LR
     G --> H
 ```
 
+## Design
+
+The rewrite keeps existing mining behavior while making the internals easier to
+reason about, test, and operate:
+
+- one serialized runtime state owns mutable data instead of scattering it across the process
+- decision logic stays pure and testable
+- protocol boundaries remain isolated from domain state
+- startup, persistence, and local operation use explicit contracts
+- logging, anonymization, and Discord plumbing stay outside the hot path
+
 ## Quick start
 
 ### Local
@@ -53,6 +65,17 @@ cd Twitch-Miner-Rust
 New-Item -ItemType Directory -Force ./data | Out-Null
 Copy-Item ./config.example.json ./data/config.json
 notepad ./data/config.json
+cargo run -p tm-app -- --config ./data/config.json --data-dir ./data --check-config
+cargo run -p tm-app -- --config ./data/config.json --data-dir ./data
+```
+
+On Linux or macOS:
+
+```sh
+cd Twitch-Miner-Rust
+mkdir -p ./data
+cp ./config.example.json ./data/config.json
+"${EDITOR:-nano}" ./data/config.json
 cargo run -p tm-app -- --config ./data/config.json --data-dir ./data --check-config
 cargo run -p tm-app -- --config ./data/config.json --data-dir ./data
 ```
@@ -83,6 +106,17 @@ cd Twitch-Miner-Rust
 New-Item -ItemType Directory -Force ./data | Out-Null
 Copy-Item ./config.example.json ./data/config.json
 notepad ./data/config.json
+docker compose config --quiet
+docker compose up --build
+```
+
+On Linux or macOS:
+
+```sh
+cd Twitch-Miner-Rust
+mkdir -p ./data
+cp ./config.example.json ./data/config.json
+"${EDITOR:-nano}" ./data/config.json
 docker compose config --quiet
 docker compose up --build
 ```
@@ -130,36 +164,18 @@ editing the file.
 
 Notes:
 
-- Remove `password` from older configs if it is still present; device-code login does not use it and startup will reject a non-empty value.
-- `disable_ssl_cert_verification` is intentionally unsupported and will be rejected at startup/config validation.
+- Empty legacy `password`, `disable_ssl_cert_verification=false`, and the unused
+  `watch_queue_logging` flag are migrated away. Non-empty passwords and disabled
+  TLS verification remain fail-closed validation errors.
 - Prediction bet percentages must be `0`-`100`; each stake is bounded by
   Twitch's `10`-point minimum and `250000`-point per-viewer maximum, and an
   explicit `bet.max_points` above that maximum is rejected. Delays must be
   finite and non-negative, and `PERCENTAGE` delay mode accepts `0`-`1`.
   Invalid values are rejected before runtime.
-- `farm_drops` controls campaign discovery, `DROPS` priority, and drop-shaped
-  minute-watch metadata. `claim_drops` independently controls claim mutations.
-  `watch_one_stream_when_drops_active` limits the watch set to one deterministic
-  streamer while an eligible campaign is active, matching Twitch's
-  single-stream drop progress behavior. When it is `false`, the highest-ranked
-  eligible campaign immediately pins one watch slot until the campaign finishes
-  or its channel becomes ineligible. Inventory campaign IDs are matched to
-  channel campaign IDs, so a fully claimed campaign releases the pin instead of
-  suppressing a points slot; other campaign channels wait their turn so
-  Drop progress is not split, while the second slot continues fair 15-minute
-  rotation through non-campaign channels. With no eligible campaign, both of
-  Twitch's creditable slots rotate through the complete prioritized set. Each
-  watch heartbeat first performs the Python-compatible typed playback-token and
-  HLS media preflight, then sends the Spade minute-watch event. All three
-  settings can be overridden per streamer.
-- `watch_streak_vod_recovery` is off by default. When enabled globally or for a
-  streamer, one bounded worker can submit offline VOD/clip playback evidence for
-  an unresolved known streak for up to 23.5 hours after the channel goes offline.
-  Exact broadcast-matched VODs are preferred, live streams preempt recovery, and
-  HTTP acceptance is never reported as recovery without a newer typed milestone.
-- `LONGEST_STREAK` and `EXPIRING_STREAK` are deterministic watch-priority values.
-  They use typed/cache-backed streak metadata and retain the evidence-based
-  ten-minute live streak budget.
+- Operational settings are summarized in the
+  [operator guide](docs/behavior-parity/operator-guide.md). The
+  [protocol inventory](docs/protocol-inventory.md) is the normative source for
+  playback, transport, mutation, campaign, and recovery behavior.
 
 Important paths:
 
@@ -180,9 +196,9 @@ The canonical crate ownership and dependency-direction map lives in
 [docs/architecture/README.md](docs/architecture/README.md), together with the
 request-to-reward event flow and source pointers.
 
-## Project status
+## Documentation
 
-The public repo docs focus on operating and understanding the Rust implementation:
+These cover operating and understanding the Rust implementation:
 
 - operator guide: [docs/behavior-parity/operator-guide.md](docs/behavior-parity/operator-guide.md)
 - container usage: [docs/behavior-parity/container-usage.md](docs/behavior-parity/container-usage.md)
@@ -197,7 +213,7 @@ The public repo docs focus on operating and understanding the Rust implementatio
 
 ## Validation
 
-The workspace has been exercised with:
+The workspace is validated with:
 
 ```powershell
 cargo fmt --all -- --check
@@ -206,6 +222,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo build --workspace --release --locked
 ./scripts/verify-architecture.ps1
 ./scripts/verify-build-integrity.ps1
+./scripts/verify-docs.ps1
+./scripts/verify-release-hygiene.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
 
@@ -217,17 +235,16 @@ The running process writes a privacy-safe `runtime-status.json` in the data
 directory. `twitch-miner --health` checks process and task freshness; Docker
 uses that command as its health check. `tm-app --support-bundle ./support.json`
 writes version/status and file-count metadata without cookies, config values, or log contents.
-EventSub is the preferred presence source. The isolated PubSub compatibility
-adapter supplies viewer prediction events, immediate points/bonus events,
-moment IDs, raid IDs, and community-goal events that do not have an equivalent
-viewer-authorized EventSub source. Both transports are supervised and reported
-independently; bounded GQL polling covers EventSub presence overflow/outage.
+Transport ownership and fallback behavior are defined in the
+[protocol inventory](docs/protocol-inventory.md).
 
 ## Safety notes
 
-- This project is unofficial and may carry Twitch account or campaign-rule risk.
+- This project is unofficial, is not affiliated with Twitch, and may carry
+  Twitch account or campaign-rule risk.
 - Use a dedicated Twitch account if that risk matters to you.
-- Do not commit `data/` or cookie files.
+- Do not commit `data/` or cookie files; the repo ignores runtime data and logs
+  by default.
 - Cookie files contain authentication material; treat them like credentials.
 - On Windows, keep the data directory under a user-private profile directory;
   the app relies on inherited Windows ACLs rather than changing them.
@@ -238,8 +255,6 @@ independently; bounded GQL polling covers EventSub presence overflow/outage.
 - Requests to Twitch-supplied playback and telemetry URLs intentionally bypass
   system proxies so redirect and DNS-address validation cannot be bypassed.
 - Run `tm-app --canary --data-dir ./data` on a dedicated account before publishing a release.
-- The repo ignores runtime data and logs by default.
-- This project is unofficial and not affiliated with Twitch.
 - You are responsible for how and where you use it.
 - See [SECURITY.md](SECURITY.md) for the credential and reporting model.
 

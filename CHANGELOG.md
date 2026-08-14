@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Removes unused typed config fields while preserving fail-closed migration of
+  legacy password, TLS, and watch-queue settings. Simplifies release hygiene,
+  architecture policy, protocol documentation, and the runtime spawn re-export
+  without changing mining behavior. Reproducibility now runs once per published
+  main-image candidate instead of inside every ordinary CI invocation; ordinary
+  CI restores a main-owned Rust dependency cache without allowing PR cache
+  writes.
 - Confirms offline streak recovery only when Twitch's typed streak count
   increases with a fresh achievement timestamp; missing counts remain
   unconfirmed.
