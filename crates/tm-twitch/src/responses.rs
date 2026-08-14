@@ -9,6 +9,18 @@ use crate::types::{
     StreamInfoData, TwitchClientError, UserContributionData, WatchStreakMilestone,
 };
 
+pub(crate) fn is_persisted_query_not_found(payload: &serde_json::Value) -> bool {
+    payload
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error.get("message").and_then(serde_json::Value::as_str)
+                    == Some("PersistedQueryNotFound")
+            })
+        })
+}
+
 pub(crate) fn decode_gql_data<T>(
     payload: &serde_json::Value,
     context: &'static str,

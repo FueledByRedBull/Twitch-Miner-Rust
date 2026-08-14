@@ -18,8 +18,8 @@ use crate::parsers::minute_watched_request;
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
     channel_points_context_from_typed, decode_gql_data, followers_page_from_typed,
-    inventory_snapshot_from_typed, recent_clips_from_typed, stream_info_from_typed,
-    user_contributions_from_typed, validate_typed_claim_bonus_response,
+    inventory_snapshot_from_typed, is_persisted_query_not_found, recent_clips_from_typed,
+    stream_info_from_typed, user_contributions_from_typed, validate_typed_claim_bonus_response,
     validate_typed_claim_drop_response, validate_typed_community_goal_response,
     watch_streak_milestone_from_typed,
 };
@@ -371,9 +371,7 @@ impl TwitchClient {
         let channel_login = normalize_channel_login(channel_login)
             .ok_or(TwitchClientError::InvalidField("channel_login"))?;
 
-        let response: PlaybackAccessTokenData = self
-            .post_gql_typed(&operations::playback_access_token(&channel_login))
-            .await?;
+        let response = self.fetch_playback_access_token(&channel_login).await?;
         let token =
             response
                 .stream_playback_access_token
@@ -462,6 +460,25 @@ impl TwitchClient {
             });
         }
         Ok(())
+    }
+
+    async fn fetch_playback_access_token(
+        &self,
+        channel_login: &str,
+    ) -> Result<PlaybackAccessTokenData, TwitchClientError> {
+        let mut payload = self
+            .post_gql_value(serde_json::to_value(operations::playback_access_token(
+                channel_login,
+            ))?)
+            .await?;
+        if is_persisted_query_not_found(&payload) {
+            payload = self
+                .post_gql_value(serde_json::to_value(
+                    operations::playback_access_token_fallback(channel_login),
+                )?)
+                .await?;
+        }
+        decode_gql_data(&payload, "PlaybackAccessToken")
     }
 
     pub async fn fetch_watch_streak_achievement(

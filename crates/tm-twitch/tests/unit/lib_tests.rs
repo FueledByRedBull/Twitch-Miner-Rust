@@ -297,12 +297,13 @@ fn builds_single_and_batch_gql_requests() {
     assert_eq!(playback.variables["isLive"], true);
     assert_eq!(playback.variables["playerType"], "site");
     assert_eq!(playback.variables["platform"], "web");
-    assert!(playback
-        .query
-        .is_some_and(|query| query.contains("streamPlaybackAccessToken")));
+    assert!(playback.query.is_none());
 
     let serialized = serde_json::to_value(playback).unwrap();
-    assert!(serialized["query"]
+    assert!(serialized.get("query").is_none());
+    let fallback =
+        serde_json::to_value(operations::playback_access_token_fallback("tester")).unwrap();
+    assert!(fallback["query"]
         .as_str()
         .is_some_and(|query| query.contains("$platform")));
 }
@@ -1046,7 +1047,7 @@ async fn remote_document_redirects_are_rejected_without_following_escape_target(
 
 #[tokio::test]
 async fn playback_priming_repeats_all_four_requests_on_every_tick() {
-    let (endpoints, requests, server) = spawn_playback_server(2);
+    let (endpoints, requests, server) = spawn_playback_server(2, false);
     let client = TwitchClient::with_client_and_endpoints(
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1097,6 +1098,36 @@ async fn playback_priming_repeats_all_four_requests_on_every_tick() {
             .count(),
         0
     );
+    assert!(requests
+        .iter()
+        .filter(|request| request.contains(r#""operationName":"PlaybackAccessToken""#))
+        .all(|request| !request.contains(r#""query":"#)));
+}
+
+#[tokio::test]
+async fn playback_query_is_sent_only_after_persisted_hash_miss() {
+    let (endpoints, requests, server) = spawn_playback_server(1, true);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        endpoints,
+    );
+
+    client.prime_live_playback("tester").await.unwrap();
+    server.join().unwrap();
+
+    let requests = requests.lock().unwrap();
+    let gql = requests
+        .iter()
+        .filter(|request| request.contains(r#""operationName":"PlaybackAccessToken""#))
+        .collect::<Vec<_>>();
+    assert_eq!(gql.len(), 2);
+    assert!(!gql[0].contains(r#""query":"#));
+    assert!(gql[1].contains(r#""query":"#));
 }
 
 #[tokio::test]
@@ -1390,6 +1421,7 @@ fn spawn_redirect_server() -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>)
 
 fn spawn_playback_server(
     tick_count: usize,
+    first_apq_miss: bool,
 ) -> (
     TwitchEndpoints,
     Arc<std::sync::Mutex<Vec<String>>>,
@@ -1400,7 +1432,8 @@ fn spawn_playback_server(
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = Arc::clone(&requests);
     let server = thread::spawn(move || {
-        for _ in 0..=(4 * tick_count) {
+        let mut gql_requests = 0_usize;
+        for _ in 0..(1 + 4 * tick_count + usize::from(first_apq_miss)) {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0_u8; 8192];
             let read = stream.read(&mut buffer).unwrap();
@@ -1409,7 +1442,12 @@ fn spawn_playback_server(
             let body = if request.starts_with("GET / ") {
                 r#"<script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#
             } else if request.contains(r#""operationName":"PlaybackAccessToken""#) {
-                r#"{"data":{"streamPlaybackAccessToken":{"signature":"sig","value":"token"}}}"#
+                gql_requests += 1;
+                if first_apq_miss && gql_requests == 1 {
+                    r#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#
+                } else {
+                    r#"{"data":{"streamPlaybackAccessToken":{"signature":"sig","value":"token"}}}"#
+                }
             } else if request.starts_with("GET /hls/tester.m3u8") {
                 "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1.4d401e,mp4a.40.2\",RESOLUTION=640x360\n/variant.m3u8\n"
             } else if request.starts_with("GET /variant.m3u8") {

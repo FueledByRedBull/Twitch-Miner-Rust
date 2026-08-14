@@ -7,8 +7,11 @@
   unconfirmed.
 - Corrects the `PlaybackAccessToken` APQ hash to the SHA-256 of the bundled
   full query after Twitch began rejecting mismatched hash/query pairs. The
-  experimental broadcast cache was removed before release because local
-  request savings did not prove equivalent credited WATCH behavior.
+  registered hash is now the normal request; the full query is sent only after
+  an explicit `PersistedQueryNotFound`, because Twitch returns per-channel HTTP
+  500 errors when some live channels receive the raw query. The experimental
+  broadcast cache was removed before release because local request savings did
+  not prove equivalent credited WATCH behavior.
 - Adds one anonymized-output secret-canary regression spanning saved logs,
   runtime status, and support bundles without adding a second anonymizer or
   request-redaction framework.

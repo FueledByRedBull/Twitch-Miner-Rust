@@ -168,9 +168,11 @@ pub fn playback_access_token(channel_login: &str) -> GqlPersistedOperation {
             "vodID": ""
         }),
     )
-    // Twitch accepts the full query alongside the persisted hash. Keeping both
-    // preserves the audited path without letting hash rotation stop WATCH.
-    .with_query(PLAYBACK_ACCESS_TOKEN_QUERY)
+}
+
+#[must_use]
+pub(crate) fn playback_access_token_fallback(channel_login: &str) -> GqlPersistedOperation {
+    playback_access_token(channel_login).with_query(PLAYBACK_ACCESS_TOKEN_QUERY)
 }
 
 #[must_use]
