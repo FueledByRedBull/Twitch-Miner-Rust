@@ -6,7 +6,9 @@
   legacy password, TLS, and watch-queue settings. Simplifies release hygiene,
   architecture policy, protocol documentation, and the runtime spawn re-export
   without changing mining behavior. Reproducibility now runs once per published
-  main-image candidate instead of inside every ordinary CI invocation.
+  main-image candidate instead of inside every ordinary CI invocation; ordinary
+  CI restores a main-owned Rust dependency cache without allowing PR cache
+  writes.
 - Publishes all three supported platforms through one Buildx invocation while
   retaining exact manifest, child-platform, attestation, revision, and smoke
   verification.
