@@ -9,9 +9,6 @@
   main-image candidate instead of inside every ordinary CI invocation; ordinary
   CI restores a main-owned Rust dependency cache without allowing PR cache
   writes.
-- Publishes all three supported platforms through one Buildx invocation while
-  retaining exact manifest, child-platform, attestation, revision, and smoke
-  verification.
 - Confirms offline streak recovery only when Twitch's typed streak count
   increases with a fresh achievement timestamp; missing counts remain
   unconfirmed.
