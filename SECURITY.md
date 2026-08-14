@@ -22,7 +22,7 @@ The app does not need your Twitch password for device-code login. If an older co
 
 ## Network Destinations
 
-Normal operation talks to Twitch endpoints needed for auth, GQL, PubSub, IRC, drops, channel points, and watch progress. Discord webhooks are contacted only when configured.
+Normal operation talks to Twitch endpoints needed for auth, GQL, EventSub, PubSub, IRC, drops, channel points, playback preflight, and watch progress. Discord webhooks are contacted only when configured.
 
 Automatic self-update was removed. Deploy only digest-pinned images through the documented release procedure.
 

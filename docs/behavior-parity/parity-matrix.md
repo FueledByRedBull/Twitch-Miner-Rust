@@ -2,9 +2,12 @@
 
 This is a behavior-level comparison against an explicit clean Go checkout at
 `91f00698314d`, not a claim that Twitch's undocumented contracts never change.
-Rust fixture, integration, and deterministic parser-regression tests run in
-CI. The dedicated-account `--canary` closes the remaining live read-contract
-gap before each release.
+The pinned checkout is a deterministic comparison baseline only: parity is
+established by running shared test vectors against both implementations, and no
+Go source is copied into or redistributed with this project. Rust fixture,
+integration, and deterministic parser-regression tests run in CI. The
+dedicated-account `--canary` closes the remaining live read-contract gap before
+each release.
 
 | Go behavior | Rust status | Evidence / limit |
 | --- | --- | --- |
