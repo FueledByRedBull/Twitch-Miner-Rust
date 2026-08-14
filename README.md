@@ -130,36 +130,18 @@ editing the file.
 
 Notes:
 
-- Remove `password` from older configs if it is still present; device-code login does not use it and startup will reject a non-empty value.
-- `disable_ssl_cert_verification` is intentionally unsupported and will be rejected at startup/config validation.
+- Empty legacy `password`, `disable_ssl_cert_verification=false`, and the unused
+  `watch_queue_logging` flag are migrated away. Non-empty passwords and disabled
+  TLS verification remain fail-closed validation errors.
 - Prediction bet percentages must be `0`-`100`; each stake is bounded by
   Twitch's `10`-point minimum and `250000`-point per-viewer maximum, and an
   explicit `bet.max_points` above that maximum is rejected. Delays must be
   finite and non-negative, and `PERCENTAGE` delay mode accepts `0`-`1`.
   Invalid values are rejected before runtime.
-- `farm_drops` controls campaign discovery, `DROPS` priority, and drop-shaped
-  minute-watch metadata. `claim_drops` independently controls claim mutations.
-  `watch_one_stream_when_drops_active` limits the watch set to one deterministic
-  streamer while an eligible campaign is active, matching Twitch's
-  single-stream drop progress behavior. When it is `false`, the highest-ranked
-  eligible campaign immediately pins one watch slot until the campaign finishes
-  or its channel becomes ineligible. Inventory campaign IDs are matched to
-  channel campaign IDs, so a fully claimed campaign releases the pin instead of
-  suppressing a points slot; other campaign channels wait their turn so
-  Drop progress is not split, while the second slot continues fair 15-minute
-  rotation through non-campaign channels. With no eligible campaign, both of
-  Twitch's creditable slots rotate through the complete prioritized set. Each
-  watch heartbeat first performs the Python-compatible typed playback-token and
-  HLS media preflight, then sends the Spade minute-watch event. All three
-  settings can be overridden per streamer.
-- `watch_streak_vod_recovery` is off by default. When enabled globally or for a
-  streamer, one bounded worker can submit offline VOD/clip playback evidence for
-  an unresolved known streak for up to 23.5 hours after the channel goes offline.
-  Exact broadcast-matched VODs are preferred, live streams preempt recovery, and
-  HTTP acceptance is never reported as recovery without a newer typed milestone.
-- `LONGEST_STREAK` and `EXPIRING_STREAK` are deterministic watch-priority values.
-  They use typed/cache-backed streak metadata and retain the evidence-based
-  ten-minute live streak budget.
+- Operational settings are summarized in the
+  [operator guide](docs/behavior-parity/operator-guide.md). The
+  [protocol inventory](docs/protocol-inventory.md) is the normative source for
+  playback, transport, mutation, campaign, and recovery behavior.
 
 Important paths:
 
@@ -217,11 +199,8 @@ The running process writes a privacy-safe `runtime-status.json` in the data
 directory. `twitch-miner --health` checks process and task freshness; Docker
 uses that command as its health check. `tm-app --support-bundle ./support.json`
 writes version/status and file-count metadata without cookies, config values, or log contents.
-EventSub is the preferred presence source. The isolated PubSub compatibility
-adapter supplies viewer prediction events, immediate points/bonus events,
-moment IDs, raid IDs, and community-goal events that do not have an equivalent
-viewer-authorized EventSub source. Both transports are supervised and reported
-independently; bounded GQL polling covers EventSub presence overflow/outage.
+Transport ownership and fallback behavior are defined in the
+[protocol inventory](docs/protocol-inventory.md).
 
 ## Safety notes
 

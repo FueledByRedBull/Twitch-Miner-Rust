@@ -1,5 +1,10 @@
 # Twitch Protocol Inventory
 
+This is the normative reference for Twitch operations, playback submission,
+transport ownership, retries, campaign/watch selection boundaries, and typing
+policy. Other documents summarize or compare these contracts and link here
+rather than redefining them.
+
 The Rust client keeps persisted-operation names and SHA-256 hashes in
 `tm-twitch::PERSISTED_OPERATION_CONTRACTS`. A unit test verifies that every
 builder uses an inventoried, unique contract. The comparison source is the Go

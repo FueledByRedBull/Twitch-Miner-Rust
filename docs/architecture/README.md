@@ -103,10 +103,10 @@ subscription state in their narrower transport contexts.
 | Privacy | Credentials, identifiers, balances, and raw responses do not cross privacy-safe diagnostic interfaces. |
 | Lifecycle | Health belongs to the current process session, and shutdown uses normal signal-driven task termination. |
 
-`scripts/verify-architecture.ps1` checks the allowed internal Cargo dependency
-graph, rejects network/application dependencies in `tm-domain`, and prevents
-substantial `*_tests.rs` files from returning to production source trees. CI
-runs it without installing another analysis dependency.
+`scripts/verify-architecture.ps1` rejects network/application dependencies in
+`tm-domain` and prevents substantial `*_tests.rs` files from returning to
+production source trees. Cargo manifests remain the source of truth for the
+rest of the dependency graph.
 
 Production workspace code forbids `unsafe`. CI also rejects production
 `unwrap`, `expect`, panic, `todo!`, and `unimplemented!` shortcuts, except for

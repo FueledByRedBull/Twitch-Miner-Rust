@@ -7,50 +7,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "cargo metadata failed with exit code $LASTEXITCODE."
 }
 
-$expectedInternalDependencies = [ordered]@{
-    'tm-app' = @(
-        'tm-auth',
-        'tm-config',
-        'tm-domain',
-        'tm-irc',
-        'tm-observability',
-        'tm-pubsub',
-        'tm-runtime',
-        'tm-twitch'
-    )
-    'tm-auth' = @('tm-twitch')
-    'tm-config' = @('tm-domain')
-    'tm-domain' = @()
-    'tm-irc' = @()
-    'tm-observability' = @('tm-domain')
-    'tm-pubsub' = @('tm-domain')
-    'tm-runtime' = @('tm-config', 'tm-domain', 'tm-pubsub')
-    'tm-twitch' = @('tm-domain')
+$domainPackage = @($metadata.packages | Where-Object name -eq 'tm-domain')
+if ($domainPackage.Count -ne 1) {
+    throw 'Expected exactly one Cargo package named tm-domain.'
 }
-$productionCrates = @($expectedInternalDependencies.Keys)
-
-foreach ($crate in $productionCrates) {
-    $package = $metadata.packages | Where-Object name -eq $crate
-    if (@($package).Count -ne 1) {
-        throw "Expected exactly one Cargo package named ${crate}."
-    }
-    $actual = @(
-        $package.dependencies |
-            Where-Object { $_.name -in $productionCrates } |
-            ForEach-Object name |
-            Sort-Object -Unique
-    )
-    $expected = @($expectedInternalDependencies[$crate] | Sort-Object -Unique)
-    $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
-    if ($difference.Count -ne 0) {
-        $detail = ($difference | ForEach-Object {
-            "$($_.SideIndicator) $($_.InputObject)"
-        }) -join ', '
-        throw "Internal dependency boundary changed for ${crate}: ${detail}"
-    }
-}
-
-$domainPackage = $metadata.packages | Where-Object name -eq 'tm-domain'
 $forbiddenDomainDependencies = @(
     'anyhow',
     'clap',

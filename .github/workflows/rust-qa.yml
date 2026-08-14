@@ -44,6 +44,5 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --locked --no-deps
 
-      - name: Verify deterministic release metadata and build integrity
-        shell: pwsh
-        run: ./scripts/verify-build-integrity.ps1
+      - name: Build release workspace
+        run: cargo build --workspace --release --locked

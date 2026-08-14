@@ -7,17 +7,19 @@ Use [release-record-template.md](release-record-template.md) for the signed
 release evidence. Candidate and rollback digests belong in that release record,
 never in runtime configuration.
 
+The read-only canary and live transport expectations are defined in the
+[protocol inventory](protocol-inventory.md); this document owns only release,
+deployment, rollback, and evidence procedure.
+
 The Docker builder also pins the Rust toolchain to an immutable manifest
 digest and pins `cargo-chef` to an exact locked version;
 `scripts/verify-release-hygiene.ps1` rejects mutable builder inputs.
 
-`scripts/verify-build-integrity.ps1` performs two isolated optimized builds and
-requires identical executable SHA-256 values before checking embedded revision
-metadata. It fixes the source timestamp, disables incremental compilation, and
-remaps source and target paths. On Windows/MSVC it also suppresses the unused
-absolute PDB reference and enables `/Brepro`; without reproducible-link mode,
-volatile PE metadata makes otherwise identical stripped builds hash
-differently.
+The main-image publication path runs `scripts/verify-build-integrity.ps1` once
+per candidate. It performs two isolated optimized builds and requires identical
+executable SHA-256 values plus embedded revision metadata. Ordinary pull-request
+CI performs one build through the normal workspace checks instead of repeating
+the release-only comparison.
 
 For an offline recovery build, package the exact Git revision together with
 every locked crates.io source:

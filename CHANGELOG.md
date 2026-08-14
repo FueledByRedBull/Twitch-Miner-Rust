@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Removes unused typed config fields while preserving fail-closed migration of
+  legacy password, TLS, and watch-queue settings. Simplifies release hygiene,
+  architecture policy, protocol documentation, and the runtime spawn re-export
+  without changing mining behavior. Reproducibility now runs once per published
+  main-image candidate instead of inside every ordinary CI invocation.
+- Publishes all three supported platforms through one Buildx invocation while
+  retaining exact manifest, child-platform, attestation, revision, and smoke
+  verification.
 - Confirms offline streak recovery only when Twitch's typed streak count
   increases with a fresh achievement timestamp; missing counts remain
   unconfirmed.

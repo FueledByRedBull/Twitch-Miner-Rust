@@ -16,18 +16,13 @@ mod types;
 
 pub use effect::RuntimeEffect;
 pub use error::{Result, RuntimeError};
-pub use handle::{RuntimeHandle, RuntimeMetrics, RuntimeMetricsSnapshot};
+pub use handle::{spawn_runtime_state, RuntimeHandle, RuntimeMetrics, RuntimeMetricsSnapshot};
 pub use summary::{apply_pubsub_gain, build_session_summary, update_history};
 pub use tm_domain::MinerEvent;
 pub use types::{
     ContextUpdate, EventApplication, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
     StreamerSummary,
 };
-
-#[must_use]
-pub fn spawn_runtime_state(state: RuntimeState) -> RuntimeHandle {
-    handle::spawn_runtime_state(state)
-}
 
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]
