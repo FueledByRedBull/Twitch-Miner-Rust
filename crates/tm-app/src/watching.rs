@@ -75,13 +75,21 @@ impl WatchRotation {
         }
 
         // Twitch advances Drop progress on only one channel. Pin the first
-        // ranked campaign and keep competing campaigns out of the spare slot.
+        // ranked campaign and prefer non-campaign channels for the spare slot.
         self.queue.retain(|login| {
             !campaign_logins.contains(login)
                 && ordered_eligible.iter().any(|eligible| eligible == login)
         });
         for login in ordered_eligible {
             if !campaign_logins.contains(login) && !self.queue.iter().any(|queued| queued == login)
+            {
+                self.queue.push_back(login.clone());
+            }
+        }
+        if self.queue.is_empty() {
+            for login in ordered_eligible
+                .iter()
+                .filter(|login| Some(*login) != self.pinned_campaign.as_ref())
             {
                 self.queue.push_back(login.clone());
             }
@@ -307,6 +315,21 @@ mod tests {
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &logins(&["charlie"]), &[], ts(1)),
             logins(&["charlie", "alpha"])
+        );
+    }
+
+    #[test]
+    fn competing_campaigns_fill_and_rotate_the_spare_slot() {
+        let eligible = logins(&["alpha", "bravo", "charlie"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &eligible, &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &eligible, &[], ts(900)),
+            logins(&["alpha", "charlie"])
         );
     }
 
