@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keeps the second credited-watch slot active when every eligible online
+  channel belongs to the same Drop campaign. The highest-ranked campaign stays
+  pinned, non-campaign channels remain preferred for the spare slot, and
+  competing campaign channels fill it only when no non-campaign alternative is
+  available.
 - Removes unused typed config fields while preserving fail-closed migration of
   legacy password, TLS, and watch-queue settings. Simplifies release hygiene,
   architecture policy, protocol documentation, and the runtime spawn re-export
