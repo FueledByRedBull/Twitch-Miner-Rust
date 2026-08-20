@@ -12,6 +12,17 @@ implementation at commit `91f00698314d`; the baseline gate permits only its thre
 unimplemented definitions plus the two Go-unused definitions that Rust exercises
 as typed playback and Drops-dashboard reads.
 
+The pin is held deliberately rather than tracked. As of 2026-08-20 the reviewed
+upstream head `62eb343` still fails `go test` on a malformed nested declaration
+in `TwitchChannelPointsMiner/miner_test.go`, and its history has diverged from
+the pin, so the baseline cannot be advanced mechanically. An informational
+comparison against that head shows the persisted-operation surface changed only
+by adding `ClipsCards__User` and `FilterableVideoTower_Videos`, with no removals
+and no hash rotations; both hashes already match this project's implementations.
+Advancing to the first green upstream revision would therefore remove the two
+documented Rust-only exceptions rather than add new ones. Broken upstream tests
+are never made an enforced gate here.
+
 When both repositories are available, run the baseline tests and the explicit
 comparison gate from the Rust workspace:
 
@@ -123,14 +134,17 @@ value every ten hours. Discovery or rejection failures remain explicit and are
 covered by the canary; the miner does not guess alternate identities or
 credentials.
 
-Offline streak recovery uses the two typed read-only operations above. Archived
+Offline streak recovery uses the three typed read-only operations above. Archived
 videos require an ID, duration, and optional broadcast identifier; the scheduler
 accepts a VOD only when its broadcast identifier exactly matches the missed live
 broadcast and it is at least five minutes long. Clip nodes require an ID, slug,
-URL, and finite positive duration. Playback submission is opt-in, single-worker,
-bounded to 23.5 hours, and preempted by live state. An HTTP 204 is recorded only
-as accepted playback progress; a newer typed `RewardList` milestone is required
-before runtime state reports recovery.
+URL, finite positive duration, and the same broadcast identifier. Playback
+submission is opt-in, single-worker, bounded to 23.5 hours, and preempted by live
+state. An HTTP 204 is recorded only as accepted playback progress. Runtime state
+reports recovery only when a later typed `RewardList` preserves the same non-null
+streak count and removes the targeted broadcast from `missedStreams`, or clears
+the expiring-risk envelope entirely. Unconfirmed playback retains the short
+retry cooldown; only typed confirmation receives the recovery-window cooldown.
 
 Mutation contracts are verified with sanitized fixtures and response-validation
 tests. Read-only requests are bounded and header-aware; mutations are never
@@ -165,6 +179,9 @@ Every tick performs one `PlaybackAccessToken` GQL request, one master-playlist
 GET, one selected media-playlist GET, and one newest-complete-segment HEAD before
 the spade POST. Local request-count savings did not establish credited
 WATCH/WATCH_STREAK equivalence, so the experimental broadcast cache was removed.
+The three HLS reads reuse the standard three-attempt read policy for connection
+resets, timeouts, HTTP 429, and HTTP 5xx; other HTTP 4xx responses fail without
+retry. Failures retain only the fixed playback stage and sanitized failure class.
 
 The playback-token request sends the audited persisted hash alone. Only an exact
 `PersistedQueryNotFound` retries once with the audited full read-only query;
@@ -181,7 +198,24 @@ arbitrary tracked channels. Other channels remain on PubSub compatibility.
 EventSub creation and list responses use separate typed envelopes because only
 the list response contains pagination. Both are capacity-planned; overflow or
 failed presence capabilities use bounded GQL polling instead of silently
-dropping channels. The WebSocket requests Twitch's supported 30-second
+dropping channels.
+
+Capacity is planned against a total subscription cost ceiling of `10` with an
+assumed cost of `1` per subscription, and one connection is additionally bounded
+to 300 subscriptions. An ordinary tracked streamer plans `stream.online` and
+`stream.offline`, so it spends two cost units and the ceiling admits presence
+subscriptions for five streamers. Streamers beyond that allocation are annotated
+`capacity-overflow` and served by bounded GQL presence polling; `channel.raid`
+is skipped for them and raid observation falls back to the PubSub compatibility
+path. `capacity-overflow` is the designed allocation outcome, not a failure: a
+saturated plan reports ten planned and ten active subscriptions with zero failed
+subscriptions and a non-zero overflow count. The `--status` document reports the
+split under `eventsub` as `planned_subscriptions`, `active_subscriptions`,
+`failed_subscriptions`, `total_cost`, `max_total_cost`, and `overflow_streamers`,
+and each per-streamer capability records its own `presence_source`,
+`prediction_source`, `raid_source`, and `failure_class`.
+
+The WebSocket requests Twitch's supported 30-second
 keepalive window and applies a five-second delivery grace before reconnecting,
 avoiding an edge race at the advertised silence boundary. A connected peer has
 15 seconds to send the first Welcome frame, and the complete connect, Welcome,

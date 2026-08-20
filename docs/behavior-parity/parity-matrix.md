@@ -13,7 +13,7 @@ each release.
 | --- | --- | --- |
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
-| Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context, credit eligibility, fair rotation, uncached playback priming, and confirmed streak recovery are fixture-tested. Exact contracts and limits are normative in the [protocol inventory](../protocol-inventory.md). |
+| Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context, credit eligibility, fair rotation, bounded transient HLS retries, uncached playback priming, and broadcast-bound streak recovery are fixture-tested. Exact contracts and limits are normative in the [protocol inventory](../protocol-inventory.md). |
 | Drops and moments | Improved | Drop progress, campaign selection, and claims have independent controls and typed fixture coverage. Live evidence includes 14 progress/claim pairs; it does not claim exact campaign pin/unpin telemetry. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including an explicit first-outcome tie contract shared with Go/Python, deterministic coverage of the application-injected `1..=5` stealth amount offset, Twitch's documented `10`-to-`250000` per-viewer stake bounds, and PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
@@ -21,7 +21,7 @@ each release.
 | Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. Discord is the sole built-in outbound notifier. Generic notifier backends and analytics exporters are out of scope unless a concrete operator requirement justifies them. |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
 | Runtime supervision and health | Improved | Task-exit/panic supervision, separate activity/success freshness, and bounded recovery are status-tested. |
-| Docker amd64, arm64, arm/v7 | Supported | One published manifest is verified for all three child platforms, attestations, embedded revision, and smoke behavior. |
+| Docker amd64 and arm64 | Supported | One published manifest is verified for both child platforms, attestations, embedded revision, and smoke behavior. ARMv7 is not supported. |
 | Automatic updater | Deliberately removed | Legacy `auto_update=true` is rejected; no dormant binary replacement code remains. |
 | Config mutation | Improved | Versioned preview, atomic write, and rollback backup. |
 

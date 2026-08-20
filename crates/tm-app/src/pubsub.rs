@@ -142,27 +142,26 @@ async fn handle_pubsub_message(
     health: &HealthTracker,
     message: SupervisedPubSubEvent,
 ) -> bool {
-    let SupervisedPubSubEvent::Transport(message) = message else {
-        let SupervisedPubSubEvent::ConnectionLost {
+    let message = match message {
+        SupervisedPubSubEvent::Transport(message) => message,
+        SupervisedPubSubEvent::ConnectionLost {
             acknowledged_by_class,
             configured_classes,
             failure_class,
-        } = message
-        else {
-            unreachable!();
-        };
-        health.failure("pubsub", failure_class);
-        for topic_class in configured_classes {
-            health.record_pubsub_disconnect(
-                &topic_class,
-                acknowledged_by_class
-                    .get(&topic_class)
-                    .copied()
-                    .unwrap_or_default(),
-                failure_class,
-            );
+        } => {
+            health.failure("pubsub", failure_class);
+            for topic_class in configured_classes {
+                health.record_pubsub_disconnect(
+                    &topic_class,
+                    acknowledged_by_class
+                        .get(&topic_class)
+                        .copied()
+                        .unwrap_or_default(),
+                    failure_class,
+                );
+            }
+            return false;
         }
-        return false;
     };
     match message {
         PubSubConnectionEvent::Heartbeat => {

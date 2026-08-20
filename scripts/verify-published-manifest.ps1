@@ -50,23 +50,21 @@ if ($ImageReference.Contains('@')) {
     $imageName = $ImageReference.Substring(0, $tagSeparator)
 }
 
-foreach ($platform in @('linux/amd64', 'linux/arm64', 'linux/arm/v7')) {
+$runtimeManifests = @($index.manifests | Where-Object { $_.platform.os -eq 'linux' })
+if ($runtimeManifests.Count -ne 2) {
+    throw "Published manifest ${ImageReference} must contain exactly two Linux child images."
+}
+
+foreach ($platform in @('linux/amd64', 'linux/arm64')) {
     $descriptor = switch ($platform) {
         'linux/amd64' {
-            @($index.manifests | Where-Object {
+            @($runtimeManifests | Where-Object {
                     $_.platform.os -eq 'linux' -and $_.platform.architecture -eq 'amd64'
                 } | Select-Object -First 1)
         }
         'linux/arm64' {
-            @($index.manifests | Where-Object {
+            @($runtimeManifests | Where-Object {
                     $_.platform.os -eq 'linux' -and $_.platform.architecture -eq 'arm64'
-                } | Select-Object -First 1)
-        }
-        'linux/arm/v7' {
-            @($index.manifests | Where-Object {
-                    $_.platform.os -eq 'linux' -and
-                    $_.platform.architecture -eq 'arm' -and
-                    $_.platform.variant -eq 'v7'
                 } | Select-Object -First 1)
         }
     }

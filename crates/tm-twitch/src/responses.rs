@@ -320,10 +320,26 @@ pub(crate) fn watch_streak_milestone_from_typed(
         .map_err(|_| {
             TwitchClientError::InvalidField("data.channel.self.watchStreakMilestone.expiresAt")
         })?;
+    let missed_broadcast_ids = envelope
+        .missed_streams
+        .map(|streams| {
+            streams
+                .into_iter()
+                .flat_map(|stream| stream.broadcast_identifiers)
+                .map(|identifier| {
+                    required_text(
+                        identifier.id,
+                        "data.channel.self.watchStreakMilestone.missedStreams.broadcastIdentifiers.id",
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     Ok(Some(WatchStreakMilestone {
         value,
         achievement_timestamp,
         expires_at,
+        missed_broadcast_ids,
     }))
 }
 
@@ -395,6 +411,10 @@ pub(crate) fn recent_clips_from_typed(
                 slug: required_text(node.slug, "data.user.clips.edges.node.slug")?,
                 url: required_text(node.url, "data.user.clips.edges.node.url")?,
                 duration_seconds,
+                broadcast_id: node
+                    .broadcast_identifier
+                    .and_then(|identifier| identifier.id)
+                    .filter(|value| !value.trim().is_empty()),
             })
         })
         .collect()

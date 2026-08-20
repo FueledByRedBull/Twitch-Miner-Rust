@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Publishes native AMD64 and ARM64 images with reusable cargo-chef dependency
+  layers. ARMv7 publication is removed because no supported deployment requires
+  the 32-bit target; per-platform smoke, SBOM, provenance, revision, and
+  manifest verification remain mandatory.
 - Keeps the second credited-watch slot active when every eligible online
   channel belongs to the same Drop campaign. The highest-ranked campaign stays
   pinned, non-campaign channels remain preferred for the spare slot, and
@@ -14,9 +18,12 @@
   main-image candidate instead of inside every ordinary CI invocation; ordinary
   CI restores a main-owned Rust dependency cache without allowing PR cache
   writes.
-- Confirms offline streak recovery only when Twitch's typed streak count
-  increases with a fresh achievement timestamp; missing counts remain
-  unconfirmed.
+- Confirms offline streak recovery only when the targeted broadcast leaves
+  Twitch's typed missed-stream risk while the existing non-null streak count is
+  preserved. VODs and clips must carry that exact broadcast identifier.
+- Reuses the bounded read retry for playback master/media playlist GETs and the
+  segment HEAD. Only transient connection, timeout, 429, and 5xx failures retry;
+  minute-watch warnings now retain the sanitized failing playback stage.
 - Corrects the `PlaybackAccessToken` APQ hash to the SHA-256 of the bundled
   full query after Twitch began rejecting mismatched hash/query pairs. The
   registered hash is now the normal request; the full query is sent only after

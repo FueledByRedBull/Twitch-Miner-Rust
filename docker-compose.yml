@@ -5,6 +5,10 @@ services:
       dockerfile: Dockerfile
     user: "${UID:-1000}:${GID:-1000}"
     init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     stop_grace_period: 30s
     read_only: true

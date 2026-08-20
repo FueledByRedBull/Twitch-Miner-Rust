@@ -50,7 +50,7 @@ pub(crate) fn spawn_streak_recovery_loop(
                     };
                     let key = streamer.stream.as_ref().map(|stream| stream.broadcast_id.clone()).unwrap_or_default();
                     retry_after.insert(key, now + Duration::from_secs(RETRY_COOLDOWN_SECONDS));
-                    let playback_attempted = recover_streamer(
+                    let confirmed = recover_streamer(
                         &mut stop,
                         &runtime,
                         twitch.as_ref(),
@@ -58,7 +58,7 @@ pub(crate) fn spawn_streak_recovery_loop(
                         &streamer,
                         &observability,
                     ).await;
-                    if playback_attempted {
+                    if confirmed {
                         retry_after.insert(
                             streamer.stream.as_ref().map(|stream| stream.broadcast_id.clone()).unwrap_or_default(),
                             now + Duration::from_secs(RECOVERY_WINDOW_SECONDS.cast_unsigned()),
@@ -119,16 +119,28 @@ async fn recover_streamer(
     observability: &AppObservability,
 ) -> bool {
     let streamer_name = observability.streamer_name(streamer);
+    let started_at = time_now();
+    let Some(stream) = streamer.stream.as_ref() else {
+        return false;
+    };
+    let baseline = match twitch
+        .fetch_watch_streak_milestone(&streamer.channel_id)
+        .await
+    {
+        Ok(Some(milestone)) => milestone,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(operation = "streak_recovery", error_class = ?error.failure_class(), "Unable to load typed streak risk for {streamer_name}");
+            return false;
+        }
+    };
+    if !milestone_targets_broadcast(&baseline, &stream.broadcast_id, started_at) {
+        return false;
+    }
     tracing::info!(
         operation = "streak_recovery",
         "Starting bounded offline streak recovery for {streamer_name}"
     );
-    let started_at = time_now();
-    let baseline = twitch
-        .fetch_watch_streak_milestone(&streamer.channel_id)
-        .await
-        .ok()
-        .flatten();
     let spade_url = match twitch.fetch_spade_url(&streamer.username).await {
         Ok(url) => url,
         Err(error) => {
@@ -136,17 +148,14 @@ async fn recover_streamer(
             return false;
         }
     };
-    let Some(stream) = streamer.stream.as_ref() else {
-        return false;
-    };
     let attempt = RecoveryAttempt {
         runtime,
         twitch,
         spade_url: &spade_url,
         user_id,
         streamer,
-        baseline: baseline.as_ref(),
-        started_at,
+        baseline: &baseline,
+        target_broadcast_id: &stream.broadcast_id,
         observability,
     };
     let videos = match twitch
@@ -188,8 +197,8 @@ struct RecoveryAttempt<'a> {
     spade_url: &'a str,
     user_id: &'a str,
     streamer: &'a Streamer,
-    baseline: Option<&'a WatchStreakMilestone>,
-    started_at: OffsetDateTime,
+    baseline: &'a WatchStreakMilestone,
+    target_broadcast_id: &'a str,
     observability: &'a AppObservability,
 }
 
@@ -202,7 +211,7 @@ async fn recover_with_vod(
     for _ in 0..(MAX_RECOVERY_SECONDS / VOD_EVENT_INTERVAL_SECONDS) {
         if preempted(attempt.runtime, attempt.streamer).await {
             log_preempted(attempt.observability, attempt.streamer);
-            return true;
+            return false;
         }
         let playback = Stream {
             payload: vec![vod_minute_event(
@@ -232,7 +241,7 @@ async fn recover_with_vod(
                 attempt.twitch,
                 attempt.streamer,
                 attempt.baseline,
-                attempt.started_at,
+                attempt.target_broadcast_id,
                 attempt.observability,
             )
             .await
@@ -241,11 +250,11 @@ async fn recover_with_vod(
             }
         }
         if !wait_or_stop(stop, VOD_EVENT_INTERVAL_SECONDS).await {
-            return true;
+            return false;
         }
     }
     log_unconfirmed(attempt.observability, attempt.streamer, "VOD", accepted);
-    accepted > 0
+    false
 }
 
 async fn recover_with_clips(
@@ -255,7 +264,10 @@ async fn recover_with_clips(
 ) -> bool {
     let mut elapsed = 0_u64;
     let mut accepted = 0_u64;
-    for clip in clips {
+    for clip in clips
+        .iter()
+        .filter(|clip| clip_matches_broadcast(clip, attempt.target_broadcast_id))
+    {
         if elapsed >= MAX_RECOVERY_SECONDS {
             break;
         }
@@ -287,10 +299,10 @@ async fn recover_with_clips(
             }
             if preempted(attempt.runtime, attempt.streamer).await {
                 log_preempted(attempt.observability, attempt.streamer);
-                return true;
+                return false;
             }
             if !wait_or_stop(stop, CLIP_EVENT_INTERVAL_SECONDS).await {
-                return true;
+                return false;
             }
             elapsed += CLIP_EVENT_INTERVAL_SECONDS;
             playback.payload = vec![clip_progress_event(
@@ -320,7 +332,7 @@ async fn recover_with_clips(
                     attempt.twitch,
                     attempt.streamer,
                     attempt.baseline,
-                    attempt.started_at,
+                    attempt.target_broadcast_id,
                     attempt.observability,
                 )
                 .await
@@ -332,15 +344,15 @@ async fn recover_with_clips(
         }
     }
     log_unconfirmed(attempt.observability, attempt.streamer, "clip", accepted);
-    accepted > 0
+    false
 }
 
 async fn reconcile_typed_recovery(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
     streamer: &Streamer,
-    baseline: Option<&WatchStreakMilestone>,
-    started_at: OffsetDateTime,
+    baseline: &WatchStreakMilestone,
+    target_broadcast_id: &str,
     observability: &AppObservability,
 ) -> bool {
     let Ok(Some(milestone)) = twitch
@@ -349,14 +361,14 @@ async fn reconcile_typed_recovery(
     else {
         return false;
     };
-    if !streak_count_increased(baseline, &milestone, started_at) {
+    if !targeted_recovery_confirmed(baseline, &milestone, target_broadcast_id) {
         return false;
     }
     if runtime
         .mark_watch_streak_recovered(
             streamer.channel_id.clone(),
             milestone.value,
-            milestone.achievement_timestamp,
+            time_now(),
             milestone.expires_at,
         )
         .await
@@ -367,24 +379,45 @@ async fn reconcile_typed_recovery(
     let name = observability.streamer_name(streamer);
     tracing::info!(
         operation = "streak_recovery",
-        "Typed milestone confirmed offline streak recovery for {name}"
+        "Typed missed-broadcast state confirmed offline streak recovery for {name}"
     );
     true
 }
 
-fn streak_count_increased(
-    baseline: Option<&WatchStreakMilestone>,
+fn milestone_targets_broadcast(
     milestone: &WatchStreakMilestone,
-    started_at: OffsetDateTime,
+    broadcast_id: &str,
+    now: OffsetDateTime,
 ) -> bool {
-    baseline.is_some_and(|before| {
-        before
-            .value
-            .zip(milestone.value)
-            .is_some_and(|(before, after)| after > before)
-            && milestone.achievement_timestamp > before.achievement_timestamp
-            && milestone.achievement_timestamp >= started_at - Duration::from_secs(5 * 60)
-    })
+    milestone.value.is_some()
+        && milestone
+            .expires_at
+            .is_some_and(|expires_at| expires_at > now)
+        && milestone
+            .missed_broadcast_ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| id == broadcast_id))
+}
+
+fn targeted_recovery_confirmed(
+    baseline: &WatchStreakMilestone,
+    milestone: &WatchStreakMilestone,
+    broadcast_id: &str,
+) -> bool {
+    baseline.value.is_some()
+        && milestone.value == baseline.value
+        && baseline
+            .missed_broadcast_ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| id == broadcast_id))
+        && match milestone.missed_broadcast_ids.as_ref() {
+            Some(ids) => ids.iter().all(|id| id != broadcast_id),
+            None => milestone.expires_at.is_none(),
+        }
+}
+
+fn clip_matches_broadcast(clip: &RecentClip, broadcast_id: &str) -> bool {
+    clip.broadcast_id.as_deref() == Some(broadcast_id)
 }
 
 async fn preempted(runtime: &tm_runtime::RuntimeHandle, streamer: &Streamer) -> bool {
@@ -480,7 +513,7 @@ fn log_unconfirmed(
     accepted: u64,
 ) {
     let name = observability.streamer_name(streamer);
-    tracing::info!(operation = "streak_recovery", "Offline streak {source} playback finished for {name}: {accepted} events accepted; recovery remains unconfirmed without a typed milestone");
+    tracing::info!(operation = "streak_recovery", "Offline streak {source} playback finished for {name}: {accepted} events accepted; recovery remains unconfirmed without typed missed-broadcast clearance");
 }
 
 #[cfg(test)]
@@ -578,6 +611,7 @@ mod tests {
             slug: "slug".into(),
             url: "https://clips.twitch.tv/slug".into(),
             duration_seconds: 10.0,
+            broadcast_id: Some(String::from("broadcast")),
         };
         let progress = clip_progress_event(&streamer, "viewer", &clip, "session", 5);
         assert_eq!(progress["event"], "n_second_play");
@@ -588,27 +622,42 @@ mod tests {
     }
 
     #[test]
-    fn recovery_requires_a_fresh_streak_count_increase() {
-        let started_at = ts(10_000);
+    fn recovery_requires_the_targeted_missed_broadcast_to_clear() {
+        let now = ts(10_000);
         let baseline = WatchStreakMilestone {
             value: Some(4),
             achievement_timestamp: ts(9_900),
-            expires_at: None,
+            expires_at: Some(ts(20_000)),
+            missed_broadcast_ids: Some(vec![String::from("broadcast-1")]),
         };
         let confirmed = WatchStreakMilestone {
-            value: Some(5),
-            achievement_timestamp: ts(10_001),
+            value: Some(4),
+            achievement_timestamp: ts(9_900),
             expires_at: None,
+            missed_broadcast_ids: None,
         };
-        assert!(streak_count_increased(
-            Some(&baseline),
+        assert!(milestone_targets_broadcast(&baseline, "broadcast-1", now));
+        assert!(targeted_recovery_confirmed(
+            &baseline,
             &confirmed,
-            started_at
+            "broadcast-1"
         ));
+        for remaining in [Vec::new(), vec![String::from("broadcast-2")]] {
+            let active_confirmed = WatchStreakMilestone {
+                expires_at: Some(ts(20_000)),
+                missed_broadcast_ids: Some(remaining),
+                ..confirmed.clone()
+            };
+            assert!(targeted_recovery_confirmed(
+                &baseline,
+                &active_confirmed,
+                "broadcast-1"
+            ));
+        }
 
         for unconfirmed in [
             WatchStreakMilestone {
-                value: Some(4),
+                value: Some(5),
                 ..confirmed.clone()
             },
             WatchStreakMilestone {
@@ -616,17 +665,39 @@ mod tests {
                 ..confirmed.clone()
             },
             WatchStreakMilestone {
-                value: Some(5),
-                achievement_timestamp: ts(9_000),
-                expires_at: None,
+                expires_at: Some(ts(20_000)),
+                missed_broadcast_ids: Some(vec![String::from("broadcast-1")]),
+                ..confirmed.clone()
+            },
+            WatchStreakMilestone {
+                missed_broadcast_ids: Some(vec![String::from("broadcast-1")]),
+                ..confirmed.clone()
             },
         ] {
-            assert!(!streak_count_increased(
-                Some(&baseline),
+            assert!(!targeted_recovery_confirmed(
+                &baseline,
                 &unconfirmed,
-                started_at
+                "broadcast-1"
             ));
         }
-        assert!(!streak_count_increased(None, &confirmed, started_at));
+        assert!(!targeted_recovery_confirmed(
+            &baseline,
+            &confirmed,
+            "broadcast-2"
+        ));
+    }
+
+    #[test]
+    fn recovery_clips_must_match_the_target_broadcast() {
+        let mut clip = RecentClip {
+            id: String::from("id"),
+            slug: String::from("slug"),
+            url: String::from("https://clips.twitch.tv/slug"),
+            duration_seconds: 10.0,
+            broadcast_id: Some(String::from("broadcast-1")),
+        };
+        assert!(clip_matches_broadcast(&clip, "broadcast-1"));
+        clip.broadcast_id = None;
+        assert!(!clip_matches_broadcast(&clip, "broadcast-1"));
     }
 }

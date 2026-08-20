@@ -146,7 +146,7 @@ If you are migrating a Linux bind mount from an older root-run image, make sure 
 
 ## Multi-Arch Builds
 
-Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64`, `linux/arm64`, and `linux/arm/v7`, matching the GitHub Actions workflow.
+Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one supported local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64` and `linux/arm64`, matching the GitHub Actions workflow. ARMv7 is not supported.
 
 ```powershell
 cd Twitch-Miner-Rust

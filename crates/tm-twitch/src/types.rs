@@ -184,6 +184,7 @@ pub struct WatchStreakMilestone {
     pub value: Option<u32>,
     pub achievement_timestamp: OffsetDateTime,
     pub expires_at: Option<OffsetDateTime>,
+    pub missed_broadcast_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +200,7 @@ pub struct RecentClip {
     pub slug: String,
     pub url: String,
     pub duration_seconds: f64,
+    pub broadcast_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -386,6 +388,14 @@ pub(crate) struct WatchStreakMilestoneEnvelope {
     pub(crate) milestone: Option<WatchStreakMilestoneData>,
     #[serde(rename = "expiresAt")]
     pub(crate) expires_at: Option<String>,
+    #[serde(rename = "missedStreams")]
+    pub(crate) missed_streams: Option<Vec<MissedStream>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MissedStream {
+    #[serde(rename = "broadcastIdentifiers", default)]
+    pub(crate) broadcast_identifiers: Vec<BroadcastIdentifier>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -458,6 +468,8 @@ pub(crate) struct RecentClipNode {
     pub(crate) url: Option<String>,
     #[serde(rename = "durationSeconds")]
     pub(crate) duration_seconds: Option<f64>,
+    #[serde(rename = "broadcastIdentifier")]
+    pub(crate) broadcast_identifier: Option<BroadcastIdentifier>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -9,7 +9,7 @@ place release evidence in runtime configuration or status files.
 - source revision: `<40-character Git SHA>`
 - manifest digest: `sha256:<64 hexadecimal characters>`
 - commit-SHA manifest and signed-tag digest equality: `<pass/fail>`
-- platforms: `linux/amd64`, `linux/arm64`, `linux/arm/v7`
+- platforms: `linux/amd64`, `linux/arm64`
 - CI run: `<URL and successful conclusion>`
 - multiarch run: `<URL and successful conclusion>`
 - SBOM/provenance: `<attestation URLs>`

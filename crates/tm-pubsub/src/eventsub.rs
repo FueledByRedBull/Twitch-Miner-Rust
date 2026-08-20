@@ -752,7 +752,7 @@ async fn send_setup(
 
 fn validate_reconnect_url(reconnect_url: &str) -> Result<(), EventSubError> {
     let url = Url::parse(reconnect_url)
-        .map_err(|_| EventSubError::Protocol("invalid EventSub reconnect URL"))?;
+        .map_err(|_| EventSubError::Protocol("invalid EventSub reconnect URL: parse"))?;
 
     #[cfg(test)]
     if url.scheme() == "ws" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "::1")) {
@@ -761,18 +761,35 @@ fn validate_reconnect_url(reconnect_url: &str) -> Result<(), EventSubError> {
         return Ok(());
     }
 
-    let host_is_twitch = url
+    // Rejections carry a fixed predicate name only. The URL, its path, query, session
+    // material, and any observed host value are never returned or logged.
+    if url.scheme() != "wss" {
+        return Err(EventSubError::Protocol(
+            "invalid EventSub reconnect URL: scheme",
+        ));
+    }
+    if !url
         .host_str()
-        .is_some_and(|host| host.eq_ignore_ascii_case("eventsub.wss.twitch.tv"));
-    let safe_port = url.port().is_none_or(|port| port == 443);
-    if url.scheme() != "wss"
-        || !host_is_twitch
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !safe_port
-        || url.fragment().is_some()
+        .is_some_and(|host| host.eq_ignore_ascii_case("eventsub.wss.twitch.tv"))
     {
-        return Err(EventSubError::Protocol("invalid EventSub reconnect URL"));
+        return Err(EventSubError::Protocol(
+            "invalid EventSub reconnect URL: host",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(EventSubError::Protocol(
+            "invalid EventSub reconnect URL: credentials",
+        ));
+    }
+    if url.port().is_some_and(|port| port != 443) {
+        return Err(EventSubError::Protocol(
+            "invalid EventSub reconnect URL: port",
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(EventSubError::Protocol(
+            "invalid EventSub reconnect URL: fragment",
+        ));
     }
     Ok(())
 }

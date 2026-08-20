@@ -4,7 +4,7 @@
 <a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/FueledByRedBull/Twitch-Miner-Rust/ci.yml?branch=main&style=flat&label=CI&logo=githubactions&logoColor=white"></a>
 <a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=black&logo=gnu&logoColor=white"></a>
 <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.94.0-orange?style=flat&logo=rust&logoColor=white"></a>
-<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/pkgs/container/twitch-miner-rust"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-amd64%20%7C%20arm64%20%7C%20armv7-blue?style=flat&logo=docker&logoColor=white"></a>
+<a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/pkgs/container/twitch-miner-rust"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-amd64%20%7C%20arm64-blue?style=flat&logo=docker&logoColor=white"></a>
 <a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=lightyellow&logo=github&logoColor=white"></a>
 <a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=limegreen&logo=github&logoColor=white"></a>
 </p>
@@ -142,7 +142,7 @@ GitHub Actions builds and publishes the multi-arch GHCR image on pushes to
 commit without rebuilding it, and fails if the release tag does not retain the
 same digest. For local Docker validation, `scripts/build-multiarch.ps1` builds
 and loads a single local-platform image by default; pass `-Push` to build and
-publish `linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
+publish `linux/amd64` and `linux/arm64`. ARMv7 is not supported.
 
 Deploy published images by immutable digest. See [docs/release-process.md](docs/release-process.md) for the release, Pi update, health, and rollback procedure.
 

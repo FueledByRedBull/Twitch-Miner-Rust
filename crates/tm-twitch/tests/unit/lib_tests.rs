@@ -945,6 +945,61 @@ async fn playback_network_errors_do_not_expose_tokenized_urls() {
 }
 
 #[tokio::test]
+async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
+    let client_for = |base_url: &str| {
+        TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            TwitchEndpoints {
+                twitch_url: base_url.to_owned(),
+                gql_url: format!("{base_url}/gql"),
+                playback_url: format!("{base_url}/hls/"),
+            },
+        )
+    };
+    let build_id =
+        "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>";
+    let token = r#"{"data":{"streamPlaybackAccessToken":{"signature":"sig","value":"token"}}}"#;
+    let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200,RESOLUTION=640x360\n/variant.m3u8\n";
+    let media = "#EXTM3U\n#EXTINF:2.0,\n/segment.ts\n";
+
+    let (base_url, requests, server) = spawn_http_server([
+        (200, build_id),
+        (200, token),
+        (503, ""),
+        (200, master),
+        (200, media),
+        (200, ""),
+    ]);
+    client_for(&base_url)
+        .prime_live_playback("tester")
+        .await
+        .unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 6);
+    server.join().unwrap();
+
+    let (base_url, requests, server) =
+        spawn_http_server([(200, build_id), (200, token), (400, "")]);
+    let error = client_for(&base_url)
+        .prime_live_playback("tester")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TwitchClientError::UnexpectedStatus {
+            status: StatusCode::BAD_REQUEST,
+            context: "fetch playback master playlist"
+        }
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+    server.join().unwrap();
+}
+
+#[tokio::test]
 async fn spade_network_errors_do_not_expose_tokenized_urls() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
@@ -1656,6 +1711,10 @@ fn typed_identity_and_stream_fixtures() {
         milestone.expires_at.unwrap().unix_timestamp(),
         1_784_025_000
     );
+    assert_eq!(
+        milestone.missed_broadcast_ids,
+        Some(vec![String::from("broadcast-1")])
+    );
 
     let videos: types::GqlResponse<types::ArchivedVideosData> =
         serde_json::from_value(protocol_fixture("twitch.archived_videos.json")).unwrap();
@@ -1699,6 +1758,7 @@ fn typed_identity_and_stream_fixtures() {
     let clips = recent_clips_from_typed(clips.data.unwrap()).unwrap();
     assert_eq!(clips[0].slug, "UsefulClip");
     assert!((clips[0].duration_seconds - 24.5).abs() < f64::EPSILON);
+    assert_eq!(clips[0].broadcast_id.as_deref(), Some("broadcast-1"));
 
     let followers: types::GqlResponse<types::FollowersData> =
         serde_json::from_value(protocol_fixture("twitch.followers.json")).unwrap();
