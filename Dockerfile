@@ -39,33 +39,25 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS build
 ARG TARGETARCH
 ARG TARGETVARIANT
-ARG BUILD_REVISION=unknown
-ARG SOURCE_DATE_EPOCH=0
-ENV BUILD_REVISION=${BUILD_REVISION}
-ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 ENV CARGO_INCREMENTAL=0
 ENV RUSTFLAGS=--remap-path-prefix=/workspace=.
 COPY --from=planner /workspace/recipe.json recipe.json
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/target \
-    case "${TARGETARCH}:${TARGETVARIANT}" in \
+RUN case "${TARGETARCH}:${TARGETVARIANT}" in \
         "amd64:") rust_target="x86_64-unknown-linux-musl" ;; \
         "arm64:") rust_target="aarch64-unknown-linux-musl" ;; \
-        "arm:v7") rust_target="armv7-unknown-linux-musleabihf" ;; \
         *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
     esac \
     && rustup target add "${rust_target}" \
     && cargo chef cook --locked --release --target "${rust_target}" --recipe-path recipe.json
+ARG BUILD_REVISION=unknown
+ARG SOURCE_DATE_EPOCH=0
+ENV BUILD_REVISION=${BUILD_REVISION}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/target \
-    case "${TARGETARCH}:${TARGETVARIANT}" in \
+RUN case "${TARGETARCH}:${TARGETVARIANT}" in \
         "amd64:") rust_target="x86_64-unknown-linux-musl" ;; \
         "arm64:") rust_target="aarch64-unknown-linux-musl" ;; \
-        "arm:v7") rust_target="armv7-unknown-linux-musleabihf" ;; \
         *) echo "unsupported Docker platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
     esac \
     && cargo build --locked --release --target "${rust_target}" -p tm-app \

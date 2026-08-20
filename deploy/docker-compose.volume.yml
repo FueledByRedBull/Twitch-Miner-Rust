@@ -3,6 +3,10 @@ services:
     image: "${TWITCH_MINER_IMAGE:?Set TWITCH_MINER_IMAGE to ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<digest>}"
     user: "${UID:-1000}:${GID:-1000}"
     init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     stop_grace_period: 30s
     read_only: true

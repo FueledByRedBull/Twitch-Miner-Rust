@@ -61,6 +61,34 @@ fn reconnect_url_validation_keeps_twitch_endpoint_and_opaque_query() {
     }
 }
 
+#[test]
+fn reconnect_url_rejections_name_a_fixed_predicate_without_endpoint_data() {
+    for (url, predicate) in [
+        ("not a URL", "parse"),
+        ("ws://eventsub.wss.twitch.tv/ws", "scheme"),
+        ("wss://example.test/ws", "host"),
+        ("wss://user:pass@eventsub.wss.twitch.tv/ws", "credentials"),
+        ("wss://eventsub.wss.twitch.tv:444/ws", "port"),
+        ("wss://eventsub.wss.twitch.tv/ws#fragment", "fragment"),
+    ] {
+        let message = validate_reconnect_url(url).unwrap_err().to_string();
+        assert!(
+            message.ends_with(predicate),
+            "expected predicate {predicate} for {url}, got {message}"
+        );
+    }
+
+    // A rejection must never echo the host, path, query, or session material.
+    let message =
+        validate_reconnect_url("wss://attacker.example/steal?session=s3cr3t-session-id#frag")
+            .unwrap_err()
+            .to_string();
+    assert!(message.ends_with("host"), "{message}");
+    for leaked in ["attacker.example", "steal", "s3cr3t-session-id", "frag"] {
+        assert!(!message.contains(leaked), "leaked {leaked} in {message}");
+    }
+}
+
 #[tokio::test]
 async fn keepalive_wait_allows_a_small_delivery_grace() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

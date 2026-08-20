@@ -49,15 +49,15 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
    a successful Deep Quality run for the exact revision. Deep Quality must pass
    bounded parser fuzzing, the ratcheted 60% critical-core and
    46.0% application branch-coverage floors. Then push the candidate commit to
-   `main`. The multiarch workflow builds the three platform images,
+   `main`. The multiarch workflow builds the AMD64 and ARM64 images,
    SBOM/provenance attestations, the manifest, and the immutable
    `sha-<40-character-commit>` tag.
 3. Retrieve the `published-manifest-digest` artifact, run the read-only canary
    against that exact digest, deploy it by digest, and complete the required
    monitoring window.
 4. Create and push a signed `v*` tag at the accepted commit. The tag workflow
-   does not rebuild. It resolves the existing commit-SHA manifest, verifies all
-   three platform revisions and attestations, uses the documented single-index
+   does not rebuild. It resolves the existing commit-SHA manifest, verifies both
+   platform revisions and attestations, uses the documented single-index
    carbon-copy promotion behavior of
    [`docker buildx imagetools create`](https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/),
    and fails unless the release tag retains the exact accepted digest.

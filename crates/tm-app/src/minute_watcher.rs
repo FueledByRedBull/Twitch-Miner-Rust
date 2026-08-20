@@ -264,7 +264,7 @@ fn record_minute_watch_result(
         Ok(Ok(())) => context.health.success("minute"),
         Ok(Err(error)) => {
             context.health.failure("minute", "watch-request");
-            tracing::warn!(task = "minute", error_class = "watch-request", streamer = %streamer.username, %error, "minute watched failed");
+            tracing::warn!(task = "minute", error_class = "watch-request", streamer = %streamer.username, error = %format!("{error:#}"), "minute watched failed");
         }
         Err(_) => {
             context.health.failure("minute", "watch-timeout");

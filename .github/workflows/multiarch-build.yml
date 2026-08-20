@@ -47,11 +47,11 @@ jobs:
         include:
           - platform: linux/amd64
             platform_tag: amd64
+            runner: ubuntu-latest
           - platform: linux/arm64
             platform_tag: arm64
-          - platform: linux/arm/v7
-            platform_tag: arm-v7
-    runs-on: ubuntu-latest
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -62,12 +62,8 @@ jobs:
 
       - id: build_metadata
         run: |
-          "time=$(git show -s --format=%cI $env:GITHUB_SHA)" >> $env:GITHUB_OUTPUT
           "epoch=$(git show -s --format=%ct $env:GITHUB_SHA)" >> $env:GITHUB_OUTPUT
         shell: pwsh
-
-      - if: matrix.platform != 'linux/amd64'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -92,7 +88,6 @@ jobs:
           cache-to: type=gha,mode=max,scope=multiarch-${{ matrix.platform_tag }}
           build-args: |
             BUILD_REVISION=${{ github.sha }}
-            BUILD_TIME=${{ steps.build_metadata.outputs.time }}
             SOURCE_DATE_EPOCH=${{ steps.build_metadata.outputs.epoch }}
           provenance: mode=max
           sbom: true
@@ -186,10 +181,10 @@ jobs:
           $artifactsUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/artifacts?per_page=100"
           $response = Invoke-RestMethod -Uri $artifactsUri -Headers $headers
           $artifacts = @($response.artifacts | Where-Object {
-            -not $_.expired -and $_.name -match '^digests-(amd64|arm64|arm-v7)$'
+            -not $_.expired -and $_.name -match '^digests-(amd64|arm64)$'
           })
-          if ($artifacts.Count -ne 3) {
-            throw "Expected exactly three image digest artifacts, found $($artifacts.Count)."
+          if ($artifacts.Count -ne 2) {
+            throw "Expected exactly two image digest artifacts, found $($artifacts.Count)."
           }
 
           $destination = '${{ runner.temp }}/digests'
@@ -203,7 +198,7 @@ jobs:
             Remove-Item -LiteralPath $archive -Force
           }
           $digests = @(Get-ChildItem -LiteralPath $destination -File)
-          if ($digests.Count -ne 3 -or
+          if ($digests.Count -ne 2 -or
               @($digests | Where-Object { $_.Name -notmatch '^[0-9a-f]{64}$' }).Count -ne 0) {
             throw 'Downloaded image digest artifacts were incomplete or malformed.'
           }

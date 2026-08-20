@@ -399,12 +399,14 @@ impl TwitchClient {
         )?;
         let remote_client = self.remote_client("master playlist")?;
 
-        let master = remote_client
-            .get(master_url)
-            .header("User-Agent", self.user_agent())
-            .send()
-            .await
-            .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
+        let master = self
+            .send_playback_read_request(
+                remote_client,
+                reqwest::Method::GET,
+                &master_url,
+                "master playlist",
+            )
+            .await?;
         if !master.status().is_success() {
             return Err(TwitchClientError::UnexpectedStatus {
                 status: master.status(),
@@ -422,13 +424,14 @@ impl TwitchClient {
             "master playlist",
             self.allow_loopback_remote_endpoints,
         )?;
-
-        let variant = remote_client
-            .get(variant_url)
-            .header("User-Agent", self.user_agent())
-            .send()
-            .await
-            .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
+        let variant = self
+            .send_playback_read_request(
+                remote_client,
+                reqwest::Method::GET,
+                &variant_url,
+                "media playlist",
+            )
+            .await?;
         if !variant.status().is_success() {
             return Err(TwitchClientError::UnexpectedStatus {
                 status: variant.status(),
@@ -447,12 +450,14 @@ impl TwitchClient {
             self.allow_loopback_remote_endpoints,
         )?;
 
-        let segment = remote_client
-            .head(segment_url)
-            .header("User-Agent", self.user_agent())
-            .send()
-            .await
-            .map_err(|error| sanitize_playback_error(&error, "media segment"))?;
+        let segment = self
+            .send_playback_read_request(
+                remote_client,
+                reqwest::Method::HEAD,
+                &segment_url,
+                "media segment",
+            )
+            .await?;
         if !segment.status().is_success() {
             return Err(TwitchClientError::UnexpectedStatus {
                 status: segment.status(),
@@ -894,6 +899,30 @@ impl TwitchClient {
         Err(TwitchClientError::UnexpectedStatus {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             context,
+        })
+    }
+
+    async fn send_playback_read_request(
+        &self,
+        client: &reqwest::Client,
+        method: reqwest::Method,
+        url: &reqwest::Url,
+        context: &'static str,
+    ) -> Result<reqwest::Response, TwitchClientError> {
+        self.send_read_request(
+            || {
+                client
+                    .request(method.clone(), url.clone())
+                    .header("User-Agent", self.user_agent())
+            },
+            context,
+        )
+        .await
+        .map_err(|error| match error {
+            TwitchClientError::RemoteRequest { failure, .. } => {
+                TwitchClientError::PlaybackRequest { context, failure }
+            }
+            error => error,
         })
     }
 
