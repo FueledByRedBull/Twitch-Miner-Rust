@@ -16,7 +16,7 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$RollbackRevision,
 
-    [string]$ComposeFile = 'deploy/docker-compose.rpi.yml',
+    [string]$ComposeFile = 'deploy/docker-compose.bind-mount.yml',
     [string]$DataDir = './data',
     [string]$Service = 'twitch-miner',
     [ValidateRange(1, 2147483647)]

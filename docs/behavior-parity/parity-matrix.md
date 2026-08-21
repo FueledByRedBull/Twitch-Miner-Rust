@@ -3,11 +3,13 @@
 This is a behavior-level comparison against an explicit clean Go checkout at
 `91f00698314d`, not a claim that Twitch's undocumented contracts never change.
 The pinned checkout is a deterministic comparison baseline only: parity is
-established by running shared test vectors against both implementations, and no
-Go source is copied into or redistributed with this project. Rust fixture,
-integration, and deterministic parser-regression tests run in CI. The
-dedicated-account `--canary` closes the remaining live read-contract gap before
-each release.
+established by running shared test vectors against both implementations. The
+external Go implementation is fetched separately and is not vendored into this
+repository or its offline source bundle. Project-authored compatibility harnesses
+under `tests/parity/go/` are tracked here; no Go source is copied into published
+container images. Rust fixture, integration, and deterministic parser-regression
+tests run in CI. The dedicated-account `--canary` closes the remaining live
+read-contract gap before each release.
 
 | Go behavior | Rust status | Evidence / limit |
 | --- | --- | --- |
@@ -37,6 +39,12 @@ Twitch's current [Watch Streaks requirements](https://help.twitch.tv/s/article/r
 state that at least 30 minutes must pass between the end of one stream and the
 start of the next. That platform rule, rather than parent-miner lineage, is the
 contract used by streak prioritization.
+
+Rust's transition diagnostics report `stream_up_at`, the time this miner
+observed the current broadcast online, rather than Go's Twitch-sourced
+`createdAt`. Timestamp values retain their explicit source offset. The same
+online/offline message is sent to Discord when that notifier is enabled; privacy
+anonymization suppresses exact streak timestamps before either destination.
 
 ## Configuration compatibility
 
@@ -72,8 +80,10 @@ behavior and are intentionally not copied into Rust.
 
 The normalized cross-process vectors in `tests/parity/vectors.json` are run by
 the Rust contract tests and by the pinned Go baseline through
-`scripts/verify-go-baseline.ps1`. The Go harness is copied only for the duration
-of that command and is removed afterward. The pinned Go baseline's
+`scripts/verify-go-baseline.ps1`. Its project-authored Go harness is temporarily
+copied into the pinned checkout's packages so it can exercise internal behavior,
+then removed. This is a behavioral test boundary, not a claim about legal
+independence or license compatibility. The pinned Go baseline's
 `TestStreamWatchProgress` uses an unstable exact two-minute boundary, so the
 gate skips only that assertion and injects a deterministic equivalent covering
 continuous progress at 90 seconds and reset behavior after 121 seconds.

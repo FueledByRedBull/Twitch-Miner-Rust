@@ -64,7 +64,7 @@ jobs:
           TWITCH_MINER_IMAGE: ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
           docker compose -f docker-compose.yml config >/dev/null
-          docker compose -f deploy/docker-compose.rpi.yml config >/dev/null
+          docker compose -f deploy/docker-compose.bind-mount.yml config >/dev/null
           docker compose -f deploy/docker-compose.volume.yml config >/dev/null
 
   dependency-policy:

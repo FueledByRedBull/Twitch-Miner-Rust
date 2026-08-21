@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Adds privacy-aware, state-only streak context to online/offline log and
+  Discord diagnostics without transition-time Twitch requests; exact timestamps
+  remain suppressed when anonymization is enabled. Published-image onboarding now
+  reuses the hardened bind-mount Compose service with an immutable digest, and
+  attribution, migration, and Go-harness provenance wording is corrected. The
+  published bind-mount example is now host-neutral for native AMD64 and ARM64
+  deployments instead of being named and pinned for one device family.
 - Publishes native AMD64 and ARM64 images with reusable cargo-chef dependency
   layers. ARMv7 publication is removed because no supported deployment requires
   the 32-bit target; per-platform smoke, SBOM, provenance, revision, and

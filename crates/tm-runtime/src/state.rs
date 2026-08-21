@@ -526,10 +526,12 @@ impl RuntimeState {
         Vec::new()
     }
 
-    pub fn apply_stream_update(&mut self, update: &StreamUpdate, now: OffsetDateTime) {
-        let Some(streamer) = self.streamer_mut_by_channel_id(&update.channel_id) else {
-            return;
-        };
+    pub fn apply_stream_update(
+        &mut self,
+        update: &StreamUpdate,
+        now: OffsetDateTime,
+    ) -> Option<Streamer> {
+        let streamer = self.streamer_mut_by_channel_id(&update.channel_id)?;
         let stream = streamer.stream.get_or_insert_with(Stream::default);
         let broadcast_changed = !stream.broadcast_id.is_empty() && stream.broadcast_id != update.id;
         let game_changed = stream.game_name() != update.game_name.trim();
@@ -563,6 +565,7 @@ impl RuntimeState {
             tm_twitch_drop_id(),
             now,
         );
+        Some(streamer.clone())
     }
 
     pub fn set_drop_campaign_eligibility(&mut self, channel_id: &str, eligible: bool) {

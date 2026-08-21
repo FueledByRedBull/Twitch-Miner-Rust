@@ -62,7 +62,8 @@ The repo ships three Compose examples:
 
 - `docker-compose.yml` for a bind-mount layout at `./data`.
 - `deploy/docker-compose.volume.yml` for a named-volume layout.
-- `deploy/docker-compose.rpi.yml` for a Raspberry Pi bind-mount layout that runs as the host user.
+- `deploy/docker-compose.bind-mount.yml` for a published-image bind-mount layout
+  that runs as the host user.
 
 For the bind-mount example, prepare the ignored data directory from the
 tracked template before starting the service, then validate Compose without

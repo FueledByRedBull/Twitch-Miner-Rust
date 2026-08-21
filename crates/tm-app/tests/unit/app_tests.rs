@@ -831,8 +831,60 @@ mod tests {
 
         assert_eq!(
             observability.online_message(&streamer),
-            "🥳 Streamer(username=alice, channel_id=100, channel_points=1250) is Online! | Playing: VALORANT"
+            "🥳 Streamer(username=alice, channel_id=100, channel_points=1250) is Online! | Playing: VALORANT | streak missing true"
         );
+    }
+
+    #[test]
+    fn observability_presence_messages_include_privacy_safe_streak_context() {
+        let visible = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings::default(),
+        );
+        let private = AppObservability::new(
+            None,
+            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings {
+                anonymize_logs: true,
+                ..AppObservabilitySettings::default()
+            },
+        );
+        let expires_at = ts(400);
+        let observed_online_at = ts(100);
+        let resolved_at = ts(200);
+        let streamer = Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            stream: Some(tm_domain::Stream {
+                watch_streak_missing: false,
+                watch_streak_count: Some(7),
+                watch_streak_expires_at: Some(expires_at),
+                stream_up_at: Some(observed_online_at),
+                watch_streak_resolved_at: Some(resolved_at),
+                ..tm_domain::Stream::default()
+            }),
+            ..Streamer::default()
+        };
+
+        let online = visible.online_message(&streamer);
+        let offline = visible.offline_message(&streamer);
+        for expected in [
+            "streak missing false",
+            "streak length 7",
+            &format!("expires at {expires_at}"),
+            &format!("observed online at {observed_online_at}"),
+            &format!("streak resolved at {resolved_at}"),
+        ] {
+            assert!(online.contains(expected));
+            assert!(offline.contains(expected));
+        }
+
+        let anonymized = private.online_message(&streamer);
+        assert!(anonymized.contains("streak missing false | streak length 7"));
+        for hidden in [expires_at, observed_online_at, resolved_at] {
+            assert!(!anonymized.contains(&hidden.to_string()));
+        }
     }
 
     #[test]

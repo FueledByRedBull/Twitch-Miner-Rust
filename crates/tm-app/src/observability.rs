@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -99,14 +100,40 @@ impl AppObservability {
                 message.push_str(&game_name);
             }
         }
+        self.append_streak_context(&mut message, streamer);
         self.decorate("🥳", message)
     }
 
     pub(crate) fn offline_message(&self, streamer: &Streamer) -> String {
-        self.decorate(
-            "😴",
-            format!("{} is Offline!", self.streamer_label(streamer)),
-        )
+        let mut message = format!("{} is Offline!", self.streamer_label(streamer));
+        self.append_streak_context(&mut message, streamer);
+        self.decorate("😴", message)
+    }
+
+    fn append_streak_context(&self, message: &mut String, streamer: &Streamer) {
+        let Some(stream) = streamer.stream.as_ref() else {
+            return;
+        };
+        message.push_str(if stream.watch_streak_missing {
+            " | streak missing true"
+        } else {
+            " | streak missing false"
+        });
+        if let Some(count) = stream.watch_streak_count {
+            let _ = write!(message, " | streak length {count}");
+        }
+        if self.anonymized() {
+            return;
+        }
+        for (label, value) in [
+            ("expires at", stream.watch_streak_expires_at),
+            ("observed online at", stream.stream_up_at),
+            ("streak resolved at", stream.watch_streak_resolved_at),
+        ] {
+            if let Some(value) = value {
+                let _ = write!(message, " | {label} {value}");
+            }
+        }
     }
 
     pub(crate) fn game_change_message(

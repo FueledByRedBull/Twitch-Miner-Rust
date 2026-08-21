@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tm_domain::{MinerEvent, OffsetDateTime, PredictionDecision};
+use tm_domain::{MinerEvent, OffsetDateTime, PredictionDecision, Streamer};
 use tokio::sync::{watch, Mutex, MutexGuard};
 
 use crate::effect::RuntimeEffect;
@@ -210,13 +210,13 @@ impl RuntimeHandle {
         &self,
         update: StreamUpdate,
         now: OffsetDateTime,
-    ) -> Result<()> {
+    ) -> Result<Option<Streamer>> {
         let started = Instant::now();
         let mut state = self.lock_open("ApplyStreamUpdate").await?;
         self.metrics.record_command_wait(started.elapsed());
-        state.apply_stream_update(&update, now);
+        let updated = state.apply_stream_update(&update, now);
         self.notify_state_change();
-        Ok(())
+        Ok(updated)
     }
 
     pub async fn set_presence(

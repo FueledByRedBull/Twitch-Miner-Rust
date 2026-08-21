@@ -47,7 +47,11 @@ volumes:
   twitch-miner-data:
 ```
 
-The Raspberry Pi compose example pins `linux/arm64` and follows the same `/data` convention. The miner exits on `SIGTERM`, so Compose should be given a short but non-zero stop grace period. The image health check executes `--health` and requires the runtime heartbeat to remain fresh.
+The published-image bind-mount example supports native AMD64 and ARM64 hosts
+and follows the same `/data` convention. The miner exits on `SIGTERM`, so
+Compose should be given a short but non-zero stop grace period. The image
+health check executes `--health` and requires the runtime heartbeat to remain
+fresh.
 
 On Linux bind mounts, the mounted directory and any existing cookie/log files must be writable by the configured container UID/GID. If you are migrating from an older root-run image, a one-time `chown` of the data directory may be required before the Rust container can reuse saved cookies.
 
