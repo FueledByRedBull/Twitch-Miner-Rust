@@ -383,18 +383,22 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
         completed_predictions: std::collections::VecDeque::new(),
     };
 
-    state.apply_stream_update(
-        &StreamUpdate {
-            channel_id: "123".into(),
-            id: "new-broadcast".into(),
-            title: "New".into(),
-            game_name: "Game".into(),
-            game_id: Some("game-1".into()),
-            tags: vec!["tag-1".into()],
-            viewers_count: 42,
-        },
-        ts(120),
-    );
+    let updated = state
+        .apply_stream_update(
+            &StreamUpdate {
+                channel_id: "123".into(),
+                id: "new-broadcast".into(),
+                title: "New".into(),
+                game_name: "Game".into(),
+                game_id: Some("game-1".into()),
+                tags: vec!["tag-1".into()],
+                viewers_count: 42,
+            },
+            ts(120),
+        )
+        .unwrap();
+
+    assert_eq!(updated, state.streamers[0]);
 
     let stream = state.streamers[0].stream.as_ref().unwrap();
     assert_eq!(stream.broadcast_id, "new-broadcast");
@@ -443,7 +447,7 @@ fn short_restart_chains_preserve_resolved_streak_state() {
             state.streamers[0].last_stream_ended_at,
             Some(ts(offline_at))
         );
-        state.apply_stream_update(
+        let _ = state.apply_stream_update(
             &StreamUpdate {
                 channel_id: "123".into(),
                 id: broadcast_id.into(),
@@ -546,7 +550,7 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
         viewers_count: 42,
     };
 
-    state.apply_stream_update(&update, ts(120));
+    let _ = state.apply_stream_update(&update, ts(120));
     assert_eq!(
         state.streamers[0]
             .stream
@@ -558,7 +562,7 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
 
     let mut changed = update;
     changed.game_name = "Different Game".into();
-    state.apply_stream_update(&changed, ts(240));
+    let _ = state.apply_stream_update(&changed, ts(240));
     assert_eq!(
         state.streamers[0]
             .stream

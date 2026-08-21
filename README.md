@@ -11,7 +11,13 @@
 
 An unofficial Twitch channel points miner implemented in Rust, packaged for Docker and Raspberry Pi.
 
-Its mining behavior follows the lineage established by the GPL-3.0 [0x8fv/Twitch-Channel-Points-Miner-v2](https://github.com/0x8fv/Twitch-Channel-Points-Miner-v2); behavioral parity is verified against the [Go port](https://github.com/0x8fv/Twitch-Channel-Points-Miner) through shared test vectors.
+Its mining behavior follows the lineage of the original
+[Tkd-Alex/Twitch-Channel-Points-Miner-v2](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2),
+the maintained [rdavydov fork](https://github.com/rdavydov/Twitch-Channel-Points-Miner-v2),
+and the [0x8fv Python fork](https://github.com/0x8fv/Twitch-Channel-Points-Miner-v2).
+Behavioral parity is verified against 0x8fv's
+[Go port](https://github.com/0x8fv/Twitch-Channel-Points-Miner) through shared
+test vectors.
 
 This project keeps the behavior that matters in day-to-day use:
 
@@ -125,6 +131,37 @@ Use the same placeholder replacement and `--check-config` validation shown in
 the local sequence before starting the container. Compose validation parses the
 checked-in service definition without starting a container or contacting Twitch.
 
+#### Published image
+
+To use a published AMD64 or ARM64 image instead of building locally, set the
+exact manifest digest recorded by the release workflow. The same checked-in
+service retains its bind mount, read-only filesystem, dropped capabilities,
+restart policy, stop grace, and health check:
+
+```powershell
+$env:TWITCH_MINER_IMAGE = 'ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<recorded-digest>'
+docker compose config --quiet
+docker compose pull twitch-miner
+docker compose up -d --no-build twitch-miner
+docker compose exec -T twitch-miner /twitch-miner --health
+```
+
+On Linux or macOS:
+
+```sh
+export TWITCH_MINER_IMAGE='ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<recorded-digest>'
+docker compose config --quiet
+docker compose pull twitch-miner
+docker compose up -d --no-build twitch-miner
+docker compose exec -T twitch-miner /twitch-miner --health
+```
+
+Do not substitute `latest`; see [the release process](docs/release-process.md)
+for digest verification and rollback. The named-volume and Raspberry Pi
+variants remain available in
+[deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml) and
+[deploy/docker-compose.rpi.yml](deploy/docker-compose.rpi.yml).
+
 The container layout is centered on `/data`:
 
 - `/data/config.json`
@@ -153,20 +190,12 @@ For manual setup, use the credential-free tracked
 it to `data/config.json`, replace both login placeholders, and run the
 network-free `--check-config` command from [Quick start](#quick-start).
 
-When the configured file does not exist, the app can create one from its
-built-in defaults and extend existing files during migration. That generated
-fallback is not a second starter template: values can differ from the tracked
-example (the historical `betting(make_predictions)` field, for example, is
-enabled by the built-in default but disabled in the safe template). The field
-name is retained for Go/Python lineage and config compatibility; set it to
-`true` only when prediction betting is intended, and keep the spelling when
-editing the file.
+Existing Go/Python layouts and recognized legacy fields follow the versioned,
+fail-closed process in [the migration guide](docs/migration.md).
+`--check-config` previews any required migration without writing.
 
 Notes:
 
-- Empty legacy `password`, `disable_ssl_cert_verification=false`, and the unused
-  `watch_queue_logging` flag are migrated away. Non-empty passwords and disabled
-  TLS verification remain fail-closed validation errors.
 - Prediction bet percentages must be `0`-`100`; each stake is bounded by
   Twitch's `10`-point minimum and `250000`-point per-viewer maximum, and an
   explicit `bet.max_points` above that maximum is rejected. Delays must be
@@ -185,8 +214,6 @@ Important paths:
 - bounded streak metadata cache: `data/streak-cache.json` (no auth material)
 - the repo also ignores local root runtime paths such as `./config.json`, `./cookies/`, `./log/`, and `.env*`
 
-`auto_update` was removed. A legacy `false` value is migrated away; `true` is rejected.
-Use `tm-app --check-config --data-dir ./data` to preview a migration without writing.
 Use `tm-app --check-config --json --data-dir ./data` for scripts, and
 `tm-app --status --data-dir ./data` for a sanitized human-readable status file.
 
@@ -213,7 +240,7 @@ These cover operating and understanding the Rust implementation:
 
 ## Validation
 
-The workspace is validated with:
+The broader local validation set is:
 
 ```powershell
 cargo fmt --all -- --check

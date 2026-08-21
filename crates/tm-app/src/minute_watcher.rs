@@ -315,7 +315,6 @@ pub(crate) async fn refresh_watch_selection_metadata(
             HashSet::new()
         },
     );
-
     for streamer in streamers.iter().filter(|streamer| {
         streamer.is_online
             && !streamer.channel_id.trim().is_empty()
@@ -575,22 +574,7 @@ async fn recover_watch_metadata(
         .fetch_stream_info(&streamer.username)
         .await
         .with_context(|| format!("{defect} for {}", streamer.username))?;
-    apply_live_stream_update(runtime, streamer, &info, observability, now).await?;
-    let snapshot = runtime
-        .state_snapshot()
-        .await
-        .with_context(|| format!("snapshot after inline refresh for {}", streamer.username))?;
-    let recovered = snapshot
-        .streamers
-        .iter()
-        .find(|candidate| candidate.channel_id == streamer.channel_id)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow!(
-                "streamer {} missing after inline refresh",
-                streamer.username
-            )
-        })?;
+    let recovered = apply_live_stream_update(runtime, streamer, &info, observability, now).await?;
     if let Some(defect) = watch_metadata_defect(&recovered, now) {
         return Err(anyhow!("{defect} for {} after refresh", streamer.username));
     }
@@ -664,11 +648,11 @@ pub(crate) async fn apply_live_stream_update(
     info: &tm_twitch::StreamInfo,
     observability: &AppObservability,
     now: tm_runtime::RuntimeTime,
-) -> Result<()> {
+) -> Result<Streamer> {
     runtime
         .set_presence(streamer.channel_id.clone(), true, now)
         .await?;
-    runtime
+    let updated_streamer = runtime
         .apply_stream_update(
             tm_runtime::StreamUpdate {
                 channel_id: streamer.channel_id.clone(),
@@ -681,15 +665,16 @@ pub(crate) async fn apply_live_stream_update(
             },
             now,
         )
-        .await?;
+        .await?
+        .unwrap_or_else(|| streamer.clone());
     if !streamer.is_online {
-        let message = observability.online_message(streamer);
+        let message = observability.online_message(&updated_streamer);
         tracing::info!(operation = "set_online", "{message}");
         observability
             .send_event(DiscordEvent::StreamerOnline, &message)
             .await;
     }
-    Ok(())
+    Ok(updated_streamer)
 }
 
 pub(crate) fn log_stream_presence_changes(

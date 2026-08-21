@@ -1,5 +1,6 @@
 services:
   twitch-miner:
+    image: "${TWITCH_MINER_IMAGE:-twitch-miner-rust:local}"
     build:
       context: .
       dockerfile: Dockerfile
