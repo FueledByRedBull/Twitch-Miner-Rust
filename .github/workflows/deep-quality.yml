@@ -20,7 +20,7 @@ jobs:
         with:
           toolchain: nightly-2026-07-01
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # main
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # main
         with:
           tool: cargo-llvm-cov@0.8.7
       - name: Measure critical-core branch coverage
