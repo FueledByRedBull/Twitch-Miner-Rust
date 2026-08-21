@@ -85,7 +85,7 @@ docker buildx imagetools inspect ghcr.io/fueledbyredbull/twitch-miner-rust:rollb
 ```
 
 Record the newly produced digest; the old digest cannot be recreated from its
-hex string alone. Run `--check-config` against the rollback digest on the Pi
+hex string alone. Run `--check-config` against the rollback digest on the target host
 before placing it in the rollback Compose file.
 
 ## GHCR retention
@@ -104,28 +104,28 @@ digest check. Record the cleanup timestamp, protected candidate/rollback
 digests, and fixed pass/fail result in release evidence; never record registry
 credentials or package API responses.
 
-## Raspberry Pi verification commands
+## Linux bind-mount verification commands
 
-Run these on the Pi after checking that the mounted data directory is owned by
-the UID/GID used by Compose. Substitute only the recorded manifest digest; do
-not use `latest` for deployment.
+Run these on the target AMD64 or ARM64 host after checking that the mounted data
+directory is owned by the UID/GID used by Compose. Substitute only the recorded
+manifest digest; do not use `latest` for deployment.
 
 ```sh
 export TWITCH_MINER_IMAGE='ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<recorded-digest>'
-export DATA_DIR="$PWD/data" # set this to the existing Pi data directory
+export DATA_DIR="$PWD/data" # set this to the existing host data directory
 export TWITCH_MINER_DATA_DIR="$DATA_DIR"
-docker run --rm --platform linux/arm64 --user 1000:1000 \
+docker run --rm --user 1000:1000 \
   -v "$DATA_DIR:/data:ro" "$TWITCH_MINER_IMAGE" \
   --data-dir /data --check-config --json
-docker run --rm --platform linux/arm64 --user 1000:1000 \
+docker run --rm --user 1000:1000 \
   -v "$DATA_DIR:/data:ro" "$TWITCH_MINER_IMAGE" \
   --data-dir /data --canary
-docker compose -f deploy/docker-compose.rpi.yml config
-docker compose -f deploy/docker-compose.rpi.yml pull twitch-miner
-docker compose -f deploy/docker-compose.rpi.yml up -d --force-recreate twitch-miner
-docker compose -f deploy/docker-compose.rpi.yml exec -T twitch-miner /twitch-miner --version
-docker compose -f deploy/docker-compose.rpi.yml exec -T twitch-miner /twitch-miner --health
-CONTAINER_ID="$(docker compose -f deploy/docker-compose.rpi.yml ps -q twitch-miner)"
+docker compose -f deploy/docker-compose.bind-mount.yml config
+docker compose -f deploy/docker-compose.bind-mount.yml pull twitch-miner
+docker compose -f deploy/docker-compose.bind-mount.yml up -d --force-recreate twitch-miner
+docker compose -f deploy/docker-compose.bind-mount.yml exec -T twitch-miner /twitch-miner --version
+docker compose -f deploy/docker-compose.bind-mount.yml exec -T twitch-miner /twitch-miner --health
+CONTAINER_ID="$(docker compose -f deploy/docker-compose.bind-mount.yml ps -q twitch-miner)"
 test -n "$CONTAINER_ID"
 docker inspect -f 'status={{.State.Status}} health={{.State.Health.Status}} restarts={{.RestartCount}} image={{.Image}}' "$CONTAINER_ID"
 ```
@@ -133,12 +133,12 @@ docker inspect -f 'status={{.State.Status}} health={{.State.Health.Status}} rest
 After the healthy window, exercise recovery and verify the same health checks:
 
 ```sh
-CONTAINER_ID="$(docker compose -f deploy/docker-compose.rpi.yml ps -q twitch-miner)"
+CONTAINER_ID="$(docker compose -f deploy/docker-compose.bind-mount.yml ps -q twitch-miner)"
 test -n "$CONTAINER_ID"
 docker kill --signal=SIGTERM "$CONTAINER_ID"
-docker compose -f deploy/docker-compose.rpi.yml up -d twitch-miner
-docker compose -f deploy/docker-compose.rpi.yml exec -T twitch-miner /twitch-miner --health
-CONTAINER_ID="$(docker compose -f deploy/docker-compose.rpi.yml ps -q twitch-miner)"
+docker compose -f deploy/docker-compose.bind-mount.yml up -d twitch-miner
+docker compose -f deploy/docker-compose.bind-mount.yml exec -T twitch-miner /twitch-miner --health
+CONTAINER_ID="$(docker compose -f deploy/docker-compose.bind-mount.yml ps -q twitch-miner)"
 docker inspect -f 'status={{.State.Status}} health={{.State.Health.Status}} restarts={{.RestartCount}}' "$CONTAINER_ID"
 ```
 
@@ -182,7 +182,7 @@ controller caches, SD-card firmware, and the timing of the final rename remain
 outside the process's control. A backup may therefore be the last durable copy
 even when the pre-loss write returned successfully.
 
-Before a controlled Pi power-cycle test, verify the current config/cookie
+Before a controlled host power-cycle test, verify the current config/cookie
 backups are readable, record their metadata without contents, stop unrelated
 writes, and retain the previous image digest. After power returns, run
 `--check-config --json`, start only `twitch-miner`, verify `--health` and restart

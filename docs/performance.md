@@ -15,8 +15,9 @@ development but is not release evidence.
 ## Container image footprint
 
 The production ARM64 image remains a two-layer `scratch` image. The measured
-Pi baseline was 3,008,991 compressed bytes, with a 6.31 MB uncompressed static
-binary layer and roughly 8 KB of `/data` directory metadata. Removing the
+ARM64 deployment baseline was 3,008,991 compressed bytes, with a 6.31 MB
+uncompressed static binary layer and roughly 8 KB of `/data` directory
+metadata. Removing the
 non-root user, health command, writable-data path, or volume semantics to save
 that metadata is not an acceptable optimization.
 

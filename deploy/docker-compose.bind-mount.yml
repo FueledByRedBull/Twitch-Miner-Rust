@@ -1,7 +1,6 @@
 services:
   twitch-miner:
     image: "${TWITCH_MINER_IMAGE:?Set TWITCH_MINER_IMAGE to ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<digest>}"
-    platform: linux/arm64
     user: "${UID:-1000}:${GID:-1000}"
     init: true
     cap_drop:

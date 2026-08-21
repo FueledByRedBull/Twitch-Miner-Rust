@@ -9,7 +9,8 @@
 <a href="https://github.com/FueledByRedBull/Twitch-Miner-Rust/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/FueledByRedBull/Twitch-Miner-Rust?style=flat&color=limegreen&logo=github&logoColor=white"></a>
 </p>
 
-An unofficial Twitch channel points miner implemented in Rust, packaged for Docker and Raspberry Pi.
+An unofficial Twitch channel points miner implemented in Rust, packaged as a
+multi-architecture Docker image for AMD64 and ARM64.
 
 Its mining behavior follows the lineage of the original
 [Tkd-Alex/Twitch-Channel-Points-Miner-v2](https://github.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2),
@@ -157,10 +158,10 @@ docker compose exec -T twitch-miner /twitch-miner --health
 ```
 
 Do not substitute `latest`; see [the release process](docs/release-process.md)
-for digest verification and rollback. The named-volume and Raspberry Pi
-variants remain available in
-[deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml) and
-[deploy/docker-compose.rpi.yml](deploy/docker-compose.rpi.yml).
+for digest verification and rollback. Published-image bind-mount and
+named-volume variants remain available in
+[deploy/docker-compose.bind-mount.yml](deploy/docker-compose.bind-mount.yml) and
+[deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml).
 
 The container layout is centered on `/data`:
 
@@ -170,9 +171,10 @@ The container layout is centered on `/data`:
 
 Published images are static Rust binaries in a `scratch` runtime. The image has no shell, package manager, or OS certificate bundle; TLS trust comes from the Rust dependencies configured in the app. `docker exec` still works when it invokes `/twitch-miner` directly, but `docker exec ... sh` or `bash` cannot work in `scratch`. The runtime contract stays centered on `/data` with `TCPM_DATA_DIR=/data`, `TCPM_CONFIG=/data/config.json`, and `SIGTERM` shutdown.
 
-There is also a named-volume variant in [deploy/docker-compose.volume.yml](deploy/docker-compose.volume.yml).
-
-For Linux bind mounts, make sure the mounted data directory and any existing cookie files stay writable by the container user. The Raspberry Pi example in [deploy/docker-compose.rpi.yml](deploy/docker-compose.rpi.yml) pins a host UID/GID override for that reason.
+For Linux bind mounts, make sure the mounted data directory and any existing
+cookie files stay writable by the container user. The published-image example
+in [deploy/docker-compose.bind-mount.yml](deploy/docker-compose.bind-mount.yml)
+pins a host UID/GID override for that reason.
 
 GitHub Actions builds and publishes the multi-arch GHCR image on pushes to
 `main`. A signed `v*` tag promotes the already-tested manifest for that exact
@@ -181,7 +183,9 @@ same digest. For local Docker validation, `scripts/build-multiarch.ps1` builds
 and loads a single local-platform image by default; pass `-Push` to build and
 publish `linux/amd64` and `linux/arm64`. ARMv7 is not supported.
 
-Deploy published images by immutable digest. See [docs/release-process.md](docs/release-process.md) for the release, Pi update, health, and rollback procedure.
+Deploy published images by immutable digest. See
+[docs/release-process.md](docs/release-process.md) for the release, host update,
+health, and rollback procedure.
 
 ## Configuration
 

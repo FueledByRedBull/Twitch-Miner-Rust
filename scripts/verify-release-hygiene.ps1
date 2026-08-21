@@ -14,7 +14,7 @@ foreach ($workflow in $workflowFiles) {
     }
 }
 
-foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.rpi.yml', 'deploy/docker-compose.volume.yml')) {
+foreach ($compose in @('docker-compose.yml', 'deploy/docker-compose.bind-mount.yml', 'deploy/docker-compose.volume.yml')) {
     $content = Get-Content -Raw $compose
     if ($content -match ':latest') {
         throw "Mutable image tag found in $compose"
