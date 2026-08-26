@@ -131,6 +131,9 @@ docker compose up --build
 Use the same placeholder replacement and `--check-config` validation shown in
 the local sequence before starting the container. Compose validation parses the
 checked-in service definition without starting a container or contacting Twitch.
+Leave `TWITCH_MINER_IMAGE` unset (or set it to a tag) when using `--build`;
+digest-pinned deployments must use `--no-build` because a digest cannot tag
+locally built output.
 
 #### Published image
 

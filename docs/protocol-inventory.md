@@ -104,6 +104,8 @@ invalid JSON, and `PersistedQueryNotSupported` are `INCONCLUSIVE`. This is
 diagnostic evidence, not a release gate or automatic hash-refresh mechanism;
 `REGISTERED` does not prove that an operation would execute with credentials or
 valid variables.
+Authenticated decoding reports exact `PersistedQueryNotFound` responses as the
+fixed `persisted-query-not-found` class and retains only the operation name.
 
 Every request target that Twitch supplies inside a document rather than one the
 miner compiles in is checked before use: the settings script, playback master
@@ -207,13 +209,21 @@ to 300 subscriptions. An ordinary tracked streamer plans `stream.online` and
 subscriptions for five streamers. Streamers beyond that allocation are annotated
 `capacity-overflow` and served by bounded GQL presence polling; `channel.raid`
 is skipped for them and raid observation falls back to the PubSub compatibility
-path. `capacity-overflow` is the designed allocation outcome, not a failure: a
-saturated plan reports ten planned and ten active subscriptions with zero failed
-subscriptions and a non-zero overflow count. The `--status` document reports the
-split under `eventsub` as `planned_subscriptions`, `active_subscriptions`,
-`failed_subscriptions`, `total_cost`, `max_total_cost`, and `overflow_streamers`,
-and each per-streamer capability records its own `presence_source`,
-`prediction_source`, `raid_source`, and `failure_class`.
+path. The same `capacity-overflow` class can also mean that an optional raid or
+prediction subscription was skipped while that streamer's presence subscription
+remains active. It is the designed allocation outcome, not a total-streamer
+failure: a saturated plan reports ten planned and ten active subscriptions with
+zero failed subscriptions and a non-zero overflow count. Normal runtime does not
+perform the post-create subscription listing, so `verified=false` means the
+report is unverified—not that setup is partial or unhealthy. The exclusive
+deployment canary enables listing and requires a fully verified report. The
+`--status` document reports the split under `eventsub` as
+`planned_subscriptions`, `active_subscriptions`, `failed_subscriptions`,
+`total_cost`, `max_total_cost`, and `overflow_streamers`, and each per-streamer
+capability records its own `presence_source`, `prediction_source`, `raid_source`,
+and `failure_class`. `raid_source` is `pubsub-compatibility` unless a
+`channel.raid` subscription was actually allocated, in which case it is
+`eventsub+pubsub-compatibility`.
 
 The WebSocket requests Twitch's supported 30-second
 keepalive window and applies a five-second delivery grace before reconnecting,
