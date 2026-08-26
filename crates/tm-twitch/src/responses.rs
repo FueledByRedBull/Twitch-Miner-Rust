@@ -28,6 +28,11 @@ pub(crate) fn decode_gql_data<T>(
 where
     T: DeserializeOwned,
 {
+    if is_persisted_query_not_found(payload) {
+        return Err(TwitchClientError::PersistedQueryNotFound {
+            operation: context.to_string(),
+        });
+    }
     let response: GqlResponse<T> = serde_json::from_value(payload.clone()).map_err(|error| {
         TwitchClientError::ProtocolDecode {
             context: context.to_string(),

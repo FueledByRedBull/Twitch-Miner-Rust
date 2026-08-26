@@ -360,6 +360,7 @@ fn classify_presence_poll_error(error: TwitchFailureClass) -> &'static str {
         TwitchFailureClass::ServerError => "server-error",
         TwitchFailureClass::Timeout => "timeout",
         TwitchFailureClass::ConnectionReset => "connection-reset",
+        TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
         TwitchFailureClass::Other => "contract-or-shape",
     }
 }

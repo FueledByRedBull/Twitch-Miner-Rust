@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,8 @@ pub enum TwitchClientError {
     InvalidField(&'static str),
     #[error("graphql errors for {context}: {errors}")]
     GqlErrors { context: String, errors: String },
+    #[error("persisted query not found for {operation}")]
+    PersistedQueryNotFound { operation: String },
     #[error("mutation rejected for {context}: {detail}")]
     MutationRejected { context: String, detail: String },
 }
@@ -65,6 +68,7 @@ pub enum TwitchFailureClass {
     ServerError,
     Timeout,
     ConnectionReset,
+    PersistedQueryNotFound,
     Other,
 }
 
@@ -86,6 +90,7 @@ impl TwitchClientError {
                 TwitchFailureClass::ConnectionReset
             }
             Self::PlaybackRequest { failure, .. } | Self::RemoteRequest { failure, .. } => *failure,
+            Self::PersistedQueryNotFound { .. } => TwitchFailureClass::PersistedQueryNotFound,
             _ => TwitchFailureClass::Other,
         }
     }
@@ -141,7 +146,7 @@ impl GqlPersistedOperation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MinuteWatchedRequest {
     pub url: String,
     pub content_type: String,
@@ -149,7 +154,7 @@ pub struct MinuteWatchedRequest {
     pub body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GqlRequest {
     pub url: String,
     pub headers: BTreeMap<String, String>,
@@ -321,16 +326,62 @@ pub(crate) struct StreamInfoData {
     pub(crate) user: Option<StreamInfoUser>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct PlaybackAccessTokenData {
     #[serde(rename = "streamPlaybackAccessToken")]
     pub(crate) stream_playback_access_token: Option<PlaybackAccessToken>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct PlaybackAccessToken {
     pub(crate) signature: String,
     pub(crate) value: String,
+}
+
+impl fmt::Debug for MinuteWatchedRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MinuteWatchedRequest")
+            .field("url", &"<redacted>")
+            .field("content_type", &self.content_type)
+            .field("user_agent", &self.user_agent)
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+impl fmt::Debug for GqlRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names = self.headers.keys().collect::<Vec<_>>();
+        formatter
+            .debug_struct("GqlRequest")
+            .field("url", &"<redacted>")
+            .field("header_names", &header_names)
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+impl fmt::Debug for PlaybackAccessTokenData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlaybackAccessTokenData")
+            .field(
+                "has_stream_playback_access_token",
+                &self.stream_playback_access_token.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for PlaybackAccessToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlaybackAccessToken")
+            .field("signature", &"<redacted>")
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -726,5 +777,48 @@ impl Default for TwitchEndpoints {
             gql_url: GQL_URL.to_string(),
             playback_url: PLAYBACK_URL.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_playback_and_request_secrets() {
+        let minute = MinuteWatchedRequest {
+            url: "https://usher.example/playlist?token=secret-playback".into(),
+            content_type: "application/json".into(),
+            user_agent: "test-agent".into(),
+            body: "secret-minute-body".into(),
+        };
+        let gql = GqlRequest {
+            url: "https://gql.example".into(),
+            headers: BTreeMap::from([(
+                String::from("Authorization"),
+                String::from("OAuth secret-auth-token"),
+            )]),
+            body: "secret-gql-body".into(),
+        };
+        let playback = PlaybackAccessToken {
+            signature: "secret-signature".into(),
+            value: "secret-playback-token".into(),
+        };
+        let data = PlaybackAccessTokenData {
+            stream_playback_access_token: Some(playback.clone()),
+        };
+        let output = format!("{minute:?} {gql:?} {playback:?} {data:?}");
+
+        for secret in [
+            "secret-playback",
+            "secret-minute-body",
+            "secret-auth-token",
+            "secret-gql-body",
+            "secret-signature",
+            "secret-playback-token",
+        ] {
+            assert!(!output.contains(secret), "debug leaked {secret}");
+        }
+        assert!(output.contains("<redacted>"));
     }
 }

@@ -573,6 +573,7 @@ fn twitch_error_class(error: &TwitchClientError) -> &'static str {
         TwitchFailureClass::ServerError => "server-error",
         TwitchFailureClass::Timeout => "timeout",
         TwitchFailureClass::ConnectionReset => "connection-reset",
+        TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
         TwitchFailureClass::Other => "mutation-rejected",
     }
 }

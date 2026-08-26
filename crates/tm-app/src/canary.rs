@@ -461,6 +461,7 @@ fn canary_failure_class(error: &anyhow::Error) -> &'static str {
             TwitchFailureClass::ServerError => "server-error",
             TwitchFailureClass::Timeout => "timeout",
             TwitchFailureClass::ConnectionReset => "connection-reset",
+            TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
             TwitchFailureClass::Other => "contract-or-shape",
         };
     }
@@ -523,6 +524,10 @@ mod tests {
             (TwitchFailureClass::ServerError, "server-error"),
             (TwitchFailureClass::Timeout, "timeout"),
             (TwitchFailureClass::ConnectionReset, "connection-reset"),
+            (
+                TwitchFailureClass::PersistedQueryNotFound,
+                "persisted-query-not-found",
+            ),
             (TwitchFailureClass::Other, "contract-or-shape"),
         ] {
             let error = anyhow::Error::new(TwitchClientError::RemoteRequest {
@@ -538,6 +543,16 @@ mod tests {
             canary_failure_class(&anyhow!("local failure")),
             "canary-check"
         );
+
+        let apq = CanaryCheckError::new(
+            "inventory",
+            TwitchClientError::PersistedQueryNotFound {
+                operation: "Inventory".to_string(),
+            },
+        );
+        let message = canary_failure_message(&apq);
+        assert_eq!(message, "inventory:persisted-query-not-found");
+        assert!(!message.contains("Inventory"));
     }
 
     #[test]
