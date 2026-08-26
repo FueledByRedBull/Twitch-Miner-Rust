@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -25,11 +26,22 @@ pub enum AuthSessionError {
     CookieEncode(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthSession {
     username: String,
     store: CookieStore,
     scopes: BTreeSet<String>,
+}
+
+impl fmt::Debug for AuthSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthSession")
+            .field("username", &self.username)
+            .field("store", &self.store)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 impl AuthSession {
@@ -341,6 +353,24 @@ mod tests {
         assert_eq!(loaded.auth_token(), Some("token"));
         assert_eq!(loaded.user_id(), Some("user-1"));
         assert_eq!(loaded.store()["session"].value, "abc");
+    }
+
+    #[test]
+    fn debug_redacts_session_credentials() {
+        let session = AuthSession::new(
+            "tester",
+            CookieStore::from([(
+                "auth-token".into(),
+                PersistedCookie {
+                    value: "secret-auth-token".into(),
+                    path: None,
+                    domain: None,
+                },
+            )]),
+        );
+        let output = format!("{session:?}");
+        assert!(!output.contains("secret-auth-token"));
+        assert!(output.contains("<redacted>"));
     }
 
     #[test]

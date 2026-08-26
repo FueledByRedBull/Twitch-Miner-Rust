@@ -1,3 +1,4 @@
+use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -11,14 +12,14 @@ pub const ANDROID_TV_REFERER: &str = "https://android.tv.twitch.tv/";
 pub const ANDROID_TV_USER_AGENT: &str =
     "Dalvik/2.1.0 (Linux; U; Android 7.1.2; Android TV Build/NHG47K)";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub form: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceCodeResponse {
     pub device_code: String,
     pub user_code: String,
@@ -26,7 +27,7 @@ pub struct DeviceCodeResponse {
     pub expires_in: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceFlowState {
     pub device_code: String,
     pub user_code: String,
@@ -34,10 +35,66 @@ pub struct DeviceFlowState {
     pub expires_in: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginValidationRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for OAuthRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names = self
+            .headers
+            .iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let form_keys = self.form.iter().map(|(name, _)| name).collect::<Vec<_>>();
+        formatter
+            .debug_struct("OAuthRequest")
+            .field("url", &"<redacted>")
+            .field("header_names", &header_names)
+            .field("form_keys", &form_keys)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCodeResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceCodeResponse")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &"<redacted>")
+            .field("interval", &self.interval)
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceFlowState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceFlowState")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &"<redacted>")
+            .field("interval", &self.interval)
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+impl fmt::Debug for LoginValidationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header_names = self
+            .headers
+            .iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        formatter
+            .debug_struct("LoginValidationRequest")
+            .field("url", &"<redacted>")
+            .field("header_names", &header_names)
+            .finish()
+    }
 }
 
 #[must_use]
@@ -204,5 +261,24 @@ mod tests {
         let state = DeviceFlowState::from(response);
         assert_eq!(state.interval, Duration::from_secs(5));
         assert_eq!(state.expires_in, Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn debug_redacts_device_flow_values() {
+        let request = build_token_poll_request("device-id", "secret-device-code");
+        let response = DeviceCodeResponse {
+            device_code: "secret-response-code".into(),
+            user_code: "secret-user-code".into(),
+            interval: 5,
+            expires_in: 1800,
+        };
+        let validation = build_validate_login_request("secret-auth-token", "device-id", "ua");
+        let state = DeviceFlowState::from(response.clone());
+        let output = format!("{request:?} {response:?} {state:?} {validation:?}");
+        assert!(!output.contains("secret-device-code"));
+        assert!(!output.contains("secret-response-code"));
+        assert!(!output.contains("secret-user-code"));
+        assert!(!output.contains("secret-auth-token"));
+        assert!(output.contains("<redacted>"));
     }
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tempfile::tempdir;
-use tm_config::{load_or_create_config, preview_config};
+use tm_config::{load_or_create_config, preview_config, DiscordConfig};
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -23,6 +23,17 @@ fn empty_config_fixture_is_extended_on_load() {
     let written: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert!(written["privacy"]["anonymize_logs"].is_boolean());
     assert!(written["bet"]["filter_condition"].is_object());
+}
+
+#[test]
+fn debug_redacts_discord_webhook() {
+    let config = DiscordConfig {
+        webhook_api: "https://discord.invalid/secret-webhook".into(),
+        events: vec!["STREAMER_ONLINE".into()],
+    };
+    let output = format!("{config:?}");
+    assert!(!output.contains("secret-webhook"));
+    assert!(output.contains("<redacted>"));
 }
 
 #[test]

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -104,10 +105,20 @@ pub struct PrivacyConfig {
     pub anonymize_logs: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DiscordConfig {
     pub webhook_api: String,
     pub events: Vec<String>,
+}
+
+impl fmt::Debug for DiscordConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiscordConfig")
+            .field("webhook_api", &"<redacted>")
+            .field("events", &self.events)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

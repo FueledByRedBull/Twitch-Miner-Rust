@@ -59,7 +59,6 @@ pub trait ChatLogger {
     fn emoji_eventf(&mut self, emoji: &str, event: ChatEventKind, message: &str);
 }
 
-#[derive(Debug)]
 pub struct ChatClient<L> {
     username: String,
     channel: String,
@@ -67,6 +66,19 @@ pub struct ChatClient<L> {
     disable_at_in_nickname: bool,
     logger: L,
     closed: bool,
+}
+
+impl<L> fmt::Debug for ChatClient<L> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChatClient")
+            .field("username", &self.username)
+            .field("channel", &self.channel)
+            .field("token", &"<redacted>")
+            .field("disable_at_in_nickname", &self.disable_at_in_nickname)
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<L> ChatClient<L>
@@ -365,6 +377,20 @@ mod tests {
         assert_eq!(client.username(), "username");
         assert_eq!(client.channel(), "channel");
         assert_eq!(client.token(), "token");
+    }
+
+    #[test]
+    fn debug_redacts_chat_token() {
+        let client = ChatClient::new(
+            "UserName",
+            "chat-secret-token",
+            "Channel",
+            StubLogger::default(),
+            false,
+        );
+        let output = format!("{client:?}");
+        assert!(!output.contains("chat-secret-token"));
+        assert!(output.contains("<redacted>"));
     }
 
     #[test]
