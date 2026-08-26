@@ -765,10 +765,36 @@ fn capacity_plan_keeps_predictions_only_for_authenticated_broadcaster() {
         report.capabilities[1].prediction_source,
         "pubsub-compatibility"
     );
+    assert_eq!(
+        report.capabilities[0].raid_source,
+        "eventsub+pubsub-compatibility"
+    );
+    assert_eq!(
+        report.capabilities[1].raid_source,
+        "eventsub+pubsub-compatibility"
+    );
     assert!(!report.capabilities[1]
         .planned_subscription_types
         .iter()
         .any(|kind| kind.starts_with("channel.prediction.")));
+}
+
+#[test]
+fn capacity_plan_reports_pubsub_raid_fallback_when_eventsub_is_full() {
+    let mut tracked = streamer();
+    tracked.settings.follow_raid = true;
+
+    let (_, report) = subscription_plan_with_capacity(&[tracked], None, 2, 0, 10);
+
+    assert_eq!(report.capabilities[0].raid_source, "pubsub-compatibility");
+    assert!(report.capabilities[0]
+        .skipped_subscription_types
+        .iter()
+        .any(|kind| kind == "channel.raid"));
+    assert_eq!(
+        report.capabilities[0].failure_class.as_deref(),
+        Some("capacity-overflow")
+    );
 }
 
 #[test]

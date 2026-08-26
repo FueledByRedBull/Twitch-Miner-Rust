@@ -87,6 +87,8 @@ pub(super) fn subscription_plan_with_capacity(
         let raid_types = ["channel.raid"];
         let required_cost = subscription_cost(streamer, authorized_prediction_broadcaster_id);
         if reserve_capacity(&mut remaining_cost, required_cost) {
+            capabilities[streamer_index].raid_source =
+                String::from("eventsub+pubsub-compatibility");
             plan_types(
                 &mut requests,
                 &mut capabilities[streamer_index],
@@ -167,7 +169,7 @@ fn initial_eventsub_capabilities(
                 String::from("pubsub-compatibility")
             },
             raid_source: if streamer.settings.follow_raid {
-                String::from("eventsub-observation+pubsub-compatibility")
+                String::from("pubsub-compatibility")
             } else {
                 String::from("disabled")
             },
