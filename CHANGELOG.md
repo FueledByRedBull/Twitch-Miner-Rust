@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Reconciles unresolved streak state once after a confirmed bonus claim and
+  once after accepted offline-recovery playback settles, using Twitch's typed
+  milestone rather than treating either trigger as proof. Subscription-only
+  Drop campaigns are excluded from watch-slot eligibility through the current
+  registered Inventory contract; mixed and unknown campaign shapes remain
+  eligible.
 - Adds privacy-aware, state-only streak context to online/offline log and
   Discord diagnostics without transition-time Twitch requests; exact timestamps
   remain suppressed when anonymization is enabled. Published-image onboarding now

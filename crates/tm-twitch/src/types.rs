@@ -602,6 +602,8 @@ pub(crate) struct InventoryTimeDrop {
     pub(crate) required_minutes_watched: Option<i64>,
     #[serde(rename = "requiredProgress", default)]
     pub(crate) required_progress: Option<i64>,
+    #[serde(rename = "requiredSubs", default)]
+    pub(crate) required_subs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -749,6 +751,7 @@ pub struct InventoryDrop {
 pub struct InventorySnapshot {
     pub drops: Vec<InventoryDrop>,
     pub completed_campaign_ids: Vec<String>,
+    pub subscription_only_campaign_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

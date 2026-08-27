@@ -288,7 +288,7 @@ pub(crate) async fn refresh_watch_selection_metadata(
 ) -> usize {
     let mut failures = 0_usize;
     let mut refreshes = tokio::task::JoinSet::new();
-    let completed_campaign_ids = Arc::new(
+    let excluded_campaign_ids = Arc::new(
         if streamers.iter().any(|streamer| {
             streamer.is_online
                 && streamer.settings.farm_drops
@@ -298,15 +298,12 @@ pub(crate) async fn refresh_watch_selection_metadata(
                     .is_none_or(|stream| stream.update_required_at(now))
         }) {
             match twitch.fetch_inventory_snapshot_typed().await {
-                Ok(snapshot) => snapshot
-                    .completed_campaign_ids
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
+                Ok(snapshot) => excluded_drop_campaign_ids(snapshot),
                 Err(error) => {
                     tracing::warn!(
                         error_class = "campaign-inventory",
                         %error,
-                        "drop campaign completion refresh failed"
+                        "drop campaign inventory refresh failed"
                     );
                     HashSet::new()
                 }
@@ -333,7 +330,7 @@ pub(crate) async fn refresh_watch_selection_metadata(
         let twitch = Arc::clone(twitch);
         let observability = observability.clone();
         let streamer = streamer.clone();
-        let completed_campaign_ids = Arc::clone(&completed_campaign_ids);
+        let excluded_campaign_ids = Arc::clone(&excluded_campaign_ids);
         refreshes.spawn(async move {
             let previous_game = streamer_game_name(&streamer);
             let (streamer, info) = match twitch.fetch_stream_info(&streamer.username).await {
@@ -369,7 +366,7 @@ pub(crate) async fn refresh_watch_selection_metadata(
                 &twitch,
                 &streamer,
                 &info,
-                &completed_campaign_ids,
+                &excluded_campaign_ids,
             )
             .await?;
             log_stream_presence_changes(
@@ -387,6 +384,14 @@ pub(crate) async fn refresh_watch_selection_metadata(
     }
 
     failures
+}
+
+fn excluded_drop_campaign_ids(snapshot: tm_twitch::InventorySnapshot) -> HashSet<String> {
+    snapshot
+        .completed_campaign_ids
+        .into_iter()
+        .chain(snapshot.subscription_only_campaign_ids)
+        .collect()
 }
 
 fn log_watch_selection_refresh_result(
@@ -420,7 +425,7 @@ async fn refresh_drop_campaign_eligibility(
     twitch: &TwitchClient,
     streamer: &Streamer,
     info: &tm_twitch::StreamInfo,
-    completed_campaign_ids: &HashSet<String>,
+    excluded_campaign_ids: &HashSet<String>,
 ) -> Result<()> {
     if !streamer.settings.farm_drops {
         return Ok(());
@@ -450,7 +455,7 @@ async fn refresh_drop_campaign_eligibility(
     runtime
         .set_drop_campaign_eligibility(
             streamer.channel_id.clone(),
-            has_unfinished_campaign(&campaign_ids, completed_campaign_ids),
+            has_unfinished_campaign(&campaign_ids, excluded_campaign_ids),
         )
         .await?;
     Ok(())
@@ -458,11 +463,11 @@ async fn refresh_drop_campaign_eligibility(
 
 pub(crate) fn has_unfinished_campaign(
     available_campaign_ids: &[String],
-    completed_campaign_ids: &HashSet<String>,
+    excluded_campaign_ids: &HashSet<String>,
 ) -> bool {
     available_campaign_ids
         .iter()
-        .any(|campaign_id| !completed_campaign_ids.contains(campaign_id))
+        .any(|campaign_id| !excluded_campaign_ids.contains(campaign_id))
 }
 
 pub(crate) async fn send_minute_watched_for_streamer(

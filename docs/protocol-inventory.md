@@ -35,9 +35,12 @@ Rust, and accounts for five Go definitions that Go never issues:
 `PlaybackAccessToken`, `ModViewChannelQuery`, `ViewerDropsDashboard`,
 `DropCampaignDetails`, and `PersonalSections`. Rust actively exercises
 `PlaybackAccessToken` and `ViewerDropsDashboard`; the remaining three are not
-part of either miner's runtime. The gate also requires the one documented hash
-mismatch: Rust carries Twitch's current `PlaybackAccessToken` hash while the Go
-baseline retains the retired hash for an operation it does not issue.
+part of either miner's runtime. The gate also requires two documented hash
+mismatches. Rust carries Twitch's current `PlaybackAccessToken` hash while the
+Go baseline retains the retired hash for an operation it does not issue. Rust's
+current `Inventory` contract includes typed `requiredSubs` data so
+subscription-only Drop campaigns cannot occupy a watch slot; the pinned Go
+baseline retains the earlier Inventory hash.
 
 | Operation | Mode |
 | --- | --- |

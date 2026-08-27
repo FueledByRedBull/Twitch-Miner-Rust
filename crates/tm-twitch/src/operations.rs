@@ -79,7 +79,7 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
     },
     PersistedOperationContract {
         operation_name: "Inventory",
-        sha256_hash: "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b",
+        sha256_hash: "8337eb8541b314040b0edde0c09c5c7a2783ba1960aa9edfbf3bac16d0fec404",
         read_only: true,
     },
     PersistedOperationContract {
@@ -267,7 +267,7 @@ pub fn make_prediction(
 pub fn inventory() -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "Inventory",
-        "d86775d0ef16a63a33ad52e80eaff963b2d5b72fada7c991504a57496e1d8e4b",
+        "8337eb8541b314040b0edde0c09c5c7a2783ba1960aa9edfbf3bac16d0fec404",
         json!({ "fetchRewardCampaigns": true }),
     )
 }

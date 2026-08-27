@@ -2146,19 +2146,26 @@ mod tests {
     }
 
     #[test]
-    fn completed_campaigns_do_not_pin_but_unknown_campaigns_remain_eligible() {
-        let completed = std::collections::HashSet::from([String::from("campaign-complete")]);
+    fn excluded_campaigns_do_not_pin_but_unknown_campaigns_remain_eligible() {
+        let excluded = std::collections::HashSet::from([
+            String::from("campaign-complete"),
+            String::from("campaign-subscription-only"),
+        ]);
 
         assert!(!has_unfinished_campaign(
             &[String::from("campaign-complete")],
-            &completed
+            &excluded
+        ));
+        assert!(!has_unfinished_campaign(
+            &[String::from("campaign-subscription-only")],
+            &excluded
         ));
         assert!(has_unfinished_campaign(
             &[
                 String::from("campaign-complete"),
                 String::from("campaign-new")
             ],
-            &completed
+            &excluded
         ));
     }
 

@@ -2180,6 +2180,36 @@ fn typed_inventory_classifies_only_fully_claimed_campaigns_as_complete() {
                                 ]
                             },
                             {
+                                "id": "campaign-subscription-only",
+                                "timeBasedDrops": [{
+                                    "requiredMinutesWatched": 0,
+                                    "requiredSubs": 1,
+                                    "self": null
+                                }]
+                            },
+                            {
+                                "id": "campaign-mixed",
+                                "timeBasedDrops": [
+                                    {
+                                        "requiredMinutesWatched": 0,
+                                        "requiredSubs": 1,
+                                        "self": null
+                                    },
+                                    {
+                                        "requiredMinutesWatched": 30,
+                                        "requiredSubs": 0,
+                                        "self": null
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "campaign-unknown-requirement",
+                                "timeBasedDrops": [{
+                                    "requiredMinutesWatched": 30,
+                                    "self": null
+                                }]
+                            },
+                            {
                                 "timeBasedDrops": [{
                                     "requiredMinutesWatched": 30,
                                     "self": {
@@ -2200,6 +2230,10 @@ fn typed_inventory_classifies_only_fully_claimed_campaigns_as_complete() {
     assert_eq!(
         snapshot.completed_campaign_ids,
         vec![String::from("campaign-complete")]
+    );
+    assert_eq!(
+        snapshot.subscription_only_campaign_ids,
+        vec![String::from("campaign-subscription-only")]
     );
     assert_eq!(snapshot.drops.len(), 3);
 }

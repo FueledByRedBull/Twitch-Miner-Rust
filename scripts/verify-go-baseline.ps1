@@ -119,7 +119,7 @@ $allowedRustOnly = @(
     'FilterableVideoTower_Videos',
     'ClipsCards__User'
 )
-$allowedHashMismatches = @('PlaybackAccessToken')
+$allowedHashMismatches = @('Inventory', 'PlaybackAccessToken')
 
 $missing = @($goMap.Keys | Where-Object { -not $rustMap.ContainsKey($_) } | Sort-Object)
 $extra = @($rustMap.Keys | Where-Object { -not $goMap.ContainsKey($_) } | Sort-Object)
@@ -145,4 +145,4 @@ Missing documented hash mismatches: $($missingDocumentedMismatches -join ', ')
 "@
 }
 
-Write-Output "go-baseline-ok: $($goMap.Count) Go definitions, $($rustMap.Count) active Rust definitions, $($missing.Count) documented Go-only definitions, $($extra.Count) documented Rust-only definitions, $($mismatches.Count) documented hash mismatch"
+Write-Output "go-baseline-ok: $($goMap.Count) Go definitions, $($rustMap.Count) active Rust definitions, $($missing.Count) documented Go-only definitions, $($extra.Count) documented Rust-only definitions, $($mismatches.Count) documented hash mismatches"

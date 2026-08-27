@@ -10,6 +10,7 @@
               {
                 "name": "Reward",
                 "requiredMinutesWatched": 60,
+                "requiredSubs": 0,
                 "self": {
                   "dropInstanceID": "drop-1",
                   "currentMinutesWatched": 30,
