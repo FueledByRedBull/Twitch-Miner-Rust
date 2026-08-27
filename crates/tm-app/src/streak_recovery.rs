@@ -17,6 +17,17 @@ const MAX_RECOVERY_SECONDS: u64 = 8 * 60;
 const VOD_EVENT_INTERVAL_SECONDS: u64 = 60;
 const CLIP_EVENT_INTERVAL_SECONDS: u64 = 5;
 
+pub(crate) fn milestone_resolves_current_stream(
+    milestone: &WatchStreakMilestone,
+    stream_started_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> bool {
+    milestone.achievement_timestamp >= stream_started_at
+        && milestone
+            .expires_at
+            .is_none_or(|expires_at| expires_at > now)
+}
+
 pub(crate) fn spawn_streak_recovery_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -253,6 +264,9 @@ async fn recover_with_vod(
             return false;
         }
     }
+    if reconcile_after_accepted_playback(stop, attempt, accepted).await {
+        return true;
+    }
     log_unconfirmed(attempt.observability, attempt.streamer, "VOD", accepted);
     false
 }
@@ -343,8 +357,29 @@ async fn recover_with_clips(
             second += CLIP_EVENT_INTERVAL_SECONDS;
         }
     }
+    if reconcile_after_accepted_playback(stop, attempt, accepted).await {
+        return true;
+    }
     log_unconfirmed(attempt.observability, attempt.streamer, "clip", accepted);
     false
+}
+
+async fn reconcile_after_accepted_playback(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    attempt: &RecoveryAttempt<'_>,
+    accepted: u64,
+) -> bool {
+    accepted > 0
+        && wait_or_stop(stop, CLIP_EVENT_INTERVAL_SECONDS).await
+        && reconcile_typed_recovery(
+            attempt.runtime,
+            attempt.twitch,
+            attempt.streamer,
+            attempt.baseline,
+            attempt.target_broadcast_id,
+            attempt.observability,
+        )
+        .await
 }
 
 async fn reconcile_typed_recovery(
@@ -440,6 +475,9 @@ async fn preempted(runtime: &tm_runtime::RuntimeHandle, streamer: &Streamer) -> 
 }
 
 async fn wait_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>, seconds: u64) -> bool {
+    if *stop.borrow() {
+        return false;
+    }
     tokio::select! {
         changed = stop.changed() => changed.is_ok() && !*stop.borrow(),
         () = tokio::time::sleep(Duration::from_secs(seconds)) => true,
@@ -699,5 +737,39 @@ mod tests {
         assert!(clip_matches_broadcast(&clip, "broadcast-1"));
         clip.broadcast_id = None;
         assert!(!clip_matches_broadcast(&clip, "broadcast-1"));
+    }
+
+    #[test]
+    fn current_stream_resolution_requires_a_fresh_unexpired_milestone() {
+        let mut milestone = WatchStreakMilestone {
+            value: Some(4),
+            achievement_timestamp: ts(200),
+            expires_at: Some(ts(400)),
+            missed_broadcast_ids: None,
+        };
+        assert!(milestone_resolves_current_stream(
+            &milestone,
+            ts(100),
+            ts(300)
+        ));
+        milestone.achievement_timestamp = ts(99);
+        assert!(!milestone_resolves_current_stream(
+            &milestone,
+            ts(100),
+            ts(300)
+        ));
+        milestone.achievement_timestamp = ts(200);
+        milestone.expires_at = Some(ts(300));
+        assert!(!milestone_resolves_current_stream(
+            &milestone,
+            ts(100),
+            ts(300)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_ends_a_wait_without_sleeping() {
+        let (_stop_tx, mut stop) = tokio::sync::watch::channel(true);
+        assert!(!wait_or_stop(&mut stop, CLIP_EVENT_INTERVAL_SECONDS).await);
     }
 }

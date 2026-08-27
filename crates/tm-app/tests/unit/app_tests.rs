@@ -48,7 +48,7 @@ mod tests {
     use tm_config::{AppPaths, ConfigError, ConfigFile};
     use tm_domain::{
         BetSettings, Condition, DelayMode, FilterCondition, Game, OffsetDateTime, OutcomeKey,
-        PredictionDecision, PredictionEvent, PredictionOutcome, Streamer,
+        PredictionDecision, PredictionEvent, PredictionOutcome, Stream, Streamer,
     };
     use tm_observability::DiscordClient;
     use tm_twitch::{InventoryDrop, TwitchClient, TwitchEndpoints};
@@ -127,6 +127,88 @@ mod tests {
                 .join(name),
         )
         .unwrap()
+    }
+
+    fn bonus_streak_streamer() -> Streamer {
+        Streamer {
+            username: String::from("bonus-streak"),
+            channel_id: String::from("701"),
+            is_online: true,
+            channel_points_enabled: Some(true),
+            settings: tm_domain::StreamerSettings {
+                watch_streak: true,
+                ..tm_domain::StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                broadcast_id: String::from("broadcast-1"),
+                stream_up_at: Some(ts(1)),
+                watch_streak_missing: true,
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        }
+    }
+
+    fn bonus_streak_milestone_response() -> String {
+        serde_json::json!({
+            "data": {
+                "channel": {
+                    "self": {
+                        "watchStreakMilestone": {
+                            "watchStreakMilestone": {
+                                "value": "5",
+                                "achievementTimestamp": "2026-08-27T10:30:00Z"
+                            },
+                            "expiresAt": "2099-08-28T10:30:00Z",
+                            "missedStreams": []
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    async fn run_bonus_claim(
+        streamer: Streamer,
+        milestone_response: Option<String>,
+    ) -> (Streamer, Vec<String>) {
+        let mut responses = vec![fixture_json("twitch.claim_bonus_success.json")];
+        responses.extend(milestone_response);
+        let (endpoints, requests, server) = spawn_json_response_server(responses);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let mut state = tm_runtime::RuntimeState::from_targets(&ConfigFile::default(), &[], ts(0));
+        state.streamers = vec![streamer];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+
+        handle_claim_bonus_effect(
+            &runtime,
+            &twitch,
+            "user-1",
+            "701",
+            "claim-1",
+            &test_observability(),
+            &HealthTracker::default(),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+
+        let streamer = runtime
+            .state_snapshot()
+            .await
+            .unwrap()
+            .streamers
+            .into_iter()
+            .next()
+            .unwrap();
+        let requests = requests.lock().unwrap().clone();
+        (streamer, requests)
     }
 
     #[test]
@@ -2064,19 +2146,26 @@ mod tests {
     }
 
     #[test]
-    fn completed_campaigns_do_not_pin_but_unknown_campaigns_remain_eligible() {
-        let completed = std::collections::HashSet::from([String::from("campaign-complete")]);
+    fn excluded_campaigns_do_not_pin_but_unknown_campaigns_remain_eligible() {
+        let excluded = std::collections::HashSet::from([
+            String::from("campaign-complete"),
+            String::from("campaign-subscription-only"),
+        ]);
 
         assert!(!has_unfinished_campaign(
             &[String::from("campaign-complete")],
-            &completed
+            &excluded
+        ));
+        assert!(!has_unfinished_campaign(
+            &[String::from("campaign-subscription-only")],
+            &excluded
         ));
         assert!(has_unfinished_campaign(
             &[
                 String::from("campaign-complete"),
                 String::from("campaign-new")
             ],
-            &completed
+            &excluded
         ));
     }
 
@@ -2941,6 +3030,70 @@ mod tests {
 
         let snapshot = runtime.state_snapshot().await.unwrap();
         assert!(!snapshot.predictions.contains_key("disabled-prediction"));
+    }
+
+    #[tokio::test]
+    async fn confirmed_bonus_reconciles_a_fresh_typed_streak_milestone() {
+        let (streamer, requests) = run_bonus_claim(
+            bonus_streak_streamer(),
+            Some(bonus_streak_milestone_response()),
+        )
+        .await;
+        let stream = streamer.stream.as_ref().unwrap();
+        assert!(!stream.watch_streak_missing);
+        assert_eq!(stream.watch_streak_count, Some(5));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains(r#""operationName":"RewardList""#))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn bonus_streak_reconciliation_keeps_pending_and_read_failure_state() {
+        for milestone_response in [
+            bonus_streak_milestone_response(),
+            String::from(r#"{"errors":[{"message":"temporary"}]}"#),
+        ] {
+            let mut streamer = bonus_streak_streamer();
+            streamer.stream.as_mut().unwrap().stream_up_at = Some(ts(2_000_000_000));
+            let (streamer, requests) = run_bonus_claim(streamer, Some(milestone_response)).await;
+
+            assert!(streamer.stream.as_ref().unwrap().watch_streak_missing);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.contains(r#""operationName":"RewardList""#))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bonus_streak_reconciliation_skips_resolved_disabled_and_offline_streams() {
+        let mut resolved = bonus_streak_streamer();
+        resolved.stream.as_mut().unwrap().watch_streak_missing = false;
+        let mut disabled = bonus_streak_streamer();
+        disabled.settings.watch_streak = false;
+        let mut offline = bonus_streak_streamer();
+        offline.is_online = false;
+
+        for streamer in [resolved, disabled, offline] {
+            let (_streamer, requests) = run_bonus_claim(streamer, None).await;
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.contains(r#""operationName":"ClaimCommunityPoints""#))
+                    .count(),
+                1
+            );
+            assert!(requests
+                .iter()
+                .all(|request| !request.contains(r#""operationName":"RewardList""#)));
+        }
     }
 
     #[tokio::test]

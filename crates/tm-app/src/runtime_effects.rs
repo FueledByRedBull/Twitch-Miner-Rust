@@ -11,6 +11,7 @@ use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 use crate::context::{contribute_streamer_community_goals, refresh_streamer_context};
 use crate::observability::AppObservability;
 use crate::status::HealthTracker;
+use crate::streak_recovery::milestone_resolves_current_stream;
 use crate::utilities::time_now;
 
 #[derive(Clone)]
@@ -187,12 +188,54 @@ pub(crate) async fn handle_claim_bonus_effect(
         .claim_bonus(channel_id, claim_id, Some(persistent_user_id))
         .await?;
     health.record_claim();
+    reconcile_claimed_bonus_streak(runtime, twitch, channel_id).await;
     if observability.show_claimed_bonus {
         let message = observability.bonus_claim_message(&streamer, false);
         tracing::info!(operation = "claim_bonus", "{message}");
         observability.spawn_event(DiscordEvent::BonusClaim, message);
     }
     Ok(())
+}
+
+async fn reconcile_claimed_bonus_streak(
+    runtime: &tm_runtime::RuntimeHandle,
+    twitch: &TwitchClient,
+    channel_id: &str,
+) {
+    let Ok(Some(streamer)) = runtime_streamer_by_channel_id(runtime, channel_id).await else {
+        return;
+    };
+    let Some(stream_started_at) = unresolved_online_streak_started_at(&streamer) else {
+        return;
+    };
+    let Ok(Some(milestone)) = twitch
+        .fetch_watch_streak_milestone(&streamer.channel_id)
+        .await
+    else {
+        return;
+    };
+    if milestone_resolves_current_stream(&milestone, stream_started_at, time_now()) {
+        let _ = runtime
+            .mark_watch_streak_recovered(
+                streamer.channel_id.clone(),
+                milestone.value,
+                milestone.achievement_timestamp,
+                milestone.expires_at,
+            )
+            .await;
+    }
+}
+
+fn unresolved_online_streak_started_at(streamer: &Streamer) -> Option<tm_runtime::RuntimeTime> {
+    let stream = streamer.stream.as_ref()?;
+    if !streamer.is_online
+        || !streamer.settings.watch_streak
+        || !stream.watch_streak_missing
+        || stream.broadcast_id.trim().is_empty()
+    {
+        return None;
+    }
+    stream.stream_up_at
 }
 
 pub(crate) async fn handle_claim_moment_effect(
@@ -573,6 +616,7 @@ fn twitch_error_class(error: &TwitchClientError) -> &'static str {
         TwitchFailureClass::ServerError => "server-error",
         TwitchFailureClass::Timeout => "timeout",
         TwitchFailureClass::ConnectionReset => "connection-reset",
+        TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
         TwitchFailureClass::Other => "mutation-rejected",
     }
 }

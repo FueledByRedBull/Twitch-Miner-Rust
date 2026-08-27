@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ const MAX_TWITCH_USERNAME_LENGTH: usize = 25;
 
 pub type CookieStore = BTreeMap<String, PersistedCookie>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PersistedCookie {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -20,7 +21,7 @@ pub struct PersistedCookie {
     pub domain: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LegacyCookieRecord {
     name: String,
     value: String,
@@ -30,7 +31,7 @@ struct LegacyCookieRecord {
     domain: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionCookie {
     pub name: String,
     pub value: String,
@@ -39,11 +40,53 @@ pub struct SessionCookie {
     pub host: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoadedCookieStore {
     pub auth_token: Option<String>,
     pub persistent: Option<String>,
     pub session_cookies: BTreeMap<String, Vec<SessionCookie>>,
+}
+
+impl fmt::Debug for PersistedCookie {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PersistedCookie")
+            .field("value", &"<redacted>")
+            .field("path", &self.path)
+            .field("domain", &self.domain)
+            .finish()
+    }
+}
+
+impl fmt::Debug for SessionCookie {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionCookie")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("path", &self.path)
+            .field("domain", &self.domain)
+            .field("host", &self.host)
+            .finish()
+    }
+}
+
+impl fmt::Debug for LoadedCookieStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let session_cookie_count = self.session_cookies.values().map(Vec::len).sum::<usize>();
+        formatter
+            .debug_struct("LoadedCookieStore")
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "persistent",
+                &self.persistent.as_ref().map(|_| "<redacted>"),
+            )
+            .field("session_cookie_count", &session_cookie_count)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -403,6 +446,29 @@ mod tests {
         assert_eq!(session.name, "session");
         assert_eq!(session.domain, ".example.com");
         assert_eq!(session.path, "/custom");
+    }
+
+    #[test]
+    fn debug_redacts_cookie_values() {
+        let cookie_debug = format!(
+            "{:?}",
+            PersistedCookie {
+                value: "secret-cookie-value".into(),
+                path: None,
+                domain: None,
+            }
+        );
+        let loaded = LoadedCookieStore {
+            auth_token: Some("secret-auth-token".into()),
+            persistent: Some("secret-user-id".into()),
+            session_cookies: BTreeMap::new(),
+        };
+        let loaded_debug = format!("{loaded:?}");
+        assert!(!cookie_debug.contains("secret-cookie-value"));
+        assert!(!loaded_debug.contains("secret-auth-token"));
+        assert!(!loaded_debug.contains("secret-user-id"));
+        assert!(cookie_debug.contains("<redacted>"));
+        assert!(loaded_debug.contains("<redacted>"));
     }
 
     #[test]

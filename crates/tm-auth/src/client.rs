@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -14,13 +15,26 @@ use crate::CookieStore;
 
 pub const ACTIVATE_URL: &str = "https://www.twitch.tv/activate";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DeviceCodePrompt {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
     pub interval: Duration,
     pub expires_in: Duration,
+}
+
+impl fmt::Debug for DeviceCodePrompt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceCodePrompt")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &"<redacted>")
+            .field("verification_uri", &self.verification_uri)
+            .field("interval", &self.interval)
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,11 +92,25 @@ pub struct TwitchAuthClient {
     endpoints: AuthEndpoints,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TokenPollResponse {
     access_token: Option<String>,
     error: Option<String>,
     message: Option<String>,
+}
+
+impl fmt::Debug for TokenPollResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenPollResponse")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("error", &self.error)
+            .field("message", &self.message)
+            .finish()
+    }
 }
 
 impl TwitchAuthClient {
@@ -346,6 +374,21 @@ mod tests {
             expires_in: Duration::from_secs(900),
         };
         assert_eq!(prompt.verification_uri, "https://www.twitch.tv/activate");
+    }
+
+    #[test]
+    fn debug_redacts_device_code_prompt() {
+        let prompt = DeviceCodePrompt {
+            device_code: "secret-device-code".into(),
+            user_code: "secret-user-code".into(),
+            verification_uri: ACTIVATE_URL.into(),
+            interval: Duration::from_secs(5),
+            expires_in: Duration::from_secs(900),
+        };
+        let output = format!("{prompt:?}");
+        assert!(!output.contains("secret-device-code"));
+        assert!(!output.contains("secret-user-code"));
+        assert!(output.contains("<redacted>"));
     }
 
     #[test]

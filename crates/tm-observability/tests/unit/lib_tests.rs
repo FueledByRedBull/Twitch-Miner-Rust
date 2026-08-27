@@ -60,6 +60,22 @@ fn discord_event_filtering_matches_go() {
 }
 
 #[test]
+fn debug_redacts_discord_webhook() {
+    let settings = DiscordSettings {
+        webhook_api: "https://discord.invalid/secret-webhook".into(),
+        events: vec!["STREAMER_ONLINE".into()],
+    };
+    let webhook = new_discord_webhook(&settings).unwrap();
+
+    let settings_debug = format!("{settings:?}");
+    let webhook_debug = format!("{webhook:?}");
+    assert!(!settings_debug.contains("secret-webhook"));
+    assert!(!webhook_debug.contains("secret-webhook"));
+    assert!(settings_debug.contains("<redacted>"));
+    assert!(webhook_debug.contains("<redacted>"));
+}
+
+#[test]
 fn sanitize_filename_replaces_forbidden_chars() {
     let sanitized = sanitize_filename(r#"bad/name\:*?"<>|"#);
     assert!(!sanitized.contains('/'));

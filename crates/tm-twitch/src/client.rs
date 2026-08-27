@@ -42,7 +42,6 @@ const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Credentials and tokenized playback URLs remain private and never appear in
 /// diagnostic errors.
-#[derive(Debug)]
 pub struct TwitchClient {
     client: reqwest::Client,
     /// Client for URLs supplied by Twitch documents. Its resolver validates
@@ -57,6 +56,26 @@ pub struct TwitchClient {
     user_agent: String,
     client_version: Mutex<CachedClientVersion>,
     endpoints: TwitchEndpoints,
+}
+
+impl fmt::Debug for TwitchClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TwitchClient")
+            .field("auth_token", &"<redacted>")
+            .field(
+                "default_cookie_header",
+                &self.default_cookie_header.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "allow_loopback_remote_endpoints",
+                &self.allow_loopback_remote_endpoints,
+            )
+            .field("client_session", &"<redacted>")
+            .field("device_id", &"<redacted>")
+            .field("user_agent", &self.user_agent)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -572,11 +591,9 @@ impl TwitchClient {
             ));
         }
         let cookie = claim_bonus_cookie_header(&self.auth_token, user_id.unwrap_or_default());
+        let operation = operations::claim_community_points(channel_id, claim_id);
         let response: ClaimBonusData = self
-            .post_mutation_typed_value(
-                serde_json::to_value(operations::claim_community_points(channel_id, claim_id))?,
-                cookie.as_deref(),
-            )
+            .post_mutation_typed_value(&operation, cookie.as_deref())
             .await?;
         validate_typed_claim_bonus_response(response)
     }
@@ -848,22 +865,21 @@ impl TwitchClient {
     where
         T: DeserializeOwned,
     {
-        self.post_mutation_typed_value(serde_json::to_value(operation)?, None)
-            .await
+        self.post_mutation_typed_value(operation, None).await
     }
 
     async fn post_mutation_typed_value<T>(
         &self,
-        payload: serde_json::Value,
+        operation: &GqlPersistedOperation,
         cookie: Option<&str>,
     ) -> Result<T, TwitchClientError>
     where
         T: DeserializeOwned,
     {
         let payload = self
-            .post_gql_value_with_cookie(payload, cookie, false)
+            .post_gql_value_with_cookie(serde_json::to_value(operation)?, cookie, false)
             .await?;
-        decode_gql_data(&payload, "mutation")
+        decode_gql_data(&payload, operation.operation_name)
     }
 
     async fn send_read_request<F>(

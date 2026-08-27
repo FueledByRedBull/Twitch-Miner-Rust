@@ -28,6 +28,11 @@ pub(crate) fn decode_gql_data<T>(
 where
     T: DeserializeOwned,
 {
+    if is_persisted_query_not_found(payload) {
+        return Err(TwitchClientError::PersistedQueryNotFound {
+            operation: context.to_string(),
+        });
+    }
     let response: GqlResponse<T> = serde_json::from_value(payload.clone()).map_err(|error| {
         TwitchClientError::ProtocolDecode {
             context: context.to_string(),
@@ -534,6 +539,7 @@ pub(crate) fn inventory_snapshot_from_typed(
     let mut snapshot = InventorySnapshot {
         drops: Vec::new(),
         completed_campaign_ids: Vec::new(),
+        subscription_only_campaign_ids: Vec::new(),
     };
     for campaign in campaigns {
         let campaign_complete = !campaign.drops.is_empty()
@@ -551,6 +557,31 @@ pub(crate) fn inventory_snapshot_from_typed(
                 .filter(|id| !id.is_empty())
             {
                 snapshot.completed_campaign_ids.push(id.to_owned());
+            }
+        }
+        let campaign_subscription_only = campaign.drops.iter().any(|drop| {
+            drop.self_data
+                .as_ref()
+                .and_then(|progress| progress.is_claimed)
+                != Some(true)
+        }) && campaign
+            .drops
+            .iter()
+            .filter(|drop| {
+                drop.self_data
+                    .as_ref()
+                    .and_then(|progress| progress.is_claimed)
+                    != Some(true)
+            })
+            .all(|drop| drop.required_subs.is_some_and(|required| required > 0));
+        if campaign_subscription_only {
+            if let Some(id) = campaign
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                snapshot.subscription_only_campaign_ids.push(id.to_owned());
             }
         }
         let campaign_name = campaign.name.or(campaign.display_name).unwrap_or_default();
@@ -588,5 +619,7 @@ pub(crate) fn inventory_snapshot_from_typed(
     }
     snapshot.completed_campaign_ids.sort_unstable();
     snapshot.completed_campaign_ids.dedup();
+    snapshot.subscription_only_campaign_ids.sort_unstable();
+    snapshot.subscription_only_campaign_ids.dedup();
     Ok(snapshot)
 }

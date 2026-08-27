@@ -108,6 +108,8 @@ task's last successful work and last activity, bounded
 claim/bet/reconnect/refresh counters, the last redacted error class, runtime
 queue/processing measurements, EventSub planned/active/cost capabilities, and
 PubSub configured/acknowledged/message/reconnect capabilities.
+`successful_refreshes` counts complete channel-points context refresh cycles,
+not OAuth token refreshes.
 It never prints topic suffixes, channel/user IDs, cookies,
 tokens, request headers, or raw account payloads. `followers_order` accepts
 `ASC` or `DESC`; `DESC` remains the default.
@@ -182,6 +184,11 @@ Use `--status` for the separate EventSub, PubSub, and polling health entries.
 The authoritative timeout, retry, fallback, and mutation-replay rules are in the
 [protocol inventory](../protocol-inventory.md); never include cookies, request
 headers, endpoint query strings, or raw responses in a support report.
+In normal runtime, EventSub `verified=false` only means the post-create listing
+was skipped; judge health from active/failed counts and task state. A
+`capacity-overflow` capability may retain EventSub presence while optional raid or
+prediction types use compatibility fallback, and `raid_source` names EventSub
+only when a `channel.raid` subscription was actually allocated.
 
 ## Notes
 

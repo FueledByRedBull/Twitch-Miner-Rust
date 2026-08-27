@@ -7,6 +7,7 @@ use tm_twitch::TwitchClient;
 use crate::context::{apply_context_to_streamer, contribute_streamer_community_goals};
 use crate::observability::AppObservability;
 use crate::streak_cache::StreakCache;
+use crate::streak_recovery::milestone_resolves_current_stream;
 
 pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
     LoggerSettings {
@@ -243,10 +244,7 @@ async fn reconcile_startup_watch_streak(
             stream.watch_streak_resolved_at = Some(milestone.achievement_timestamp);
             stream.watch_streak_expires_at = milestone.expires_at;
             if broadcast_created_at.is_some_and(|created_at| {
-                milestone.achievement_timestamp >= created_at
-                    && milestone
-                        .expires_at
-                        .is_none_or(|expires_at| expires_at > started_at)
+                milestone_resolves_current_stream(&milestone, created_at, started_at)
             }) {
                 stream.watch_streak_missing = false;
             }

@@ -1,6 +1,7 @@
 use time::format_description::well_known::Rfc3339;
 use tm_domain::{ActiveMultiplier, CommunityGoal, OffsetDateTime, Stream};
 
+use crate::responses::is_persisted_query_not_found;
 use crate::types::{
     ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage, InventoryDrop,
     MinuteWatchedRequest, StreamInfo, TwitchClientError,
@@ -287,6 +288,11 @@ pub fn validate_gql_mutation_response(
     context: &str,
     payload: &serde_json::Value,
 ) -> Result<(), TwitchClientError> {
+    if is_persisted_query_not_found(payload) {
+        return Err(TwitchClientError::PersistedQueryNotFound {
+            operation: context.to_string(),
+        });
+    }
     let Some(errors) = payload.get("errors") else {
         return Ok(());
     };

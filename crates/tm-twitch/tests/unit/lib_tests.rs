@@ -7,8 +7,8 @@ use crate::cookies::{is_twitch_cookie_url, merge_cookie_headers};
 use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
-    channel_points_context_from_typed, inventory_snapshot_from_typed, recent_clips_from_typed,
-    user_contributions_from_typed, watch_streak_milestone_from_typed,
+    channel_points_context_from_typed, decode_gql_data, inventory_snapshot_from_typed,
+    recent_clips_from_typed, user_contributions_from_typed, watch_streak_milestone_from_typed,
 };
 use reqwest::dns::Resolve;
 use reqwest::StatusCode;
@@ -20,6 +20,20 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tm_domain::{CommunityGoal, Stream};
+
+#[test]
+fn debug_redacts_client_credentials() {
+    let client = TwitchClient::with_client_and_cookie_header(
+        reqwest::Client::new(),
+        "secret-auth-token",
+        "test-agent",
+        Some("session=secret-cookie".into()),
+    );
+    let output = format!("{client:?}");
+    assert!(!output.contains("secret-auth-token"));
+    assert!(!output.contains("secret-cookie"));
+    assert!(output.contains("<redacted>"));
+}
 
 #[test]
 fn extracts_build_id_from_homepage() {
@@ -676,6 +690,45 @@ fn gql_mutation_validation_rejects_top_level_errors() {
         error,
         TwitchClientError::GqlErrors { context, .. } if context == "ClaimCommunityPoints"
     ));
+
+    let apq = validate_gql_mutation_response(
+        "ClaimCommunityPoints",
+        &serde_json::json!({
+            "errors": [{ "message": "PersistedQueryNotFound" }]
+        }),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        apq,
+        TwitchClientError::PersistedQueryNotFound { operation }
+            if operation == "ClaimCommunityPoints"
+    ));
+}
+
+#[test]
+fn persisted_query_not_found_is_payload_free_and_operation_specific() {
+    let payload = serde_json::json!({
+        "errors": [{
+            "message": "PersistedQueryNotFound",
+            "extensions": { "private": "must-not-escape" }
+        }]
+    });
+
+    let error = decode_gql_data::<serde_json::Value>(&payload, "Inventory").unwrap_err();
+
+    assert!(matches!(
+        &error,
+        TwitchClientError::PersistedQueryNotFound {
+            operation
+        } if operation == "Inventory"
+    ));
+    assert_eq!(
+        error.failure_class(),
+        TwitchFailureClass::PersistedQueryNotFound
+    );
+    let rendered = error.to_string();
+    assert!(rendered.contains("Inventory"));
+    assert!(!rendered.contains("must-not-escape"));
 }
 
 #[test]
@@ -1339,6 +1392,39 @@ async fn mutation_failure_is_not_replayed_after_an_uncertain_response() {
             status: StatusCode::SERVICE_UNAVAILABLE,
             ..
         }
+    ));
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn mutation_persisted_query_not_found_is_classified_without_replay() {
+    let (base_url, requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, r#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let error = client.claim_moment("moment-1").await.unwrap_err();
+    assert!(matches!(
+        error,
+        TwitchClientError::PersistedQueryNotFound { operation }
+            if operation == "CommunityMomentCallout_Claim"
     ));
     assert_eq!(requests.load(Ordering::SeqCst), 2);
     server.join().unwrap();
@@ -2094,6 +2180,36 @@ fn typed_inventory_classifies_only_fully_claimed_campaigns_as_complete() {
                                 ]
                             },
                             {
+                                "id": "campaign-subscription-only",
+                                "timeBasedDrops": [{
+                                    "requiredMinutesWatched": 0,
+                                    "requiredSubs": 1,
+                                    "self": null
+                                }]
+                            },
+                            {
+                                "id": "campaign-mixed",
+                                "timeBasedDrops": [
+                                    {
+                                        "requiredMinutesWatched": 0,
+                                        "requiredSubs": 1,
+                                        "self": null
+                                    },
+                                    {
+                                        "requiredMinutesWatched": 30,
+                                        "requiredSubs": 0,
+                                        "self": null
+                                    }
+                                ]
+                            },
+                            {
+                                "id": "campaign-unknown-requirement",
+                                "timeBasedDrops": [{
+                                    "requiredMinutesWatched": 30,
+                                    "self": null
+                                }]
+                            },
+                            {
                                 "timeBasedDrops": [{
                                     "requiredMinutesWatched": 30,
                                     "self": {
@@ -2114,6 +2230,10 @@ fn typed_inventory_classifies_only_fully_claimed_campaigns_as_complete() {
     assert_eq!(
         snapshot.completed_campaign_ids,
         vec![String::from("campaign-complete")]
+    );
+    assert_eq!(
+        snapshot.subscription_only_campaign_ids,
+        vec![String::from("campaign-subscription-only")]
     );
     assert_eq!(snapshot.drops.len(), 3);
 }

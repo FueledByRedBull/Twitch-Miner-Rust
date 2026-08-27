@@ -81,16 +81,36 @@ pub enum Event {
     ChatMention,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscordSettings {
     pub webhook_api: String,
     pub events: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DiscordWebhook {
     pub webhook_api: String,
     pub events: Vec<Event>,
+}
+
+impl fmt::Debug for DiscordSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiscordSettings")
+            .field("webhook_api", &"<redacted>")
+            .field("events", &self.events)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DiscordWebhook {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiscordWebhook")
+            .field("webhook_api", &"<redacted>")
+            .field("events", &self.events)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
