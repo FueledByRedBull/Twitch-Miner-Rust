@@ -135,6 +135,37 @@ async fn keepalive_wait_allows_a_small_delivery_grace() {
 }
 
 #[tokio::test]
+async fn websocket_control_frames_do_not_extend_application_keepalive() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        loop {
+            if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+
+    let (mut socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    let mut deduper = MessageDeduper::default();
+    let result = listen_socket(
+        &mut socket,
+        &[streamer()],
+        &sender,
+        &mut deduper,
+        std::time::Duration::from_millis(20),
+    )
+    .await;
+
+    assert!(matches!(result, Err(EventSubError::KeepaliveTimeout)));
+    server.abort();
+}
+
+#[tokio::test]
 async fn missing_welcome_expires_at_the_welcome_deadline() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
