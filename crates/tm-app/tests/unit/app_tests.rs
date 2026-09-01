@@ -25,9 +25,10 @@ mod tests {
     };
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
-        build_minute_watched_event, has_unfinished_campaign, refresh_watch_selection_metadata,
-        released_watch_channel_ids, resolve_spade_url, send_minute_watched_for_streamer,
-        send_minute_watched_with_spade_cache, watch_metadata_defect,
+        build_minute_watched_event, handle_minute_watched_info_error, has_unfinished_campaign,
+        refresh_watch_selection_metadata, released_watch_channel_ids, resolve_spade_url,
+        send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
+        watch_metadata_defect,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -2702,6 +2703,68 @@ mod tests {
             .iter()
             .any(|request| request
                 .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
+    }
+
+    #[tokio::test]
+    async fn minute_watcher_marks_offline_only_after_a_confirmed_liveness_result() {
+        let online = Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            is_online: true,
+            ..Streamer::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&ConfigFile::default(), &[], ts(0));
+        state.streamers = vec![online.clone()];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let original_error = || tm_twitch::TwitchClientError::MissingField("data.user.stream");
+
+        let (offline_endpoints, _, offline_server) =
+            spawn_json_response_server(vec![String::from(r#"{"data":{"user":{"stream":null}}}"#)]);
+        let offline_client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "ua",
+            offline_endpoints,
+        );
+        let result = handle_minute_watched_info_error(
+            &runtime,
+            &offline_client,
+            &online,
+            &test_observability(),
+            ts(1),
+            original_error(),
+        )
+        .await
+        .unwrap();
+        offline_server.join().unwrap();
+        assert!(result.is_none());
+        assert!(!runtime.state_snapshot().await.unwrap().streamers[0].is_online);
+
+        runtime
+            .set_presence(String::from("100"), true, ts(2))
+            .await
+            .unwrap();
+        let (error_endpoints, _, error_server) = spawn_json_response_server(vec![String::from(
+            r#"{"errors":[{"message":"expected test failure"}]}"#,
+        )]);
+        let error_client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "ua",
+            error_endpoints,
+        );
+        let result = handle_minute_watched_info_error(
+            &runtime,
+            &error_client,
+            &online,
+            &test_observability(),
+            ts(3),
+            original_error(),
+        )
+        .await;
+        error_server.join().unwrap();
+        assert!(result.is_err());
+        assert!(runtime.state_snapshot().await.unwrap().streamers[0].is_online);
     }
 
     #[tokio::test]

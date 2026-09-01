@@ -594,11 +594,11 @@ pub(crate) async fn handle_minute_watched_info_error(
     now: tm_runtime::RuntimeTime,
     error: tm_twitch::TwitchClientError,
 ) -> Result<Option<Streamer>> {
-    if twitch
+    let is_live = twitch
         .is_stream_live(&streamer.channel_id)
         .await
-        .unwrap_or(false)
-    {
+        .with_context(|| format!("confirm live status after stream metadata error: {error}"))?;
+    if is_live {
         if matches!(
             &error,
             tm_twitch::TwitchClientError::MissingField("data.user" | "data.user.stream")
