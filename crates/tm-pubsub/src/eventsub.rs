@@ -900,13 +900,12 @@ async fn listen_socket<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let keepalive_window = keepalive_timeout.saturating_add(EVENTSUB_KEEPALIVE_GRACE);
+    let mut application_deadline = tokio::time::Instant::now() + keepalive_window;
     loop {
-        let Some(message) = tokio::time::timeout(
-            keepalive_timeout.saturating_add(EVENTSUB_KEEPALIVE_GRACE),
-            socket.next(),
-        )
-        .await
-        .map_err(|_| EventSubError::KeepaliveTimeout)?
+        let Some(message) = tokio::time::timeout_at(application_deadline, socket.next())
+            .await
+            .map_err(|_| EventSubError::KeepaliveTimeout)?
         else {
             return Ok(());
         };
@@ -915,7 +914,9 @@ where
             DecodedFrame::Closed => return Ok(()),
             DecodedFrame::Text(text) => text,
         };
-        match parse_eventsub_message(&text, tracked_streamers)? {
+        let message = parse_eventsub_message(&text, tracked_streamers)?;
+        application_deadline = tokio::time::Instant::now() + keepalive_window;
+        match message {
             EventSubMessage::Keepalive => sender
                 .send(EventSubConnectionEvent::Heartbeat)
                 .await

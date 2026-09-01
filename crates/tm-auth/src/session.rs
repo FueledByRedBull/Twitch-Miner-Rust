@@ -70,6 +70,41 @@ impl AuthSession {
         Self::from_bytes(username, &bytes)
     }
 
+    pub fn load_from_dir_with_backup(
+        base_dir: impl AsRef<Path>,
+        username: impl Into<String>,
+    ) -> Result<(Self, bool), AuthSessionError> {
+        let base_dir = base_dir.as_ref();
+        let username = normalize_username(&username.into())?;
+        match Self::load_from_dir(base_dir, &username) {
+            Ok(session) => Ok((session, false)),
+            Err(primary_error) if session_file_is_missing_or_invalid(&primary_error) => {
+                let backup = cookie_file_path(base_dir, &username)?.with_extension("json.bak");
+                match fs::read(backup)
+                    .map_err(AuthSessionError::Io)
+                    .and_then(|bytes| Self::from_bytes(&username, &bytes))
+                {
+                    Ok(session) => Ok((session, true)),
+                    Err(backup_error) if session_file_is_missing_or_invalid(&backup_error) => {
+                        Err(primary_error)
+                    }
+                    Err(backup_error) => Err(backup_error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn restore_to_dir(&self, base_dir: impl AsRef<Path>) -> Result<(), AuthSessionError> {
+        let path = cookie_file_path(base_dir, &self.username)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let payload = encode_cookie_store(&self.store)?;
+        atomic_write_cookie_file(&path, payload.as_bytes())?;
+        Ok(())
+    }
+
     pub fn save_to_dir(&self, base_dir: impl AsRef<Path>) -> Result<(), AuthSessionError> {
         let path = cookie_file_path(base_dir, &self.username)?;
         if let Some(parent) = path.parent() {
@@ -198,6 +233,13 @@ impl AuthSession {
 
         (!pairs.is_empty()).then(|| pairs.join("; "))
     }
+}
+
+fn session_file_is_missing_or_invalid(error: &AuthSessionError) -> bool {
+    matches!(
+        error,
+        AuthSessionError::Io(error) if error.kind() == io::ErrorKind::NotFound
+    ) || matches!(error, AuthSessionError::CookieStore(_))
 }
 
 fn atomic_write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
@@ -451,6 +493,43 @@ mod tests {
                 .auth_token(),
             Some("replacement-token")
         );
+    }
+
+    #[test]
+    fn backup_load_is_limited_to_missing_or_invalid_primary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = sample_session();
+        session.save_to_dir(dir.path()).unwrap();
+        session.set_auth_token("replacement-token");
+        session.save_to_dir(dir.path()).unwrap();
+        let primary = cookie_file_path(dir.path(), "alice").unwrap();
+
+        fs::write(&primary, b"{not-json").unwrap();
+        let (backup, recovered) =
+            AuthSession::load_from_dir_with_backup(dir.path(), "alice").unwrap();
+        assert!(recovered);
+        assert_eq!(backup.auth_token(), Some("token"));
+
+        fs::remove_file(&primary).unwrap();
+        fs::create_dir(&primary).unwrap();
+        assert!(matches!(
+            AuthSession::load_from_dir_with_backup(dir.path(), "alice"),
+            Err(AuthSessionError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_primary_and_backup_report_the_primary_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = cookie_file_path(dir.path(), "tester").unwrap();
+        fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        fs::write(&primary, b"{invalid-primary").unwrap();
+        fs::write(primary.with_extension("json.bak"), b"{invalid-backup").unwrap();
+
+        assert!(matches!(
+            AuthSession::load_from_dir_with_backup(dir.path(), "tester"),
+            Err(AuthSessionError::CookieStore(_))
+        ));
     }
 
     #[cfg(unix)]

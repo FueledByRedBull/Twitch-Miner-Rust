@@ -25,9 +25,10 @@ mod tests {
     };
     use crate::drops::{claim_available_drops, drop_is_claimable};
     use crate::minute_watcher::{
-        build_minute_watched_event, has_unfinished_campaign, refresh_watch_selection_metadata,
-        released_watch_channel_ids, resolve_spade_url, send_minute_watched_for_streamer,
-        send_minute_watched_with_spade_cache, watch_metadata_defect,
+        build_minute_watched_event, handle_minute_watched_info_error, has_unfinished_campaign,
+        refresh_watch_selection_metadata, released_watch_channel_ids, resolve_spade_url,
+        send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
+        watch_metadata_defect,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -44,7 +45,7 @@ mod tests {
     use crate::{build_runtime, Cli};
     use clap::Parser;
     use reqwest::StatusCode;
-    use tm_auth::{AuthEndpoints, AuthSession, CookieStore, TwitchAuthClient};
+    use tm_auth::{AuthEndpoints, AuthSession, CookieStore, TokenPollOutcome, TwitchAuthClient};
     use tm_config::{AppPaths, ConfigError, ConfigFile};
     use tm_domain::{
         BetSettings, Condition, DelayMode, FilterCondition, Game, OffsetDateTime, OutcomeKey,
@@ -2702,6 +2703,183 @@ mod tests {
             .iter()
             .any(|request| request
                 .contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#)));
+    }
+
+    #[tokio::test]
+    async fn device_token_poll_distinguishes_pending_slow_down_and_success() {
+        let responses = vec![
+            http_response("400 Bad Request", r#"{"error":"authorization_pending"}"#),
+            http_response("400 Bad Request", r#"{"error":"slow_down"}"#),
+            http_response("200 OK", r#"{"access_token":"secret-token"}"#),
+        ];
+        let (endpoints, _, server) = spawn_auth_validation_server(responses);
+        let client = TwitchAuthClient::with_client_and_endpoints(reqwest::Client::new(), endpoints);
+
+        assert_eq!(
+            client.poll_access_token("device", "code").await.unwrap(),
+            TokenPollOutcome::Pending
+        );
+        assert_eq!(
+            client.poll_access_token("device", "code").await.unwrap(),
+            TokenPollOutcome::SlowDown
+        );
+        assert!(matches!(
+            client.poll_access_token("device", "code").await.unwrap(),
+            TokenPollOutcome::AccessToken(token) if token == "secret-token"
+        ));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn validated_cookie_backup_restores_a_corrupted_primary() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("backup-token");
+        stored.save_to_dir(directory.path()).unwrap();
+        stored.set_auth_token("newer-token");
+        stored.save_to_dir(directory.path()).unwrap();
+        let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+        fs::write(&primary, b"{not-json").unwrap();
+
+        let responses = vec![http_response(
+            "200 OK",
+            r#"{"login":"tester","user_id":"user-123","scopes":[]}"#,
+        )];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client =
+            TwitchAuthClient::with_client_and_endpoints(reqwest::Client::new(), endpoints);
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(session.auth_token(), Some("backup-token"));
+        assert_eq!(
+            AuthSession::load_from_dir(directory.path(), "tester")
+                .unwrap()
+                .auth_token(),
+            Some("backup-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_cookie_backup_reauthorizes_without_restoring_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("expired-backup-token");
+        stored.save_to_dir(directory.path()).unwrap();
+        stored.set_auth_token("newer-token");
+        stored.save_to_dir(directory.path()).unwrap();
+        let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+        fs::write(primary, b"{not-json").unwrap();
+
+        let responses = vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"device_code":"device-code","user_code":"ABCD","interval":0,"expires_in":60}"#,
+            ),
+            http_response("200 OK", r#"{"access_token":"fresh-token"}"#),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client =
+            TwitchAuthClient::with_client_and_endpoints(reqwest::Client::new(), endpoints);
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+    }
+
+    #[tokio::test]
+    async fn minute_watcher_marks_offline_only_after_a_confirmed_liveness_result() {
+        let online = Streamer {
+            username: String::from("alice"),
+            channel_id: String::from("100"),
+            is_online: true,
+            ..Streamer::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_targets(&ConfigFile::default(), &[], ts(0));
+        state.streamers = vec![online.clone()];
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let original_error = || tm_twitch::TwitchClientError::MissingField("data.user.stream");
+
+        let (offline_endpoints, _, offline_server) =
+            spawn_json_response_server(vec![String::from(r#"{"data":{"user":{"stream":null}}}"#)]);
+        let offline_client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "ua",
+            offline_endpoints,
+        );
+        let result = handle_minute_watched_info_error(
+            &runtime,
+            &offline_client,
+            &online,
+            &test_observability(),
+            ts(1),
+            original_error(),
+        )
+        .await
+        .unwrap();
+        offline_server.join().unwrap();
+        assert!(result.is_none());
+        assert!(!runtime.state_snapshot().await.unwrap().streamers[0].is_online);
+
+        runtime
+            .set_presence(String::from("100"), true, ts(2))
+            .await
+            .unwrap();
+        let (error_endpoints, _, error_server) = spawn_json_response_server(vec![String::from(
+            r#"{"errors":[{"message":"expected test failure"}]}"#,
+        )]);
+        let error_client = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "ua",
+            error_endpoints,
+        );
+        let result = handle_minute_watched_info_error(
+            &runtime,
+            &error_client,
+            &online,
+            &test_observability(),
+            ts(3),
+            original_error(),
+        )
+        .await;
+        error_server.join().unwrap();
+        assert!(result.is_err());
+        assert!(runtime.state_snapshot().await.unwrap().streamers[0].is_online);
     }
 
     #[tokio::test]

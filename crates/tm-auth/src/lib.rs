@@ -11,7 +11,7 @@ pub mod session;
 
 pub use client::{
     AuthClientError, AuthEndpoints, DeviceCodePrompt, LoginResult, LoginValidation,
-    TwitchAuthClient, ACTIVATE_URL,
+    TokenPollOutcome, TwitchAuthClient, ACTIVATE_URL,
 };
 pub use cookies::{
     cookie_file_path, cookies_dir, decode_cookie_store, encode_cookie_store,
