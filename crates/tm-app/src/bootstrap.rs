@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use tm_auth::{
     normalize_username, AuthClientError, AuthSession, AuthSessionError, LoginValidation,
-    TwitchAuthClient,
+    TokenPollOutcome, TwitchAuthClient,
 };
 use tm_config::{
     default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
@@ -193,8 +193,8 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     let username = normalized_username(&config.username)?;
     let device_id = generate_device_id();
 
-    match AuthSession::load_from_dir(base_dir, &username) {
-        Ok(mut session) => {
+    match AuthSession::load_from_dir_with_backup(base_dir, &username) {
+        Ok((mut session, recovered_from_backup)) => {
             if let Some(auth_token) = session.auth_token().map(str::to_string) {
                 match validate_saved_session_with_retry(
                     auth_client,
@@ -209,7 +209,11 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
                     SavedSessionValidation::Valid(validation) => {
                         session.set_user_id(validation.user_id);
                         session.set_scopes(validation.scopes);
-                        session.save_to_dir(base_dir)?;
+                        if recovered_from_backup {
+                            session.restore_to_dir(base_dir)?;
+                        } else {
+                            session.save_to_dir(base_dir)?;
+                        }
                         tracing::debug!(username = %username, "loaded cookies from disk");
                         return Ok(session);
                     }
@@ -228,13 +232,14 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
             }
         }
         Err(AuthSessionError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
+        Err(error @ AuthSessionError::CookieStore(_)) => {
             tracing::warn!(
                 username = %username,
                 %error,
                 "unable to read saved cookies; starting device login"
             );
         }
+        Err(error) => return Err(error).context("load saved Twitch session"),
     }
 
     let scopes = tm_auth::device_flow_scope_for_eventsub(config.betting_make_predictions);
@@ -248,6 +253,7 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
         "complete Twitch device login"
     );
     let started = tokio::time::Instant::now();
+    let mut poll_interval = prompt.interval;
     let auth_token = loop {
         if started.elapsed() >= prompt.expires_in {
             return Err(anyhow!("device code expired before authorization"));
@@ -256,8 +262,11 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
             .poll_access_token(&device_id, &prompt.device_code)
             .await?
         {
-            Some(token) => break token,
-            None => tokio::time::sleep(prompt.interval).await,
+            TokenPollOutcome::AccessToken(token) => break token,
+            outcome @ (TokenPollOutcome::Pending | TokenPollOutcome::SlowDown) => {
+                poll_interval = outcome.next_interval(poll_interval);
+                tokio::time::sleep(poll_interval).await;
+            }
         }
     };
 

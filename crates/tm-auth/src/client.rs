@@ -49,6 +49,34 @@ pub struct LoginValidation {
     pub scopes: Vec<String>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum TokenPollOutcome {
+    AccessToken(String),
+    Pending,
+    SlowDown,
+}
+
+impl TokenPollOutcome {
+    #[must_use]
+    pub fn next_interval(&self, current: Duration) -> Duration {
+        if matches!(self, Self::SlowDown) {
+            current.saturating_add(Duration::from_secs(5))
+        } else {
+            current
+        }
+    }
+}
+
+impl fmt::Debug for TokenPollOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccessToken(_) => formatter.write_str("AccessToken(<redacted>)"),
+            Self::Pending => formatter.write_str("Pending"),
+            Self::SlowDown => formatter.write_str("SlowDown"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthEndpoints {
     pub device_code_url: String,
@@ -182,7 +210,7 @@ impl TwitchAuthClient {
         &self,
         device_id: &str,
         device_code: &str,
-    ) -> Result<Option<String>, AuthClientError> {
+    ) -> Result<TokenPollOutcome, AuthClientError> {
         let mut request = build_token_poll_request(device_id, device_code);
         request.url.clone_from(&self.endpoints.token_url);
         let response = self
@@ -201,7 +229,9 @@ impl TwitchAuthClient {
                 .await
                 .map_err(AuthClientError::Http)?
                 .access_token;
-            return token.ok_or(AuthClientError::MissingAccessToken).map(Some);
+            return token
+                .map(TokenPollOutcome::AccessToken)
+                .ok_or(AuthClientError::MissingAccessToken);
         }
 
         if status == StatusCode::BAD_REQUEST {
@@ -209,12 +239,10 @@ impl TwitchAuthClient {
                 .json::<TokenPollResponse>()
                 .await
                 .map_err(AuthClientError::Http)?;
-            let pending = matches!(
-                body.error.as_deref().or(body.message.as_deref()),
-                Some("authorization_pending" | "slow_down")
-            );
-            if pending {
-                return Ok(None);
+            match body.error.as_deref().or(body.message.as_deref()) {
+                Some("authorization_pending") => return Ok(TokenPollOutcome::Pending),
+                Some("slow_down") => return Ok(TokenPollOutcome::SlowDown),
+                _ => {}
             }
         }
 
@@ -262,6 +290,7 @@ impl TwitchAuthClient {
     ) -> Result<LoginResult, AuthClientError> {
         let prompt = self.request_device_code(device_id).await?;
         let started = std::time::Instant::now();
+        let mut poll_interval = prompt.interval;
         let token = loop {
             if started.elapsed() >= prompt.expires_in {
                 return Err(AuthClientError::DeviceFlowExpired);
@@ -270,8 +299,11 @@ impl TwitchAuthClient {
                 .poll_access_token(device_id, &prompt.device_code)
                 .await?
             {
-                Some(token) => break token,
-                None => tokio::time::sleep(prompt.interval).await,
+                TokenPollOutcome::AccessToken(token) => break token,
+                outcome @ (TokenPollOutcome::Pending | TokenPollOutcome::SlowDown) => {
+                    poll_interval = outcome.next_interval(poll_interval);
+                    tokio::time::sleep(poll_interval).await;
+                }
             }
         };
 
@@ -389,6 +421,20 @@ mod tests {
         assert!(!output.contains("secret-device-code"));
         assert!(!output.contains("secret-user-code"));
         assert!(output.contains("<redacted>"));
+    }
+
+    #[test]
+    fn repeated_slow_down_responses_increase_all_subsequent_poll_intervals() {
+        let mut interval = Duration::from_secs(2);
+        interval = TokenPollOutcome::SlowDown.next_interval(interval);
+        assert_eq!(interval, Duration::from_secs(7));
+        interval = TokenPollOutcome::Pending.next_interval(interval);
+        assert_eq!(interval, Duration::from_secs(7));
+        interval = TokenPollOutcome::SlowDown.next_interval(interval);
+        assert_eq!(interval, Duration::from_secs(12));
+        assert!(
+            !format!("{:?}", TokenPollOutcome::AccessToken("secret".into())).contains("secret")
+        );
     }
 
     #[test]
