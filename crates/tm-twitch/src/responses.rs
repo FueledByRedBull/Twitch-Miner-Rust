@@ -533,9 +533,7 @@ pub(crate) fn inventory_snapshot_from_typed(
             "data.currentUser.inventory",
         ))?
         .campaigns
-        .ok_or(TwitchClientError::MissingField(
-            "data.currentUser.inventory.dropCampaignsInProgress",
-        ))?;
+        .unwrap_or_default();
     let mut snapshot = InventorySnapshot {
         drops: Vec::new(),
         completed_campaign_ids: Vec::new(),

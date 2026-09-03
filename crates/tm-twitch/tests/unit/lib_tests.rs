@@ -2093,6 +2093,24 @@ fn channel_points_enabled_unknown_is_preserved_and_malformed_is_rejected() {
 }
 
 #[test]
+fn typed_inventory_treats_null_campaigns_as_empty() {
+    let inventory: types::GqlResponse<types::InventoryData> =
+        serde_json::from_value(serde_json::json!({
+            "data": {
+                "currentUser": {
+                    "inventory": { "dropCampaignsInProgress": null }
+                }
+            }
+        }))
+        .unwrap();
+
+    let snapshot = inventory_snapshot_from_typed(inventory.data.unwrap()).unwrap();
+    assert!(snapshot.drops.is_empty());
+    assert!(snapshot.completed_campaign_ids.is_empty());
+    assert!(snapshot.subscription_only_campaign_ids.is_empty());
+}
+
+#[test]
 fn typed_inventory_fixtures_fail_closed_on_claim_safety_fields() {
     let missing_required: types::GqlResponse<types::InventoryData> =
         serde_json::from_value(serde_json::json!({
