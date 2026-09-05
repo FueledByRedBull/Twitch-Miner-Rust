@@ -4,8 +4,8 @@ Releases are source-and-digest based. Mutable image tags are convenience
 labels, never deployment input.
 
 Use [release-record-template.md](release-record-template.md) for the signed
-release evidence. Candidate and rollback digests belong in that release record,
-never in runtime configuration.
+release record and its external machine-checked evidence. Candidate and
+rollback digests belong in that record, never in runtime configuration.
 
 The read-only canary and live transport expectations are defined in the
 [protocol inventory](protocol-inventory.md); this document owns only release,
@@ -21,6 +21,44 @@ executable SHA-256 values plus embedded revision metadata. Ordinary pull-request
 CI performs one build through the normal workspace checks instead of repeating
 the release-only comparison.
 
+The Windows lane uses `scripts/build-windows-release.ps1`. It builds an explicit
+`x86_64-pc-windows-msvc` binary with a statically linked MSVC CRT, embeds the
+full source revision and source date, and produces a portable ZIP with a SHA-256
+sidecar. The tag/manual Windows workflow also builds an MSI from
+`installer/Product.wxs` with the pinned WiX 4.0.6 tool. The MSI contains only
+the executable and documentation under Program Files; it does not create a
+configuration, cookie, or runtime-status file there. Use a user-writable path
+such as `%LOCALAPPDATA%\TwitchMiner` and pass it explicitly with `--data-dir`
+for every command, including `--status` and `--health`. The portable ZIP and
+MSI are required to carry the same executable bytes, and CI inspects the PE
+imports for dynamic Visual C++ runtime dependencies. Artifacts are unsigned
+unless a separately recorded code-signing step is configured. The portable ZIP
+normalizes its allowlisted file timestamps to `SOURCE_DATE_EPOCH`; its checksum
+is therefore repeatable for the same binary and source metadata. WiX generates
+MSI package metadata such as `ProductCode` during each build, so MSI container
+checksums can differ even when the embedded executable and inputs are identical.
+Record the exact MSI checksum produced by the accepted Windows run and use the
+extracted executable comparison as the cross-package identity check. CI also
+installs the MSI quietly on a disposable Windows runner, checks the full version
+and revision under Program Files without active runtime files, and uninstalls it
+before publishing the artifact. The build also runs WiX MSI database validation.
+
+Stable promotion consumes an external acceptance record. It is intentionally
+not committed after the candidate build: adding a record to the source tree
+would change the source revision that the image represents. The manual
+`Promote Release` workflow receives the existing signed tag, exact source SHA,
+manifest digest, and sanitized evidence JSON through protected environment
+approval. Schema version 2 binds both platform child digests, exactly one
+successful run each for CI, Multiarch Build, Deep Quality, and the tag-triggered
+Windows Release MSI lane, a read-only
+canary, a current 72-hour soak, rollback/state evidence, and approval. Required
+runs must be successful `push` or `workflow_dispatch` executions from
+`refs/heads/main` (and the signed tag ref for Windows Release); pull-request
+merge runs are not accepted as exact-source evidence. The workflow verifies the
+signed tag points at the source SHA, then checks immutable image attestations and
+promotes the accepted manifest digest without rebuilding to both the version tag
+and `latest`.
+
 For an offline recovery build, package the exact Git revision together with
 every locked crates.io source:
 
@@ -28,9 +66,10 @@ every locked crates.io source:
 ./scripts/create-offline-source-bundle.ps1 -Revision <40-character-source-revision>
 ```
 
-The helper uses `git archive`, `cargo vendor --locked --versioned-dirs`, writes
-an offline Cargo source replacement, validates `cargo metadata --locked
---offline`, and emits a `.tar.gz` plus `.sha256` under `target/` by default.
+The helper uses `git archive`, `cargo vendor --locked --versioned-dirs --sync
+fuzz/Cargo.toml`, writes an offline Cargo source replacement, validates locked
+offline metadata for both the root workspace and the isolated fuzz workspace,
+and emits a `.tar.gz` plus `.sha256` under `target/` by default.
 Keep that checksum in the release record and store the bundle outside the
 repository. The bundle excludes working-tree edits and contains no runtime
 configuration, cookies, logs, or credentials.
@@ -49,22 +88,44 @@ archive by adding `-ValidateOnly`; that mode is restricted to output under
    a successful Deep Quality run for the exact revision. Deep Quality must pass
    bounded parser fuzzing, the ratcheted 60% critical-core and
    46.0% application branch-coverage floors. Then push the candidate commit to
-   `main`. The multiarch workflow builds the AMD64 and ARM64 images,
-   SBOM/provenance attestations, the manifest, and the immutable
-   `sha-<40-character-commit>` tag.
+   `main`. The multiarch workflow builds the AMD64 and ARM64 images, resolves
+   their runtime child digests, signs the child SBOM/provenance statements, and
+   publishes a candidate manifest. After immutable-digest verification, only
+   the long SHA discovery tag is published; `latest`, version tags, and branch
+   aliases remain withheld until protected promotion.
 3. Retrieve the `published-manifest-digest` artifact, run the read-only canary
    against that exact digest, deploy it by digest, and complete the required
-   monitoring window.
-4. Create and push a signed `v*` tag at the accepted commit. The tag workflow
-   does not rebuild. It resolves the existing commit-SHA manifest, verifies both
-   platform revisions and attestations, uses the documented single-index
-   carbon-copy promotion behavior of
+   monitoring window. Record sanitized session boundaries, a configuration
+   fingerprint, eligible/live opportunity windows, server-confirmed outcomes,
+   failure recovery, resource use, and explicit capability statuses in the
+   external evidence record. Mark predictions `not-exercised` or `unsupported`
+   when they were not tested; a generic transport health result is not
+   prediction proof.
+4. Create and push a signed `v*` tag at the accepted commit only after the
+   external evidence is complete. Dispatch `Promote Release` from that tag
+   ref with the signed tag, source SHA, accepted manifest digest, and evidence
+   JSON. The workflow
+    verifies the tag points at that SHA, checks both platform revisions and
+    signed attestations, uses the documented same-manifest-digest promotion
+    behavior of
    [`docker buildx imagetools create`](https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/),
-   and fails unless the release tag retains the exact accepted digest.
-5. Retrieve the tag run's `published-manifest-digest` artifact and require it
-   to equal the canaried/soaked digest. Record that digest, source revision,
-   platforms, canary and soak results, and rollback digest in the release
-   record.
+    and fails unless both stable aliases retain the exact accepted digest.
+   For a local sanitized record at `$evidencePath`, the dispatch shape is:
+
+   ```powershell
+   gh workflow run promote-release.yml --ref vX.Y.Z `
+     -f release_tag=vX.Y.Z `
+     -f source_revision=<40-character-source-revision> `
+     -f manifest_digest=sha256:<64-hex-manifest-digest> `
+     -f evidence_json="$(Get-Content -Raw $evidencePath)"
+   ```
+
+   The tag ref is required by the protected `release` environment; the record
+   itself remains external to the source commit.
+5. After `Promote Release` succeeds, resolve both stable image aliases once and
+   require each to equal the canaried/soaked digest. Record that digest, source
+   revision, platforms, canary and soak results, and rollback digest in the
+   release record.
 6. Set `TWITCH_MINER_IMAGE` to the exact `ghcr.io/...@sha256:<digest>` value
    and `TWITCH_MINER_DATA_DIR` to the existing data directory before an update.
 7. After deployment, verify `--version`, `--health`, container health, and a
@@ -79,14 +140,16 @@ revision into a new, explicitly named rollback image. The helper never pushes
 unless `-Push` is supplied:
 
 ```powershell
-./scripts/build-rollback-image.ps1 -Revision 1c10f11
-./scripts/build-rollback-image.ps1 -Revision 1c10f11 -Push
+./scripts/build-rollback-image.ps1 -Revision 1c10f11 -Platform linux/arm64
+./scripts/build-rollback-image.ps1 -Revision 1c10f11 -Platform linux/arm64 -Push
 docker buildx imagetools inspect ghcr.io/fueledbyredbull/twitch-miner-rust:rollback-<resolved-sha>
 ```
 
 Record the newly produced digest; the old digest cannot be recreated from its
-hex string alone. Run `--check-config` against the rollback digest on the target host
-before placing it in the rollback Compose file.
+hex string alone. The rollback builder accepts `linux/amd64` or `linux/arm64`
+and records the full source SHA in the image. Run `--check-config` against the
+rollback digest on the target host before placing it in the rollback Compose
+file.
 
 ## GHCR retention
 
@@ -154,13 +217,17 @@ For a guarded candidate update, use the helper below with full immutable image
 references and both 40-character revisions. It preflights candidate and
 rollback config compatibility and revision identity, requiring structured
 `--json` validation from the candidate while using the plain check supported by
-older rollback images. It verifies that the supplied
+older rollback images. The deployed status probe uses plain `--status`, which
+already emits JSON; it does not add the redundant `--json` flag. The helper
+parameterizes the target platform and writes an atomic
+`deploy/.twitch-miner.env` pin after success. It verifies that the supplied
 rollback reference is the image used by the running service and backs up
-Compose. Because an active miner can consume Twitch's complete EventSub cost
-budget, the helper then stops the rollback service with normal `SIGTERM` before
-running the candidate read-only canary exclusively. After replacement it waits
-through the bounded startup window for the expected revision and healthy state;
-any failed canary or deployment gate restores and verifies the rollback image.
+Compose plus the runtime data directory. Because an active miner can consume
+Twitch's complete EventSub cost budget, the helper then stops the rollback
+service with normal `SIGTERM` before running the candidate read-only canary
+exclusively. After replacement it waits through the bounded startup window for
+the expected revision and healthy state; any failed canary or deployment gate
+restores and verifies the rollback image.
 This guarded path therefore includes a short, intentional mining interruption:
 
 ```powershell
@@ -171,6 +238,26 @@ This guarded path therefore includes a short, intentional mining interruption:
   -RollbackRevision '<40-character-rollback-revision>' `
   -DataDir './data'
 ```
+
+The helper leaves the previous data snapshot and any failed candidate data in
+`target/deploy-backups/` (or the explicit `-DataBackupPath`) for inspection.
+On Linux the data snapshot is a restrictive tar archive that records numeric
+owner and mode metadata; the Windows fallback uses the host filesystem copy.
+The `.twitch-miner.env` file is not Compose's automatic `.env` file, so a fresh
+shell must load the persistent pin explicitly before invoking Compose:
+
+```powershell
+docker compose --env-file deploy/.twitch-miner.env -f deploy/docker-compose.bind-mount.yml config
+docker compose --env-file deploy/.twitch-miner.env -f deploy/docker-compose.bind-mount.yml up -d twitch-miner
+```
+
+Rollback restores the state file with the known rollback digest (while
+preserving any other state entries) and restores the metadata-preserving data
+snapshot, preserving the candidate directory for diagnosis. Backup paths are
+restricted to the deployment operator on the host. This is a local
+persistent-state guarantee;
+it cannot reverse remote Twitch mutations, and a rollback binary still needs a
+compatible data-format check.
 
 ## Power-loss limits
 

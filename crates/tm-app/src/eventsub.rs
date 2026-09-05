@@ -5,7 +5,9 @@ use tm_pubsub::{EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
 use tm_twitch::{TwitchClient, TwitchFailureClass};
 
 use crate::observability::AppObservability;
-use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
+use crate::runtime_effects::{
+    execute_runtime_effects, reconcile_prediction_journal, RuntimeEffectContext,
+};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
@@ -76,9 +78,16 @@ async fn listen_once(
         let tracked_streamers = context.tracked_streamers.clone();
         async move { client.connect_and_listen(&tracked_streamers, sender).await }
     });
+    let _connection_guard = crate::shutdown::AbortTasksOnDrop(vec![connect.abort_handle()]);
     tokio::pin!(connect);
     let connection_result = loop {
+        if *stop.borrow() || stop.has_changed().is_err() {
+            connect.as_mut().abort();
+            let _ = connect.as_mut().await;
+            return None;
+        }
         tokio::select! {
+            biased;
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
                     connect.as_mut().abort();
@@ -103,6 +112,9 @@ async fn listen_once(
         }
     };
     while let Ok(message) = receiver.try_recv() {
+        if *stop.borrow() || stop.has_changed().is_err() {
+            return None;
+        }
         if process_eventsub_message(context, message).await {
             return None;
         }
@@ -275,10 +287,14 @@ async fn poll_presence_fallback(
                 continue;
             };
             let channel_id = streamer.channel_id.clone();
+            let Ok(Some(generation)) = runtime.begin_stream_update(channel_id.clone()).await else {
+                failure_class.get_or_insert("state-update");
+                continue;
+            };
             let twitch = Arc::clone(twitch);
             queries.spawn(async move {
                 let result = twitch.is_stream_live(&channel_id).await;
-                (streamer_index, channel_id, result)
+                (streamer_index, channel_id, generation, result)
             });
         }
 
@@ -286,9 +302,9 @@ async fn poll_presence_fallback(
             continue;
         };
         match result {
-            Ok((streamer_index, channel_id, Ok(online))) => {
+            Ok((streamer_index, channel_id, generation, Ok(online))) => {
                 match runtime
-                    .set_presence_if_changed(&channel_id, online, time_now())
+                    .set_presence_if_current(&channel_id, online, generation, time_now())
                     .await
                 {
                     Ok(true) => {
@@ -326,7 +342,7 @@ async fn poll_presence_fallback(
                     }
                 }
             }
-            Ok((streamer_index, _, Err(error))) => {
+            Ok((streamer_index, _, _, Err(error))) => {
                 let error_class = classify_presence_poll_error(error.failure_class());
                 failure_class.get_or_insert(error_class);
                 tracing::warn!(
@@ -406,6 +422,21 @@ async fn handle_eventsub_message(
                                 "EventSub log handling failed"
                             );
                         }
+                    }
+                    if let Err(error) = reconcile_prediction_journal(
+                        &context.effects.runtime,
+                        &context.effects.prediction_journal,
+                        &context.effects.persistent_user_id,
+                        &log_event,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            task = "eventsub",
+                            error_class = "prediction-journal",
+                            %error,
+                            "failed to reconcile prediction placement journal"
+                        );
                     }
                     let effect_context = context.runtime_effect_context();
                     if let Err(error) =

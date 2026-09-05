@@ -7,14 +7,15 @@ use tm_twitch::TwitchClient;
 use crate::bootstrap::normalized_username;
 use crate::chat::spawn_chat_manager_loop;
 use crate::context::spawn_context_refresh_loop;
-use crate::drops::spawn_drop_claim_loop;
+use crate::drops::{spawn_drop_claim_loop, DropClaimCoordinator};
 use crate::eventsub::{
     spawn_eventsub_loop, spawn_eventsub_presence_poll_loop, EventSubTaskContext,
 };
 use crate::minute_watcher::spawn_minute_watcher_loop;
 use crate::observability::AppObservability;
+use crate::prediction_journal::PredictionPlacementJournal;
 use crate::pubsub::{spawn_pubsub_loop, PubSubTaskContext};
-use crate::runtime_effects::RuntimeEffectContext;
+use crate::runtime_effects::{PredictionEvaluationScheduler, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::streak_cache::{spawn_streak_cache_loop, StreakCache};
 use crate::streak_recovery::spawn_streak_recovery_loop;
@@ -75,8 +76,18 @@ pub(crate) struct BackgroundTaskParams<'a> {
 
 pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Result<BackgroundTasks> {
     let username = normalized_username(&params.config.username)?;
+    let prediction_journal = PredictionPlacementJournal::open(params.work_dir)?;
+    let prediction_scheduler = params.user_id.map(|_| {
+        PredictionEvaluationScheduler::start(params.stop_rx.clone(), params.observability)
+    });
+    let drop_coordinator = DropClaimCoordinator::default();
     register_background_health(params);
-    let transports = spawn_transport_tasks(params, &username);
+    let transports = spawn_transport_tasks(
+        params,
+        &username,
+        &prediction_journal,
+        prediction_scheduler.as_ref(),
+    );
     let context = params.user_id.map(|user_id| {
         spawn_context_refresh_loop(
             params.stop_rx.clone(),
@@ -95,6 +106,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
             user_id.clone(),
             params.observability.clone(),
             params.health.clone(),
+            drop_coordinator.clone(),
         )
     });
     let drop = params
@@ -110,6 +122,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
                 Arc::clone(params.twitch),
                 params.observability.clone(),
                 params.health.clone(),
+                drop_coordinator,
             )
         });
     let chat = Some(spawn_chat_manager_loop(
@@ -179,6 +192,12 @@ fn register_background_health(params: &BackgroundTaskParams<'_>) {
         params
             .health
             .register("minute", std::time::Duration::from_secs(10 * 60));
+        params
+            .health
+            .register("minute-metadata", std::time::Duration::from_secs(10 * 60));
+        params
+            .health
+            .register("minute-watch", std::time::Duration::from_secs(10 * 60));
     }
     params
         .health
@@ -188,26 +207,34 @@ fn register_background_health(params: &BackgroundTaskParams<'_>) {
         .register("streak-cache", std::time::Duration::from_secs(10 * 60));
 }
 
-fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> TransportTasks {
+fn spawn_transport_tasks(
+    params: &BackgroundTaskParams<'_>,
+    username: &str,
+    prediction_journal: &PredictionPlacementJournal,
+    prediction_scheduler: Option<&PredictionEvaluationScheduler>,
+) -> TransportTasks {
     let initial_fallback = (0..params.initial_streamers.len()).collect::<Vec<_>>();
     let (fallback_tx, fallback_rx) = tokio::sync::watch::channel(initial_fallback);
-    let eventsub = params.user_id.map(|user_id| {
-        spawn_eventsub_loop(
+    let eventsub = params.user_id.and_then(|user_id| {
+        let prediction_scheduler = prediction_scheduler?;
+        Some(spawn_eventsub_loop(
             params.stop_rx.clone(),
             EventSubTaskContext {
-                effects: RuntimeEffectContext::new(
+                effects: RuntimeEffectContext::new_with_journal(
                     params.runtime.clone(),
                     Arc::clone(params.twitch),
                     user_id.clone(),
                     params.observability.clone(),
                     params.health.clone(),
+                    prediction_journal.clone(),
+                    prediction_scheduler.clone(),
                 ),
                 auth_token: params.auth_token.to_string(),
                 tracked_streamers: params.initial_streamers.to_vec(),
                 prediction_eventsub_authorized: params.prediction_eventsub_authorized,
                 fallback_tx,
             },
-        )
+        ))
     });
     let presence_poll = params.user_id.map(|_| {
         spawn_eventsub_presence_poll_loop(
@@ -220,23 +247,26 @@ fn spawn_transport_tasks(params: &BackgroundTaskParams<'_>, username: &str) -> T
             params.health.clone(),
         )
     });
-    let pubsub = params.user_id.map(|user_id| {
-        spawn_pubsub_loop(
+    let pubsub = params.user_id.and_then(|user_id| {
+        let prediction_scheduler = prediction_scheduler?;
+        Some(spawn_pubsub_loop(
             params.stop_rx.clone(),
             PubSubTaskContext {
-                effects: RuntimeEffectContext::new(
+                effects: RuntimeEffectContext::new_with_journal(
                     params.runtime.clone(),
                     Arc::clone(params.twitch),
                     user_id.clone(),
                     params.observability.clone(),
                     params.health.clone(),
+                    prediction_journal.clone(),
+                    prediction_scheduler.clone(),
                 ),
                 auth_token: params.auth_token.to_string(),
                 user_id: user_id.clone(),
                 username: username.to_string(),
                 tracked_streamers: params.initial_streamers.to_vec(),
             },
-        )
+        ))
     });
     TransportTasks {
         eventsub,
@@ -435,6 +465,8 @@ mod tests {
             "presence-poll",
             "context",
             "minute",
+            "minute-metadata",
+            "minute-watch",
             "drop",
             "chat",
             "streak-cache",
@@ -499,6 +531,8 @@ mod tests {
             "presence-poll",
             "context",
             "minute",
+            "minute-metadata",
+            "minute-watch",
             "chat",
             "streak-cache",
         ] {

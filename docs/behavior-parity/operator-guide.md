@@ -149,7 +149,7 @@ If you are migrating a Linux bind mount from an older root-run image, make sure 
 
 ## Multi-Arch Builds
 
-Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one supported local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64` and `linux/arm64`, matching the GitHub Actions workflow. ARMv7 is not supported.
+Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one supported local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64` and `linux/arm64` under a revision-scoped `candidate-<full-sha>` tag by default; stable tags belong to the protected promotion workflow. ARMv7 is not supported.
 
 ```powershell
 cd Twitch-Miner-Rust
@@ -159,9 +159,11 @@ docker run --rm twitch-miner-rust:local --help
 ```
 
 On pushes to `main`, GitHub Actions builds, smoke-tests, and publishes the
-multi-architecture GHCR image. A signed `v*` tag promotes the already-tested
-manifest for that exact commit without rebuilding it. Deploy the recorded
-manifest digest, not `latest`; see [release-process.md](../release-process.md).
+multi-architecture GHCR image. After the exact-digest acceptance record passes,
+create a signed `v*` tag at that commit and dispatch the protected `Promote
+Release` workflow. It promotes the already-tested manifest without rebuilding
+it. Deploy the recorded manifest digest, not `latest`; see
+[release-process.md](../release-process.md).
 
 ## Go/Rust Parity Gate
 
@@ -184,8 +186,11 @@ Use `--status` for the separate EventSub, PubSub, and polling health entries.
 The authoritative timeout, retry, fallback, and mutation-replay rules are in the
 [protocol inventory](../protocol-inventory.md); never include cookies, request
 headers, endpoint query strings, or raw responses in a support report.
-In normal runtime, EventSub `verified=false` only means the post-create listing
-was skipped; judge health from active/failed counts and task state. A
+In normal runtime, EventSub `verified=false` means the current set has not been
+verified (initial listing was skipped, or reconciliation is incomplete). Three
+bounded post-setup capacity rechecks refresh the report without restarting the
+socket; cost remains a last-observed snapshot afterward. Judge health from
+active/failed counts, recheck warnings, and task state. A
 `capacity-overflow` capability may retain EventSub presence while optional raid or
 prediction types use compatibility fallback, and `raid_source` names EventSub
 only when a `channel.raid` subscription was actually allocated.

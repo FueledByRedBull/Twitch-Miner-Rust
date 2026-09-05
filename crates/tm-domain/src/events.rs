@@ -13,6 +13,8 @@ pub enum MinerEvent {
         earned: i64,
         reason: String,
         balance: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<String>,
     },
     ClaimAvailable {
         channel_id: String,

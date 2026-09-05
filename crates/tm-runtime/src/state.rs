@@ -11,11 +11,21 @@ use tm_domain::{
 use crate::effect::RuntimeEffect;
 use crate::prediction::{build_prediction_settlement_effect, prediction_status_is_resolved};
 use crate::summary::{apply_pubsub_gain, build_session_summary};
-use crate::types::{ContextUpdate, EventApplication, RuntimeState, SessionSummary, StreamUpdate};
+use crate::types::{
+    ContextRequestToken, ContextUpdate, EventApplication, RuntimeState, SessionSummary,
+    StreamUpdate,
+};
 
+const MAX_ACTIVE_PREDICTIONS_PER_CHANNEL: usize = 8;
+const MAX_ACTIVE_PREDICTIONS: usize = 256;
 const MAX_COMPLETED_PREDICTIONS: usize = 256;
 
 const MAX_PROCESSED_MUTATION_IDS: usize = 128;
+// Prediction point deductions must remain recognizable for as long as the
+// corresponding active or completed event is retained. Protected markers are
+// bounded by those two retention limits; ordinary transport keys retain their
+// existing smaller cap.
+const MAX_PROTECTED_PREDICTION_MARKERS: usize = MAX_ACTIVE_PREDICTIONS + MAX_COMPLETED_PREDICTIONS;
 const STREAK_RESTART_CARRYOVER_SECONDS: i64 = 30 * 60;
 // At two selected channels, each pass can spend 90 seconds inside the bounded
 // request plus 10 seconds on its scheduler interval. Two complete passes allow
@@ -60,6 +70,7 @@ impl RuntimeState {
             streamers,
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
+            pending_prediction_winners: HashMap::new(),
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
         }
@@ -154,29 +165,92 @@ impl RuntimeState {
                 earned,
                 reason,
                 balance,
+                source_id,
             } => {
-                let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
-                    return EventApplication::unchanged();
-                };
-                if !streamer.can_earn_channel_points() {
-                    return EventApplication::unchanged();
-                }
-                let event_key = format!("{earned}:{balance}:{}:{reason}", reason.len());
-                let current_state_key = format!("{event_key}:{}", streamer.channel_points);
-                if streamer
-                    .processed_point_event_keys
-                    .contains(&current_state_key)
+                let (active_prediction_id, completed_prediction_id) =
+                    if *earned < 0 && reason == "PREDICTION" {
+                        earned
+                            .checked_abs()
+                            .map(|amount| {
+                                let active = self
+                                    .predictions
+                                    .iter()
+                                    .find(|(_, prediction)| {
+                                        prediction.streamer.channel_id == *channel_id
+                                            && prediction.bet_placed
+                                            && prediction.result_type.is_empty()
+                                            && prediction.decision.amount == amount
+                                    })
+                                    .map(|(event_id, _)| event_id.clone());
+                                let completed = self
+                                    .completed_predictions
+                                    .iter()
+                                    .rev()
+                                    .find(|prediction| {
+                                        prediction.streamer.channel_id == *channel_id
+                                            && prediction.bet_placed
+                                            && prediction.decision.amount == amount
+                                    })
+                                    .map(|prediction| prediction.event_id.clone());
+                                (active, completed)
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        (None, None)
+                    };
                 {
-                    return EventApplication::unchanged();
-                }
-                apply_pubsub_gain(streamer, *earned, reason, *balance);
-                if reason == "WATCH_STREAK" {
-                    if let Some(stream) = streamer.stream.as_mut() {
-                        stream.mark_watch_streak_resolved(now);
+                    let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+                        return EventApplication::unchanged();
+                    };
+                    if !streamer.can_earn_channel_points() {
+                        return EventApplication::unchanged();
                     }
+                    let event_key = source_id
+                        .as_deref()
+                        .filter(|source_id| !source_id.trim().is_empty())
+                        .map_or_else(
+                            || format!("fingerprint:{earned}:{balance}:{reason}"),
+                            |source_id| format!("source:{source_id}"),
+                        );
+                    if streamer.processed_point_event_keys.contains(&event_key) {
+                        return EventApplication::unchanged();
+                    }
+                    let matched_prediction_id = active_prediction_id
+                        .as_ref()
+                        .or(completed_prediction_id.as_ref());
+                    let prediction_point_already_applied =
+                        matched_prediction_id.is_some_and(|event_id| {
+                            prediction_deduction_marker_exists(streamer, event_id)
+                        });
+                    if prediction_point_already_applied {
+                        // The mutation response already accounted for this stake. The
+                        // server's matching point event confirms the same spend and must
+                        // not deduct or count it a second time.
+                        remember_mutation_id(&mut streamer.processed_point_event_keys, &event_key);
+                        return EventApplication::unchanged();
+                    }
+                    if let Some(event_id) = matched_prediction_id {
+                        // Keep this event-specific accounting marker alongside the
+                        // retained prediction record. Ordinary point keys are bounded
+                        // more aggressively and may be evicted before a late replay.
+                        if !remember_prediction_deduction(
+                            &mut streamer.processed_point_event_keys,
+                            event_id,
+                        ) {
+                            return EventApplication::unchanged();
+                        }
+                    }
+                    apply_pubsub_gain(streamer, *earned, reason, *balance);
+                    if *earned > 0 && matches!(reason.as_str(), "WATCH" | "WATCH_STREAK") {
+                        streamer.last_server_confirmed_points_at = Some(now);
+                    }
+                    if reason == "WATCH_STREAK" {
+                        if let Some(stream) = streamer.stream.as_mut() {
+                            stream.mark_watch_streak_resolved(now);
+                        }
+                    }
+                    remember_mutation_id(&mut streamer.processed_point_event_keys, &event_key);
                 }
-                let applied_state_key = format!("{event_key}:{}", streamer.channel_points);
-                remember_mutation_id(&mut streamer.processed_point_event_keys, &applied_state_key);
                 EventApplication::changed(Vec::new())
             }
             MinerEvent::ClaimAvailable {
@@ -261,10 +335,28 @@ impl RuntimeState {
                         || event.status != "ACTIVE"
                         || !event.streamer.settings.make_predictions
                         || !can_earn
-                        || !remember_mutation_id(
-                            &mut self.processed_prediction_ids,
-                            &event.event_id,
-                        )
+                        || self
+                            .processed_prediction_ids
+                            .iter()
+                            .any(|existing| existing == &event.event_id)
+                    {
+                        return EventApplication::unchanged();
+                    }
+                    if self.predictions.len() >= self.max_active_prediction_count() {
+                        let Some(evict_id) = self.oldest_evictable_prediction_id() else {
+                            // A full map containing only placed or confirmed
+                            // bets must never evict spending state. Retain the
+                            // event identity in the bounded dedupe queue and
+                            // wait for an existing event to resolve.
+                            remember_prediction_id(
+                                &mut self.processed_prediction_ids,
+                                &event.event_id,
+                            );
+                            return EventApplication::unchanged();
+                        };
+                        self.predictions.remove(&evict_id);
+                    }
+                    if !remember_prediction_id(&mut self.processed_prediction_ids, &event.event_id)
                     {
                         return EventApplication::unchanged();
                     }
@@ -286,7 +378,22 @@ impl RuntimeState {
                             state_changed |= existing.outcomes != event.outcomes;
                             existing.outcomes.clone_from(&event.outcomes);
                         }
+                        if existing.bet_placed
+                            && !existing.bet_confirmed
+                            && existing.status == "RESOLVED"
+                        {
+                            if let Some(winning_outcome_id) = winning_outcome_id.as_deref() {
+                                let previous = self
+                                    .pending_prediction_winners
+                                    .insert(event_id.clone(), winning_outcome_id.to_string());
+                                state_changed |= previous.as_deref() != Some(winning_outcome_id);
+                            }
+                        } else if !prediction_status_is_resolved(&existing.status) {
+                            state_changed |=
+                                self.pending_prediction_winners.remove(&event_id).is_some();
+                        }
                         if !existing.bet_placed
+                            || !existing.bet_confirmed
                             || existing.decision.amount <= 0
                             || !existing.result_type.is_empty()
                             || !prediction_status_is_resolved(&existing.status)
@@ -320,13 +427,21 @@ impl RuntimeState {
                 result,
             } => match kind {
                 PredictionUserKind::PredictionMade => {
-                    let Some(event) = self.predictions.get_mut(event_id) else {
-                        return EventApplication::unchanged();
+                    let should_settle = {
+                        let Some(event) = self.predictions.get_mut(event_id) else {
+                            return EventApplication::unchanged();
+                        };
+                        if event.bet_confirmed {
+                            return EventApplication::unchanged();
+                        }
+                        event.bet_confirmed = true;
+                        prediction_status_is_resolved(&event.status)
                     };
-                    if event.bet_confirmed {
-                        return EventApplication::unchanged();
+                    if should_settle {
+                        if let Some(effect) = self.settle_confirmed_prediction(event_id) {
+                            return EventApplication::changed(vec![effect]);
+                        }
                     }
-                    event.bet_confirmed = true;
                     EventApplication::changed(Vec::new())
                 }
                 PredictionUserKind::PredictionResult => {
@@ -353,6 +468,7 @@ impl RuntimeState {
                             ),
                         };
                     };
+                    self.pending_prediction_winners.remove(event_id);
                     if !event.bet_confirmed {
                         event.bet_confirmed = true;
                     }
@@ -416,6 +532,28 @@ impl RuntimeState {
             .find(|streamer| streamer.channel_id == channel_id)
     }
 
+    fn max_active_prediction_count(&self) -> usize {
+        self.streamers
+            .len()
+            .max(1)
+            .saturating_mul(MAX_ACTIVE_PREDICTIONS_PER_CHANNEL)
+            .min(MAX_ACTIVE_PREDICTIONS)
+    }
+
+    fn oldest_evictable_prediction_id(&self) -> Option<String> {
+        self.predictions
+            .iter()
+            .filter(|(_, event)| {
+                !event.bet_placed && !event.bet_confirmed && event.result_type.is_empty()
+            })
+            .min_by(|(_, left), (_, right)| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.event_id.cmp(&right.event_id))
+            })
+            .map(|(event_id, _)| event_id.clone())
+    }
+
     pub fn update_streamer_login(&mut self, channel_id: &str, login: &str) -> bool {
         let login = login.trim().to_ascii_lowercase();
         if login.is_empty() {
@@ -433,6 +571,15 @@ impl RuntimeState {
         }
         let old_login = std::mem::replace(&mut self.streamers[index].username, login.clone());
         self.streamers[index].watch_suspended_until = None;
+        // A response fetched under the previous login must not apply after a
+        // channel rename. Invalidate both request families before exposing the
+        // new identity to callers.
+        self.streamers[index].context_request_generation = self.streamers[index]
+            .context_request_generation
+            .saturating_add(1);
+        self.streamers[index].stream_update_generation = self.streamers[index]
+            .stream_update_generation
+            .saturating_add(1);
         if let Some(initial_points) = self.initial_points.remove(&old_login) {
             self.initial_points.insert(login, initial_points);
         }
@@ -482,6 +629,11 @@ impl RuntimeState {
                     stream.stream_up_at = Some(now);
                 }
             } else {
+                // Invalidate metadata requests that were issued while this
+                // broadcast was live. A late successful response must not
+                // bring an offline stream back into the watch state.
+                streamer.stream_update_generation =
+                    streamer.stream_update_generation.saturating_add(1);
                 streamer.offline_at = Some(now);
                 streamer.last_stream_ended_at = Some(now);
                 if let Some(stream) = streamer.stream.as_mut() {
@@ -500,18 +652,66 @@ impl RuntimeState {
         }
     }
 
-    pub fn apply_context_update(&mut self, update: &ContextUpdate) -> Vec<RuntimeEffect> {
+    pub fn begin_context_update(&mut self, channel_id: &str) -> Option<ContextRequestToken> {
+        let streamer = self.streamer_mut_by_channel_id(channel_id)?;
+        streamer.context_request_generation = streamer.context_request_generation.saturating_add(1);
+        Some(ContextRequestToken {
+            request_generation: streamer.context_request_generation,
+            balance_revision: streamer.context_balance_revision,
+        })
+    }
+
+    pub fn begin_stream_update(&mut self, channel_id: &str) -> Option<u64> {
+        let streamer = self.streamer_mut_by_channel_id(channel_id)?;
+        streamer.stream_update_generation = streamer.stream_update_generation.saturating_add(1);
+        Some(streamer.stream_update_generation)
+    }
+
+    #[must_use]
+    pub fn prediction_channel_id(&self, event_id: &str) -> Option<String> {
+        self.active_prediction_channel_id(event_id).or_else(|| {
+            self.completed_predictions
+                .iter()
+                .rev()
+                .find(|event| event.event_id == event_id)
+                .map(|event| event.streamer.channel_id.clone())
+        })
+    }
+
+    #[must_use]
+    pub fn active_prediction_channel_id(&self, event_id: &str) -> Option<String> {
+        self.predictions
+            .get(event_id)
+            .map(|event| event.streamer.channel_id.clone())
+    }
+
+    pub fn apply_context_update(&mut self, update: &ContextUpdate) -> (Vec<RuntimeEffect>, i64) {
         let Some(streamer) = self.streamer_mut_by_channel_id(&update.channel_id) else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
-        streamer.apply_channel_points_context_with_status(
+        if streamer.context_request_generation != update.expected_request_generation {
+            return (Vec::new(), 0);
+        }
+        streamer.last_context_observed_at = Some(update.observed_at);
+
+        let previous_balance = streamer.channel_points;
+        let balance_applied = streamer.apply_channel_points_context_with_status_if_allowed(
+            streamer.context_balance_revision == update.expected_balance_revision,
             update.channel_points_enabled,
             update.balance,
             &update.active_multipliers,
             &update.community_goals,
         );
+        if balance_applied {
+            streamer.context_balance_revision = streamer.context_balance_revision.saturating_add(1);
+        }
+        let balance_delta = if balance_applied {
+            streamer.channel_points.saturating_sub(previous_balance)
+        } else {
+            0
+        };
         if !streamer.can_earn_channel_points() {
-            return Vec::new();
+            return (Vec::new(), balance_delta);
         }
         if streamer.settings.community_goals
             && streamer
@@ -519,11 +719,14 @@ impl RuntimeState {
                 .values()
                 .any(CommunityGoal::is_active)
         {
-            return vec![RuntimeEffect::ContributeCommunityGoals {
-                channel_id: update.channel_id.clone(),
-            }];
+            return (
+                vec![RuntimeEffect::ContributeCommunityGoals {
+                    channel_id: update.channel_id.clone(),
+                }],
+                balance_delta,
+            );
         }
-        Vec::new()
+        (Vec::new(), balance_delta)
     }
 
     pub fn apply_stream_update(
@@ -532,6 +735,9 @@ impl RuntimeState {
         now: OffsetDateTime,
     ) -> Option<Streamer> {
         let streamer = self.streamer_mut_by_channel_id(&update.channel_id)?;
+        if streamer.stream_update_generation != update.expected_generation {
+            return None;
+        }
         let stream = streamer.stream.get_or_insert_with(Stream::default);
         let broadcast_changed = !stream.broadcast_id.is_empty() && stream.broadcast_id != update.id;
         let game_changed = stream.game_name() != update.game_name.trim();
@@ -539,6 +745,10 @@ impl RuntimeState {
             stream.stream_up_at = Some(now);
         }
         if broadcast_changed {
+            // A WATCH reward from the previous broadcast cannot establish
+            // progress for the new one. Clear the observation so the watcher
+            // watchdog starts measuring this broadcast from its own evidence.
+            streamer.last_server_confirmed_points_at = None;
             stream.reset_watch_progress();
             if stream
                 .streak_carryover_until
@@ -565,6 +775,26 @@ impl RuntimeState {
             tm_twitch_drop_id(),
             now,
         );
+        streamer.stream_update_generation = streamer.stream_update_generation.saturating_add(1);
+        // Stream metadata is accepted only from a live fetch. Apply the
+        // matching online transition under the same state lock so an offline
+        // event cannot be followed by a stale second `set_presence(true)`
+        // write from the caller.
+        if !streamer.is_online || !streamer.presence_known {
+            let short_restart = streamer.offline_at.is_some_and(|offline_at| {
+                (now - offline_at).whole_seconds() <= STREAK_RESTART_CARRYOVER_SECONDS
+            });
+            streamer.presence_known = true;
+            streamer.is_online = true;
+            streamer.online_at = Some(now);
+            streamer.offline_at = None;
+            if !short_restart {
+                if let Some(stream) = streamer.stream.as_mut() {
+                    stream.watch_streak_missing = true;
+                    stream.streak_carryover_until = None;
+                }
+            }
+        }
         Some(streamer.clone())
     }
 
@@ -578,7 +808,34 @@ impl RuntimeState {
             .drop_campaign_eligible = Some(eligible);
     }
 
-    pub fn mark_minute_watched(&mut self, channel_id: &str, now: OffsetDateTime) {
+    pub fn set_drop_campaign_eligibility_if_current(
+        &mut self,
+        channel_id: &str,
+        expected_broadcast_id: &str,
+        expected_game_id: Option<&str>,
+        eligible: bool,
+    ) -> bool {
+        let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
+            return false;
+        };
+        let Some(stream) = streamer.stream.as_mut() else {
+            return false;
+        };
+        if stream.broadcast_id != expected_broadcast_id
+            || stream.game_id.as_deref() != expected_game_id
+        {
+            return false;
+        }
+        stream.drop_campaign_eligible = Some(eligible);
+        true
+    }
+
+    pub fn mark_minute_watched(
+        &mut self,
+        channel_id: &str,
+        expected_broadcast_id: &str,
+        now: OffsetDateTime,
+    ) {
         let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
             return;
         };
@@ -588,6 +845,9 @@ impl RuntimeState {
         let Some(stream) = streamer.stream.as_mut() else {
             return;
         };
+        if stream.broadcast_id != expected_broadcast_id {
+            return;
+        }
         stream.update_minute_watched(now, MAX_CONFIRMED_WATCH_INTERVAL_SECONDS);
     }
 
@@ -632,20 +892,100 @@ impl RuntimeState {
         if let Some(streamer) = self.streamer_mut_by_channel_id(&event.streamer.channel_id) {
             event.streamer = streamer.clone();
             if deduct_stake && decision.amount > 0 {
-                apply_pubsub_gain(streamer, -decision.amount, "PREDICTION", 0);
+                // A PredictionMade notification may race the mutation response, and a
+                // response may be replayed by a caller after a reconnect. Keep a durable
+                // in-memory marker alongside server point-event identities so the local
+                // accounting cannot deduct one stake twice for the same prediction event.
+                if remember_prediction_deduction(&mut streamer.processed_point_event_keys, event_id)
+                {
+                    apply_pubsub_gain(streamer, -decision.amount, "PREDICTION", 0);
+                }
                 event.streamer = streamer.clone();
             }
         }
         self.predictions.insert(event.event_id.clone(), event);
     }
 
+    pub fn restore_prediction_placement(&mut self, event_id: &str, decision: &PredictionDecision) {
+        let Some(mut event) = self.predictions.remove(event_id) else {
+            return;
+        };
+        event.decision.clone_from(decision);
+        event.bet_placed = true;
+        event.bet_confirmed = true;
+        if let Some(streamer) = self.streamer_mut_by_channel_id(&event.streamer.channel_id) {
+            event.streamer = streamer.clone();
+            // The persisted terminal journal entry means the stake was
+            // already accounted for before this process started. Retain the
+            // idempotency marker without applying a second local deduction.
+            remember_prediction_deduction(&mut streamer.processed_point_event_keys, event_id);
+            event.streamer = streamer.clone();
+        }
+        self.predictions.insert(event.event_id.clone(), event);
+    }
+
+    pub fn reserve_prediction_placement(
+        &mut self,
+        event_id: &str,
+        decision: &PredictionDecision,
+    ) -> bool {
+        let Some(event) = self.predictions.get_mut(event_id) else {
+            return false;
+        };
+        if event.bet_placed || event.bet_confirmed || !event.result_type.is_empty() {
+            return false;
+        }
+        event.decision.clone_from(decision);
+        // `bet_placed && !bet_confirmed` is the unresolved reservation state. It
+        // makes concurrent evaluation effects idempotent before any network I/O.
+        event.bet_placed = true;
+        true
+    }
+
+    pub fn release_prediction_placement_reservation(&mut self, event_id: &str) -> bool {
+        let Some(event) = self.predictions.get_mut(event_id) else {
+            return false;
+        };
+        if !event.bet_placed || event.bet_confirmed || !event.result_type.is_empty() {
+            return false;
+        }
+        event.bet_placed = false;
+        true
+    }
+
     pub fn stop_tracking_prediction(&mut self, event_id: &str, result_type: &str) {
+        if result_type == "REJECTED"
+            && self
+                .predictions
+                .get(event_id)
+                .is_some_and(|event| event.bet_confirmed)
+        {
+            return;
+        }
         if let Some(mut event) = self.predictions.remove(event_id) {
+            self.pending_prediction_winners.remove(event_id);
             event.result_type = result_type.to_string();
-            if event.bet_placed {
+            if event.bet_placed || result_type == "REJECTED" {
                 self.remember_completed_prediction(event);
+            } else {
+                self.forget_prediction_deduction_marker(event_id);
             }
         }
+    }
+
+    pub fn mark_prediction_placement_unknown(
+        &mut self,
+        event_id: &str,
+        decision: &PredictionDecision,
+    ) {
+        let Some(event) = self.predictions.get_mut(event_id) else {
+            return;
+        };
+        event.decision.clone_from(decision);
+        // A transport failure after the mutation was sent is an ambiguous outcome. Keep the
+        // event active for a later PredictionMade/PredictionResult notification, but never
+        // deduct the stake or issue a second mutation merely because this state is unresolved.
+        event.bet_placed = true;
     }
 
     pub fn release_claim_bonus(&mut self, channel_id: &str, claim_id: &str) {
@@ -656,7 +996,9 @@ impl RuntimeState {
 
     pub fn release_prediction(&mut self, event_id: &str) {
         self.predictions.remove(event_id);
+        self.pending_prediction_winners.remove(event_id);
         self.processed_prediction_ids.retain(|id| id != event_id);
+        self.forget_prediction_deduction_marker(event_id);
     }
 
     fn remember_completed_prediction(&mut self, mut event: PredictionEvent) {
@@ -668,9 +1010,42 @@ impl RuntimeState {
             event.streamer = streamer.clone();
         }
         if self.completed_predictions.len() == MAX_COMPLETED_PREDICTIONS {
-            self.completed_predictions.pop_front();
+            if let Some(evicted) = self.completed_predictions.pop_front() {
+                self.forget_prediction_deduction_marker(&evicted.event_id);
+            }
         }
         self.completed_predictions.push_back(event);
+    }
+
+    fn forget_prediction_deduction_marker(&mut self, event_id: &str) {
+        let marker = prediction_deduction_marker(event_id);
+        for streamer in &mut self.streamers {
+            streamer
+                .processed_point_event_keys
+                .retain(|key| key != &marker);
+        }
+    }
+
+    fn settle_confirmed_prediction(&mut self, event_id: &str) -> Option<RuntimeEffect> {
+        let mut event = self.predictions.remove(event_id)?;
+        if !event.bet_placed || event.decision.amount <= 0 || !event.result_type.is_empty() {
+            self.predictions.insert(event.event_id.clone(), event);
+            return None;
+        }
+        let winning_outcome_id = if event.status == "RESOLVED" {
+            self.pending_prediction_winners.get(event_id).cloned()
+        } else {
+            None
+        };
+        let Some(effect) =
+            build_prediction_settlement_effect(&mut event, winning_outcome_id.as_deref())
+        else {
+            self.predictions.insert(event.event_id.clone(), event);
+            return None;
+        };
+        self.pending_prediction_winners.remove(event_id);
+        self.remember_completed_prediction(event);
+        Some(effect)
     }
 
     fn refine_completed_prediction(
@@ -701,12 +1076,80 @@ fn prediction_result_string(event: &PredictionEvent, result_type: &str, points_w
     event.parse_result(result_type, points_won).result_string
 }
 
+fn prediction_deduction_marker(event_id: &str) -> String {
+    format!("prediction:{event_id}")
+}
+
+fn prediction_deduction_marker_exists(streamer: &Streamer, event_id: &str) -> bool {
+    let marker = prediction_deduction_marker(event_id);
+    streamer
+        .processed_point_event_keys
+        .iter()
+        .any(|key| key == &marker)
+}
+
+fn remember_prediction_deduction(
+    values: &mut std::collections::VecDeque<String>,
+    event_id: &str,
+) -> bool {
+    let marker = prediction_deduction_marker(event_id);
+    if values.iter().any(|existing| existing == &marker) {
+        return false;
+    }
+    let protected_count = values
+        .iter()
+        .filter(|key| key.starts_with("prediction:"))
+        .count();
+    if protected_count >= MAX_PROTECTED_PREDICTION_MARKERS {
+        return false;
+    }
+    while values
+        .iter()
+        .filter(|key| !key.starts_with("prediction:"))
+        .count()
+        >= MAX_PROCESSED_MUTATION_IDS
+    {
+        let Some(index) = values
+            .iter()
+            .position(|key| !key.starts_with("prediction:"))
+        else {
+            return false;
+        };
+        values.remove(index);
+    }
+    values.push_back(marker);
+    true
+}
+
+fn remember_prediction_id(values: &mut std::collections::VecDeque<String>, value: &str) -> bool {
+    const MAX_PROCESSED_PREDICTION_IDS: usize = MAX_ACTIVE_PREDICTIONS;
+    if value.trim().is_empty() || values.iter().any(|existing| existing == value) {
+        return false;
+    }
+    if values.len() == MAX_PROCESSED_PREDICTION_IDS {
+        values.pop_front();
+    }
+    values.push_back(value.to_string());
+    true
+}
+
 fn remember_mutation_id(values: &mut std::collections::VecDeque<String>, value: &str) -> bool {
     if value.trim().is_empty() || values.iter().any(|existing| existing == value) {
         return false;
     }
-    if values.len() == MAX_PROCESSED_MUTATION_IDS {
-        values.pop_front();
+    while values
+        .iter()
+        .filter(|key| !key.starts_with("prediction:"))
+        .count()
+        >= MAX_PROCESSED_MUTATION_IDS
+    {
+        let Some(index) = values
+            .iter()
+            .position(|key| !key.starts_with("prediction:"))
+        else {
+            return false;
+        };
+        values.remove(index);
     }
     values.push_back(value.to_string());
     true

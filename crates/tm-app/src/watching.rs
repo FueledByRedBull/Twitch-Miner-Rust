@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
 use tm_runtime::RuntimeTime;
@@ -20,23 +19,18 @@ pub(crate) struct CachedSpadeUrl {
 #[derive(Debug, Clone)]
 pub(crate) enum SpadeCacheEntry {
     Ready(CachedSpadeUrl),
-    Refreshing(Arc<tokio::sync::Notify>),
-}
-
-pub(crate) enum SpadeResolveAction {
-    Use(String),
-    Wait(Arc<tokio::sync::Notify>),
-    Fetch(Arc<tokio::sync::Notify>),
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct WatchRotation {
     queue: VecDeque<String>,
     pinned_campaign: Option<String>,
-    active_since: Option<RuntimeTime>,
+    spare_since: Option<RuntimeTime>,
     promoted_streak_broadcasts: HashMap<String, String>,
     last_streak_promotion: Option<RuntimeTime>,
     last_fair_rotation: Option<RuntimeTime>,
+    selection_reasons: HashMap<String, &'static str>,
+    watchdog_rotation_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +40,7 @@ pub(crate) struct StreakCandidate {
 }
 
 impl WatchRotation {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn select_with_campaigns(
         &mut self,
         ordered_eligible: &[String],
@@ -57,7 +52,6 @@ impl WatchRotation {
             .iter()
             .find(|login| ordered_eligible.iter().any(|eligible| eligible == *login))
             .cloned();
-        let campaign_changed = self.pinned_campaign != pinned_campaign;
         self.pinned_campaign = pinned_campaign;
         // One promotion per broadcast. A record is released only when the
         // channel reports a different broadcast, never when it drops out of the
@@ -76,34 +70,44 @@ impl WatchRotation {
 
         // Twitch advances Drop progress on only one channel. Pin the first
         // ranked campaign and prefer non-campaign channels for the spare slot.
-        self.queue.retain(|login| {
-            !campaign_logins.contains(login)
-                && ordered_eligible.iter().any(|eligible| eligible == login)
-        });
-        for login in ordered_eligible {
-            if !campaign_logins.contains(login) && !self.queue.iter().any(|queued| queued == login)
-            {
-                self.queue.push_back(login.clone());
-            }
-        }
-        if self.queue.is_empty() {
-            for login in ordered_eligible
+        // When every eligible channel is a campaign channel, the eligible
+        // channels other than the pin are the real spare pool. Reconcile the
+        // queue against that pool instead of rebuilding it on every pass.
+        let mut spare_candidates = ordered_eligible
+            .iter()
+            .filter(|login| !campaign_logins.contains(login))
+            .cloned()
+            .collect::<Vec<_>>();
+        if spare_candidates.is_empty() {
+            spare_candidates = ordered_eligible
                 .iter()
                 .filter(|login| Some(*login) != self.pinned_campaign.as_ref())
-            {
-                self.queue.push_back(login.clone());
+                .cloned()
+                .collect();
+        }
+        self.queue
+            .retain(|login| spare_candidates.iter().any(|candidate| candidate == login));
+        for login in spare_candidates {
+            if !self.queue.iter().any(|queued| queued == &login) {
+                self.queue.push_back(login);
             }
         }
 
         if self.queue.is_empty() {
-            self.active_since = None;
+            self.spare_since = None;
             self.last_fair_rotation = None;
             self.last_streak_promotion = None;
+            self.selection_reasons.clear();
+            self.watchdog_rotation_pending = false;
+            if let Some(pinned) = &self.pinned_campaign {
+                self.selection_reasons
+                    .insert(pinned.clone(), "campaign-priority");
+            }
             return self.pinned_campaign.iter().cloned().collect();
         }
 
-        if campaign_changed || self.active_since.is_none() {
-            self.active_since = Some(now);
+        if self.spare_since.is_none() {
+            self.spare_since = Some(now);
         }
         if self.last_fair_rotation.is_none() {
             self.last_fair_rotation = Some(now);
@@ -129,17 +133,18 @@ impl WatchRotation {
                     .then(|| (position, candidate.clone()))
             })
         });
+        let mut fair_rotated = false;
         if let Some(Some((position, candidate))) = promotion {
             if let Some(login) = self.queue.remove(position) {
                 self.queue.push_front(login);
                 self.promoted_streak_broadcasts
                     .insert(candidate.login, candidate.broadcast_id);
                 self.last_streak_promotion = Some(now);
-                self.active_since = Some(now);
+                self.spare_since = Some(now);
             }
         } else if self.queue.len() > rotating_slots
             && self
-                .active_since
+                .spare_since
                 .is_some_and(|started| (now - started).whole_seconds() >= WATCH_ROTATION_SECONDS)
         {
             for _ in 0..rotating_slots {
@@ -147,8 +152,9 @@ impl WatchRotation {
                     self.queue.push_back(login);
                 }
             }
-            self.active_since = Some(now);
+            self.spare_since = Some(now);
             self.last_fair_rotation = Some(now);
+            fair_rotated = true;
         }
 
         let selected = self
@@ -157,6 +163,30 @@ impl WatchRotation {
             .cloned()
             .chain(self.queue.iter().take(rotating_slots).cloned())
             .collect::<Vec<_>>();
+        self.selection_reasons.clear();
+        for login in &selected {
+            let reason = if self.pinned_campaign.as_ref() == Some(login) {
+                "campaign-priority"
+            } else if self
+                .last_streak_promotion
+                .is_some_and(|promoted_at| promoted_at == now)
+                && streak_candidates.iter().any(|candidate| {
+                    candidate.login == *login
+                        && self.promoted_streak_broadcasts.get(&candidate.login)
+                            == Some(&candidate.broadcast_id)
+                })
+            {
+                "streak-promotion"
+            } else if self.watchdog_rotation_pending {
+                "watchdog-switch"
+            } else if fair_rotated {
+                "fair-rotation"
+            } else {
+                "watch-order"
+            };
+            self.selection_reasons.insert(login.clone(), reason);
+        }
+        self.watchdog_rotation_pending = false;
         for candidate in streak_candidates
             .iter()
             .filter(|candidate| selected.contains(&candidate.login))
@@ -165,6 +195,32 @@ impl WatchRotation {
                 .insert(candidate.login.clone(), candidate.broadcast_id.clone());
         }
         selected
+    }
+
+    pub(crate) fn selection_reason(&self, login: &str) -> &'static str {
+        self.selection_reasons
+            .get(login)
+            .copied()
+            .unwrap_or("watch-order")
+    }
+
+    pub(crate) fn defer_stalled(&mut self, login: &str) -> bool {
+        if self.pinned_campaign.as_deref() == Some(login) {
+            return false;
+        }
+        let rotating_slots = MAX_CONCURRENT_WATCHERS - usize::from(self.pinned_campaign.is_some());
+        if self.queue.len() <= rotating_slots {
+            return false;
+        }
+        let Some(position) = self.queue.iter().position(|queued| queued == login) else {
+            return false;
+        };
+        let Some(login) = self.queue.remove(position) else {
+            return false;
+        };
+        self.queue.push_back(login);
+        self.watchdog_rotation_pending = true;
+        true
     }
 }
 
@@ -291,7 +347,7 @@ mod tests {
         );
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &logins(&["delta"]), &[], ts(999)),
-            logins(&["delta", "alpha"])
+            logins(&["delta", "bravo"])
         );
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &logins(&["delta"]), &[], ts(1_000)),
@@ -331,6 +387,90 @@ mod tests {
             rotation.select_with_campaigns(&eligible, &eligible, &[], ts(900)),
             logins(&["alpha", "charlie"])
         );
+    }
+
+    #[test]
+    fn campaign_fallback_keeps_rotated_order_between_polls() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &eligible, &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &eligible, &[], ts(900)),
+            logins(&["alpha", "charlie"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &eligible, &[], ts(920)),
+            logins(&["alpha", "charlie"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &eligible, &[], ts(1_800)),
+            logins(&["alpha", "delta"])
+        );
+    }
+
+    #[test]
+    fn campaign_pin_changes_do_not_reset_spare_fairness() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &logins(&["alpha"]), &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &logins(&["bravo"]), &[], ts(600)),
+            logins(&["bravo", "charlie"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &logins(&["alpha"]), &[], ts(1_200)),
+            logins(&["alpha", "delta"])
+        );
+    }
+
+    #[test]
+    fn all_campaign_spares_eventually_receive_service() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta", "echo"]);
+        let mut rotation = WatchRotation::default();
+        let mut observed = std::collections::HashSet::new();
+
+        for seconds in (0..=9_000).step_by(20) {
+            let selected = rotation.select_with_campaigns(&eligible, &eligible, &[], ts(seconds));
+            observed.extend(selected.into_iter().skip(1));
+        }
+
+        assert_eq!(
+            observed,
+            logins(&["bravo", "charlie", "delta", "echo"])
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn watchdog_can_defer_one_stalled_spare_without_changing_campaign_priority() {
+        let eligible = logins(&["alpha", "bravo", "charlie"]);
+        let mut rotation = WatchRotation::default();
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert!(rotation.defer_stalled("alpha"));
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &[], &[], ts(1)),
+            logins(&["bravo", "charlie"])
+        );
+        assert_eq!(rotation.selection_reason("charlie"), "watchdog-switch");
+
+        let mut campaign_rotation = WatchRotation::default();
+        assert_eq!(
+            campaign_rotation.select_with_campaigns(&eligible, &logins(&["alpha"]), &[], ts(0),),
+            logins(&["alpha", "bravo"])
+        );
+        assert!(!campaign_rotation.defer_stalled("alpha"));
     }
 
     #[test]

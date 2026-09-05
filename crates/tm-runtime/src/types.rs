@@ -23,6 +23,7 @@ pub struct RuntimeState {
     pub streamers: Vec<Streamer>,
     pub initial_points: HashMap<String, i64>,
     pub predictions: HashMap<String, PredictionEvent>,
+    pub pending_prediction_winners: HashMap<String, String>,
     pub processed_prediction_ids: VecDeque<String>,
     pub completed_predictions: VecDeque<PredictionEvent>,
 }
@@ -32,8 +33,17 @@ pub struct ContextUpdate {
     pub channel_id: String,
     pub channel_points_enabled: Option<bool>,
     pub balance: i64,
+    pub expected_request_generation: u64,
+    pub expected_balance_revision: u64,
+    pub observed_at: tm_domain::OffsetDateTime,
     pub active_multipliers: Vec<ActiveMultiplier>,
     pub community_goals: Vec<CommunityGoal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextRequestToken {
+    pub request_generation: u64,
+    pub balance_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +55,7 @@ pub struct StreamUpdate {
     pub game_id: Option<String>,
     pub viewers_count: u32,
     pub tags: Vec<String>,
+    pub expected_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

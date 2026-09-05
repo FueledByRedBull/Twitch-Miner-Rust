@@ -3,6 +3,17 @@ use anyhow::{anyhow, Result};
 use crate::status::StatusReporter;
 use crate::{BackgroundTasks, SHUTDOWN_TASK_GRACE_PERIOD};
 
+// Dropping a JoinHandle detaches its task; transport owners must also cancel children.
+pub(crate) struct AbortTasksOnDrop(pub(crate) Vec<tokio::task::AbortHandle>);
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 pub(crate) async fn shutdown_background_tasks(
     stop_tx: tokio::sync::watch::Sender<bool>,
     tasks: BackgroundTasks,
@@ -115,6 +126,34 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn aborting_a_transport_owner_cancels_its_children() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let child_dropped = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let parent = tokio::spawn(async move {
+            let child = tokio::spawn(async move {
+                let _probe = DropProbe(child_dropped);
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            });
+            let _children = super::AbortTasksOnDrop(vec![child.abort_handle()]);
+            let _ = child.await;
+        });
+        assert!(started_rx.await.is_ok());
+        parent.abort();
+        assert!(parent.await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !dropped.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok()
+        );
     }
 
     #[tokio::test]

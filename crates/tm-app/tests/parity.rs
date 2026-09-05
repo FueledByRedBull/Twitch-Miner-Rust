@@ -361,6 +361,7 @@ fn normalized_pubsub_points_event_contract_matches_expected() {
             earned: expected["earned"].as_i64().unwrap(),
             reason: expected["reason"].as_str().unwrap().to_string(),
             balance: expected["balance"].as_i64().unwrap(),
+            source_id: None,
         }
     );
 }

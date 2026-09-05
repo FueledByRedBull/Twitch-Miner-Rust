@@ -2,7 +2,7 @@ use super::*;
 use crate::client::randomized_ping_delay;
 use serde_json::json;
 use std::time::Duration;
-use tm_domain::{CommunityGoal, Streamer};
+use tm_domain::{CommunityGoal, MinerEvent, Streamer};
 use tm_domain::{IrcMode, StreamerSettings};
 
 fn streamer(id: &str) -> Streamer {
@@ -209,6 +209,70 @@ fn parses_claim_available_with_single_streamer_fallback() {
         Some(MinerEvent::ClaimAvailable {
             channel_id: String::from("fallback-channel"),
             claim_id: String::from("claim-1"),
+        })
+    );
+}
+
+#[test]
+fn points_earned_uses_validated_event_timestamp_for_deduplication() {
+    let raw = json!({
+        "type": "MESSAGE",
+        "data": {
+            "topic": "community-points-user-v1.viewer",
+            "message": "{\"type\":\"points-earned\",\"data\":{\"channel_id\":\"100\",\"point_gain\":{\"total_points\":10,\"reason_code\":\"WATCH\",\"id\":\"gain-1\"},\"balance\":{\"balance\":110},\"timestamp\":\"2026-03-27T06:00:00Z\"}}"
+        }
+    })
+    .to_string();
+    assert_eq!(
+        parse_message(&raw, &[]).unwrap(),
+        Some(MinerEvent::PointsEarned {
+            channel_id: String::from("100"),
+            earned: 10,
+            reason: String::from("WATCH"),
+            balance: 110,
+            source_id: Some(String::from("timestamp:2026-03-27T06:00:00Z:10:110:WATCH")),
+        })
+    );
+
+    let raw = json!({
+        "type": "MESSAGE",
+        "data": {
+            "topic": "community-points-user-v1.viewer",
+            "message": "{\"type\":\"points-earned\",\"data\":{\"channel_id\":\"100\",\"point_gain\":{\"total_points\":10,\"reason_code\":\"WATCH\"},\"balance\":{\"balance\":110},\"timestamp\":\"2026-03-27T06:00:00Z\"}}"
+        }
+    })
+    .to_string();
+    assert_eq!(
+        parse_message(&raw, &[]).unwrap(),
+        Some(MinerEvent::PointsEarned {
+            channel_id: String::from("100"),
+            earned: 10,
+            reason: String::from("WATCH"),
+            balance: 110,
+            source_id: Some(String::from("timestamp:2026-03-27T06:00:00Z:10:110:WATCH",)),
+        })
+    );
+}
+
+#[test]
+fn points_earned_does_not_use_unvalidated_generic_ids() {
+    let raw = json!({
+        "type": "MESSAGE",
+        "data": {
+            "topic": "community-points-user-v1.viewer",
+            "id": "subscription-id",
+            "message": "{\"type\":\"points-earned\",\"data\":{\"channel_id\":\"100\",\"point_gain\":{\"total_points\":10,\"reason_code\":\"WATCH\"},\"balance\":{\"balance\":110},\"timestamp\":\"not-a-timestamp\"}}"
+        }
+    })
+    .to_string();
+    assert_eq!(
+        parse_message(&raw, &[]).unwrap(),
+        Some(MinerEvent::PointsEarned {
+            channel_id: String::from("100"),
+            earned: 10,
+            reason: String::from("WATCH"),
+            balance: 110,
+            source_id: None,
         })
     );
 }

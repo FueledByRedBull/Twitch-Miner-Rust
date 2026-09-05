@@ -17,7 +17,7 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/FueledByRedBull/Twitch-Miner-Rust"
 rust-version = "1.94"
-version = "0.1.0"
+version = "0.2.0"
 
 [workspace.dependencies]
 anyhow = "1.0.103"

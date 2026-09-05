@@ -1,0 +1,126 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release:
+    runs-on: windows-2025
+    env:
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: windows-release
+          save-if: false
+      - name: Install pinned WiX toolset
+        shell: pwsh
+        run: |
+          dotnet tool install wix --tool-path "$env:RUNNER_TEMP/wix" --version 4.0.6 --no-cache --allow-roll-forward
+          if (-not (Test-Path -LiteralPath "$env:RUNNER_TEMP/wix/wix.exe" -PathType Leaf)) {
+            throw 'Pinned WiX tool was not installed.'
+          }
+          $version = (& "$env:RUNNER_TEMP/wix/wix.exe" --version 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '4\.0\.6') {
+            throw "Unexpected WiX version: $version"
+          }
+      - name: Build portable executable and MSI
+        shell: pwsh
+        run: ./scripts/build-windows-release.ps1 -WixPath "$env:RUNNER_TEMP/wix/wix.exe"
+      - id: package
+        name: Verify package contents and MSI executable bytes
+        shell: pwsh
+        run: |
+          $metadata = (cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json)
+          $app = @($metadata.packages | Where-Object { $_.name -eq 'tm-app' })
+          if ($app.Count -ne 1 -or $app[0].version -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Unable to determine the current tm-app package version.'
+          }
+          $base = "twitch-miner-$($app[0].version)-windows-x86_64"
+          "base=$base" >> $env:GITHUB_OUTPUT
+          "version=$($app[0].version)" >> $env:GITHUB_OUTPUT
+          $zip = @(Get-Item "target/windows-release/$base.zip")
+          $msi = @(Get-Item "target/windows-release/$base.msi")
+          if ($zip.Count -ne 1 -or $msi.Count -ne 1) {
+            throw "Windows release must produce exactly one ZIP and one MSI for $base."
+          }
+          $zipRoot = Join-Path $env:RUNNER_TEMP 'portable-extract'
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $zipRoot -Force
+          $zipExe = @(Get-ChildItem -LiteralPath $zipRoot -Filter twitch-miner.exe -Recurse -File)
+          $builtExe = (Resolve-Path target/x86_64-pc-windows-msvc/release/tm-app.exe).Path
+          if ($zipExe.Count -ne 1 -or
+              (Get-FileHash $zipExe[0].FullName -Algorithm SHA256).Hash -ne
+              (Get-FileHash $builtExe -Algorithm SHA256).Hash) {
+            throw 'Portable ZIP executable bytes do not match the release build.'
+          }
+          $version = & $zipExe[0].FullName --version 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '${{ github.sha }}') {
+            throw "Portable Windows executable revision smoke test failed: $($version -join ' ')"
+          }
+          $msiRoot = Join-Path $env:RUNNER_TEMP 'msi-admin-extract'
+          New-Item -ItemType Directory -Path $msiRoot -Force | Out-Null
+          $msiLog = Join-Path $env:RUNNER_TEMP 'msi-admin-extract.log'
+          $process = Start-Process msiexec.exe -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
+            '/a', "`"$($msi[0].FullName)`"", "TARGETDIR=`"$msiRoot`"", '/qn', '/norestart', '/l*v', "`"$msiLog`""
+          )
+          if ($process.ExitCode -ne 0) {
+            throw "MSI administrative extraction failed with exit code $($process.ExitCode)."
+          }
+          $msiExe = @(Get-ChildItem -LiteralPath $msiRoot -Filter twitch-miner.exe -Recurse -File)
+          if ($msiExe.Count -ne 1 -or
+              (Get-FileHash $msiExe[0].FullName -Algorithm SHA256).Hash -ne
+              (Get-FileHash $builtExe -Algorithm SHA256).Hash) {
+            throw 'MSI executable bytes do not match the release build.'
+          }
+      - name: Install and uninstall MSI on the hosted runner
+        shell: pwsh
+        run: |
+          ./scripts/verify-windows-installer.ps1 `
+            -MsiPath "target/windows-release/${{ steps.package.outputs.base }}.msi" `
+            -BuiltBinaryPath 'target/x86_64-pc-windows-msvc/release/tm-app.exe' `
+            -ExpectedVersion '${{ steps.package.outputs.version }}' `
+            -ExpectedRevision '${{ github.sha }}'
+      - name: Smoke test explicit user-writable data directory
+        shell: pwsh
+        run: |
+          $zip = @(Get-Item "target/windows-release/${{ steps.package.outputs.base }}.zip")
+          $root = Join-Path $env:RUNNER_TEMP 'portable-cli'
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $root -Force
+          $exe = @(Get-ChildItem -LiteralPath $root -Filter twitch-miner.exe -Recurse -File)
+          if ($exe.Count -ne 1) {
+            throw 'Portable executable was not found after extraction.'
+          }
+          $data = Join-Path $env:RUNNER_TEMP 'TwitchMinerData'
+          New-Item -ItemType Directory -Path $data -Force | Out-Null
+          Copy-Item config.example.json (Join-Path $data 'config.json')
+          $check = & $exe[0].FullName --data-dir $data --check-config --json 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($check -join "`n") -notmatch '"valid"\s*:\s*true') {
+            throw "Explicit user data directory config smoke test failed: $($check -join ' ')"
+          }
+      - id: artifact_metadata
+        name: Determine safe artifact name
+        shell: pwsh
+        run: |
+          "name=windows-release-$env:GITHUB_SHA" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.artifact_metadata.outputs.name }}
+          path: |
+            target/windows-release/${{ steps.package.outputs.base }}.zip
+            target/windows-release/${{ steps.package.outputs.base }}.zip.sha256
+            target/windows-release/${{ steps.package.outputs.base }}.msi
+            target/windows-release/${{ steps.package.outputs.base }}.msi.sha256
+          if-no-files-found: error

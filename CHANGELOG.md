@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-09-05
+
+- Hardens EventSub capacity recovery and verifies inherited reconnect
+  subscriptions by channel conditions and unique subscription identities.
+- Preserves spare-slot rotation across campaign changes, separates metadata
+  refresh from watch requests, and exposes per-channel watch health and
+  confirmed progress observations.
+- Guards asynchronous context and broadcast updates against stale responses,
+  retains nonadjacent point-event replay identities, and separates bounded
+  prediction evaluation from ordinary PubSub effects.
+- Persists prediction placement decisions before sending mutations, restores
+  unresolved decisions after restart, and handles reordered confirmations.
+- Adds a bounded, freshly verified startup identity cache and an offline Hermes
+  replay adapter; Hermes does not have live transport or mutation authority.
+- Adds Windows portable ZIP and MSI packaging and strengthens immutable image
+  verification, deployment pinning, and evidence-gated release promotion.
+- Records the audit findings and verification boundaries in
+  `docs/audit-review-2026-09-05.md`.
 
 - Reconciles unresolved streak state once after a confirmed bonus claim and
   once after accepted offline-recovery playback settles, using Twitch's typed

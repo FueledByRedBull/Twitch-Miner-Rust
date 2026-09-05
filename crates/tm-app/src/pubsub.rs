@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tm_domain::Streamer;
@@ -7,17 +7,36 @@ use tm_observability::{event_from_gain_reason, Event as DiscordEvent};
 use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
 
 use crate::observability::AppObservability;
-use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
+use crate::prediction_journal::PredictionPlacementJournal;
+use crate::runtime_effects::{reconcile_prediction_journal, RuntimeEffectContext};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
 enum SupervisedPubSubEvent {
+    #[cfg(test)]
     Transport(PubSubConnectionEvent),
+    TransportReceived {
+        event: PubSubConnectionEvent,
+        received_at: Instant,
+    },
     ConnectionLost {
         acknowledged_by_class: HashMap<String, usize>,
         configured_classes: Vec<String>,
         failure_class: &'static str,
     },
+}
+
+struct QueuedRuntimeEffects {
+    enqueued_at: Instant,
+    effects: Vec<tm_runtime::RuntimeEffect>,
+}
+
+struct PubSubEventContext {
+    runtime: tm_runtime::RuntimeHandle,
+    observability: AppObservability,
+    health: HealthTracker,
+    journal: PredictionPlacementJournal,
+    account_id: String,
 }
 
 pub(crate) struct PubSubTaskContext {
@@ -35,6 +54,8 @@ pub(crate) fn spawn_pubsub_loop(
     tokio::spawn(async move {
         let (sender, receiver) = tokio::sync::mpsc::channel(128);
         let (effect_sender, effect_receiver) = tokio::sync::mpsc::channel(128);
+        let (prediction_effect_sender, prediction_effect_receiver) =
+            tokio::sync::mpsc::channel(128);
         let topic_batches = match build_topic_batches(&context.user_id, &context.tracked_streamers)
         {
             Ok(batches) => batches,
@@ -59,15 +80,32 @@ pub(crate) fn spawn_pubsub_loop(
             .effects
             .health
             .record_pubsub_setup(tm_pubsub::pubsub_setup_report(&topic_batches));
-        let effect_task = spawn_pubsub_effect_task(context.effects.clone(), effect_receiver);
+        let effect_task =
+            spawn_pubsub_effect_task(stop.clone(), context.effects.clone(), effect_receiver);
+        let prediction_effect_task = spawn_pubsub_prediction_effect_task(
+            stop.clone(),
+            context.effects.clone(),
+            prediction_effect_receiver,
+        );
+        let event_context = PubSubEventContext {
+            runtime: context.effects.runtime.clone(),
+            observability: context.effects.observability.clone(),
+            health: context.effects.health.clone(),
+            journal: context.effects.prediction_journal.clone(),
+            account_id: context.effects.persistent_user_id.clone(),
+        };
         let event_task = spawn_pubsub_event_task(
             stop.clone(),
-            context.effects.runtime.clone(),
-            context.effects.observability.clone(),
+            event_context,
             receiver,
             effect_sender.clone(),
-            context.effects.health.clone(),
+            prediction_effect_sender.clone(),
         );
+        let mut children = crate::shutdown::AbortTasksOnDrop(vec![
+            effect_task.abort_handle(),
+            prediction_effect_task.abort_handle(),
+            event_task.abort_handle(),
+        ]);
 
         let mut connections = Vec::with_capacity(topic_batches.len());
         for (index, topics) in topic_batches.into_iter().enumerate() {
@@ -81,6 +119,11 @@ pub(crate) fn spawn_pubsub_loop(
                 connection_index: index + 1,
             }));
         }
+        children.0.extend(
+            connections
+                .iter()
+                .map(tokio::task::JoinHandle::abort_handle),
+        );
 
         for connection in connections {
             let _ = connection.await;
@@ -88,19 +131,59 @@ pub(crate) fn spawn_pubsub_loop(
 
         drop(sender);
         drop(effect_sender);
+        drop(prediction_effect_sender);
         let _ = event_task.await;
         let _ = effect_task.await;
+        let _ = prediction_effect_task.await;
     })
 }
 
 fn spawn_pubsub_effect_task(
+    stop: tokio::sync::watch::Receiver<bool>,
     context: RuntimeEffectContext,
-    mut receiver: tokio::sync::mpsc::Receiver<Vec<tm_runtime::RuntimeEffect>>,
+    mut receiver: tokio::sync::mpsc::Receiver<QueuedRuntimeEffects>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(effects) = receiver.recv().await {
-            if let Err(error) = execute_runtime_effects(&context, effects).await {
-                tracing::warn!(task = "pubsub", error_class = "runtime-effect", %error, "runtime effect execution failed");
+        while let Some(queued) = receiver.recv().await {
+            for effect in queued.effects {
+                if *stop.borrow() || stop.has_changed().is_err() {
+                    return;
+                }
+                context
+                    .runtime
+                    .metrics_handle()
+                    .record_effect_queue_latency(queued.enqueued_at.elapsed());
+                if let Err(error) =
+                    crate::runtime_effects::execute_runtime_effect(&context, effect).await
+                {
+                    tracing::warn!(task = "pubsub", error_class = "runtime-effect", %error, "runtime effect execution failed");
+                }
+            }
+        }
+    })
+}
+
+fn spawn_pubsub_prediction_effect_task(
+    stop: tokio::sync::watch::Receiver<bool>,
+    context: RuntimeEffectContext,
+    mut receiver: tokio::sync::mpsc::Receiver<QueuedRuntimeEffects>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(queued) = receiver.recv().await {
+            for effect in queued.effects {
+                if *stop.borrow() || stop.has_changed().is_err() {
+                    return;
+                }
+                let tm_runtime::RuntimeEffect::EvaluatePrediction { event_id } = effect else {
+                    continue;
+                };
+                if let Err(error) = context
+                    .enqueue_prediction_evaluation_at(event_id, queued.enqueued_at)
+                    .await
+                {
+                    tracing::warn!(task = "pubsub", error_class = "prediction-scheduler", %error, "prediction evaluation scheduling failed");
+                    return;
+                }
             }
         }
     })
@@ -108,15 +191,18 @@ fn spawn_pubsub_effect_task(
 
 fn spawn_pubsub_event_task(
     mut stop: tokio::sync::watch::Receiver<bool>,
-    runtime: tm_runtime::RuntimeHandle,
-    observability: AppObservability,
+    context: PubSubEventContext,
     mut receiver: tokio::sync::mpsc::Receiver<SupervisedPubSubEvent>,
-    effect_sender: tokio::sync::mpsc::Sender<Vec<tm_runtime::RuntimeEffect>>,
-    health: HealthTracker,
+    effect_sender: tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
+    prediction_effect_sender: tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            if *stop.borrow() || stop.has_changed().is_err() {
+                break;
+            }
             tokio::select! {
+                biased;
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() {
                         break;
@@ -126,7 +212,13 @@ fn spawn_pubsub_event_task(
                     let Some(message) = message else {
                         break;
                     };
-                    if handle_pubsub_message(&runtime, &observability, &effect_sender, &health, message).await {
+                    if handle_pubsub_message_with_lanes(
+                        &context,
+                        &effect_sender,
+                        &prediction_effect_sender,
+                        message,
+                        Some(&mut stop),
+                    ).await {
                         break;
                     }
                 }
@@ -135,23 +227,43 @@ fn spawn_pubsub_event_task(
     })
 }
 
+#[cfg(test)]
 async fn handle_pubsub_message(
     runtime: &tm_runtime::RuntimeHandle,
     observability: &AppObservability,
-    effect_sender: &tokio::sync::mpsc::Sender<Vec<tm_runtime::RuntimeEffect>>,
+    effect_sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
     health: &HealthTracker,
     message: SupervisedPubSubEvent,
 ) -> bool {
-    let message = match message {
-        SupervisedPubSubEvent::Transport(message) => message,
+    let context = PubSubEventContext {
+        runtime: runtime.clone(),
+        observability: observability.clone(),
+        health: health.clone(),
+        journal: PredictionPlacementJournal::memory(),
+        account_id: String::from("test-account"),
+    };
+    handle_pubsub_message_with_lanes(&context, effect_sender, effect_sender, message, None).await
+}
+
+async fn handle_pubsub_message_with_lanes(
+    context: &PubSubEventContext,
+    effect_sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
+    prediction_effect_sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
+    message: SupervisedPubSubEvent,
+    mut stop: Option<&mut tokio::sync::watch::Receiver<bool>>,
+) -> bool {
+    let (message, received_at) = match message {
+        #[cfg(test)]
+        SupervisedPubSubEvent::Transport(message) => (message, Instant::now()),
+        SupervisedPubSubEvent::TransportReceived { event, received_at } => (event, received_at),
         SupervisedPubSubEvent::ConnectionLost {
             acknowledged_by_class,
             configured_classes,
             failure_class,
         } => {
-            health.failure("pubsub", failure_class);
+            context.health.failure("pubsub", failure_class);
             for topic_class in configured_classes {
-                health.record_pubsub_disconnect(
+                context.health.record_pubsub_disconnect(
                     &topic_class,
                     acknowledged_by_class
                         .get(&topic_class)
@@ -165,53 +277,32 @@ async fn handle_pubsub_message(
     };
     match message {
         PubSubConnectionEvent::Heartbeat => {
-            if health.pubsub_ready() {
-                health.success("pubsub");
+            if context.health.pubsub_ready() {
+                context.health.success("pubsub");
             }
         }
         PubSubConnectionEvent::ListenAcknowledged { topic_class } => {
-            if health.record_pubsub_acknowledgement(&topic_class) {
-                health.success("pubsub");
+            if context.health.record_pubsub_acknowledgement(&topic_class) {
+                context.health.success("pubsub");
             }
         }
         PubSubConnectionEvent::Event(event) => {
-            health.record_pubsub_message(pubsub_event_topic_class(&event));
-            let log_event = (*event).clone();
-            let received_at = std::time::Instant::now();
-            match runtime.apply_event_with_outcome(*event, time_now()).await {
-                Ok(application) => {
-                    runtime
-                        .metrics_handle()
-                        .record_transport_latency(received_at.elapsed());
-                    if health.pubsub_ready() {
-                        health.success("pubsub");
-                    }
-                    if application.changed {
-                        if let Err(error) =
-                            log_pubsub_event(runtime, observability, &log_event).await
-                        {
-                            tracing::warn!(task = "pubsub", error_class = "log-handling", %error, "pubsub log handling failed");
-                        }
-                    }
-                    if effect_sender.send(application.effects).await.is_err() {
-                        tracing::warn!(
-                            task = "pubsub",
-                            error_class = "effect-queue-closed",
-                            "pubsub runtime effect queue closed unexpectedly"
-                        );
-                        return true;
-                    }
-                }
-                Err(error) => {
-                    health.failure("pubsub", "event-application");
-                    tracing::warn!(task = "pubsub", error_class = "event-application", %error, "pubsub event application failed");
-                }
-            }
+            return handle_pubsub_event(
+                context,
+                effect_sender,
+                prediction_effect_sender,
+                &mut stop,
+                event,
+                received_at,
+            )
+            .await;
         }
         PubSubConnectionEvent::ResponseError { nonce, topic_class } => {
-            health.failure("pubsub", "response");
+            context.health.failure("pubsub", "response");
             if let Some(topic_class) = topic_class.as_deref() {
-                health.record_pubsub_failure(topic_class, "listen-rejected");
+                context
+                    .health
+                    .record_pubsub_failure(topic_class, "listen-rejected");
             }
             tracing::warn!(
                 task = "pubsub",
@@ -222,6 +313,136 @@ async fn handle_pubsub_message(
         }
     }
     false
+}
+
+async fn handle_pubsub_event(
+    context: &PubSubEventContext,
+    effect_sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
+    prediction_effect_sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
+    stop: &mut Option<&mut tokio::sync::watch::Receiver<bool>>,
+    event: Box<tm_domain::MinerEvent>,
+    received_at: Instant,
+) -> bool {
+    context
+        .health
+        .record_pubsub_message(pubsub_event_topic_class(&event));
+    let log_event = (*event).clone();
+    match context
+        .runtime
+        .apply_event_with_outcome(*event, time_now())
+        .await
+    {
+        Ok(application) => {
+            context
+                .runtime
+                .metrics_handle()
+                .record_transport_latency(received_at.elapsed());
+            if context.health.pubsub_ready() {
+                context.health.success("pubsub");
+            }
+            if application.changed {
+                if let Err(error) =
+                    log_pubsub_event(&context.runtime, &context.observability, &log_event).await
+                {
+                    tracing::warn!(task = "pubsub", error_class = "log-handling", %error, "pubsub log handling failed");
+                }
+            }
+            if let Err(error) = reconcile_prediction_journal(
+                &context.runtime,
+                &context.journal,
+                &context.account_id,
+                &log_event,
+            )
+            .await
+            {
+                tracing::warn!(
+                    task = "pubsub",
+                    error_class = "prediction-journal",
+                    %error,
+                    "failed to reconcile prediction placement journal"
+                );
+            }
+            let (prediction_effects, ordinary_effects) = split_runtime_effects(application.effects);
+            if !prediction_effects.is_empty()
+                && send_queued_effect(
+                    stop,
+                    prediction_effect_sender,
+                    QueuedRuntimeEffects {
+                        enqueued_at: Instant::now(),
+                        effects: prediction_effects,
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    task = "pubsub",
+                    error_class = "effect-queue-closed",
+                    lane = "prediction",
+                    "pubsub prediction effect queue closed unexpectedly"
+                );
+                return true;
+            }
+            if !ordinary_effects.is_empty()
+                && send_queued_effect(
+                    stop,
+                    effect_sender,
+                    QueuedRuntimeEffects {
+                        enqueued_at: Instant::now(),
+                        effects: ordinary_effects,
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    task = "pubsub",
+                    error_class = "effect-queue-closed",
+                    lane = "ordinary",
+                    "pubsub runtime effect queue closed unexpectedly"
+                );
+                return true;
+            }
+        }
+        Err(error) => {
+            context.health.failure("pubsub", "event-application");
+            tracing::warn!(task = "pubsub", error_class = "event-application", %error, "pubsub event application failed");
+        }
+    }
+    false
+}
+
+async fn send_queued_effect(
+    stop: &mut Option<&mut tokio::sync::watch::Receiver<bool>>,
+    sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
+    queued: QueuedRuntimeEffects,
+) -> bool {
+    let Some(stop) = stop.as_deref_mut() else {
+        return sender.send(queued).await.is_err();
+    };
+    tokio::select! {
+        changed = stop.changed() => changed.is_err() || *stop.borrow(),
+        result = sender.send(queued) => result.is_err(),
+    }
+}
+
+fn split_runtime_effects(
+    effects: Vec<tm_runtime::RuntimeEffect>,
+) -> (
+    Vec<tm_runtime::RuntimeEffect>,
+    Vec<tm_runtime::RuntimeEffect>,
+) {
+    let mut prediction_effects = Vec::new();
+    let mut ordinary_effects = Vec::new();
+    for effect in effects {
+        if matches!(
+            &effect,
+            tm_runtime::RuntimeEffect::EvaluatePrediction { .. }
+        ) {
+            prediction_effects.push(effect);
+        } else {
+            ordinary_effects.push(effect);
+        }
+    }
+    (prediction_effects, ordinary_effects)
 }
 
 fn pubsub_event_topic_class(event: &tm_domain::MinerEvent) -> &'static str {
@@ -305,6 +526,10 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
                         .await
                 }
             });
+            let _children = crate::shutdown::AbortTasksOnDrop(vec![
+                connect.abort_handle(),
+                forwarder.abort_handle(),
+            ]);
             tokio::pin!(connect);
 
             let should_stop = tokio::select! {
@@ -368,13 +593,17 @@ fn spawn_pubsub_forwarder(
     tokio::spawn(async move {
         let mut acknowledged_by_class = HashMap::<String, usize>::new();
         while let Some(message) = receiver.recv().await {
+            let received_at = Instant::now();
             if let PubSubConnectionEvent::ListenAcknowledged { topic_class } = &message {
                 *acknowledged_by_class
                     .entry(topic_class.clone())
                     .or_default() += 1;
             }
             if sender
-                .send(SupervisedPubSubEvent::Transport(message))
+                .send(SupervisedPubSubEvent::TransportReceived {
+                    event: message,
+                    received_at,
+                })
                 .await
                 .is_err()
             {
@@ -550,7 +779,7 @@ pub(crate) async fn log_pubsub_event(
             let message = observability.points_earned_message(streamer, *earned, reason);
             tracing::info!(operation = "on_message", "{message}");
             if let Some(event) = event_from_gain_reason(reason) {
-                observability.send_event(event, &message).await;
+                observability.spawn_event(event, message);
             }
         }
         tm_domain::MinerEvent::Playback { channel_id, kind } => {
@@ -566,16 +795,12 @@ pub(crate) async fn log_pubsub_event(
                 tm_pubsub::PlaybackType::StreamUp => {
                     let message = observability.online_message(streamer);
                     tracing::info!(operation = "set_online", "{message}");
-                    observability
-                        .send_event(DiscordEvent::StreamerOnline, &message)
-                        .await;
+                    observability.spawn_event(DiscordEvent::StreamerOnline, message);
                 }
                 tm_pubsub::PlaybackType::StreamDown => {
                     let message = observability.offline_message(streamer);
                     tracing::info!(operation = "set_offline", "{message}");
-                    observability
-                        .send_event(DiscordEvent::StreamerOffline, &message)
-                        .await;
+                    observability.spawn_event(DiscordEvent::StreamerOffline, message);
                 }
                 tm_pubsub::PlaybackType::Viewcount => {}
             }
@@ -590,12 +815,14 @@ pub(crate) async fn log_pubsub_event(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{
         classify_pubsub_connection_result, configured_pubsub_classes, failed_pubsub_setup_report,
-        handle_pubsub_message, pubsub_error_class, pubsub_event_topic_class, spawn_pubsub_loop,
-        PubSubConnectionOutcome, PubSubTaskContext, SupervisedPubSubEvent,
+        handle_pubsub_message, pubsub_error_class, pubsub_event_topic_class,
+        spawn_pubsub_event_task, spawn_pubsub_loop, PredictionPlacementJournal,
+        PubSubConnectionOutcome, PubSubEventContext, PubSubTaskContext, QueuedRuntimeEffects,
+        SupervisedPubSubEvent,
     };
     use tm_pubsub::{
         CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind, PredictionUserKind,
@@ -637,6 +864,29 @@ mod tests {
             test_observability(),
             health.clone(),
         )
+    }
+
+    #[tokio::test]
+    async fn stopped_effect_worker_discards_queued_mutations() {
+        let runtime = test_runtime();
+        let context = test_effects(runtime.clone(), &HealthTracker::default());
+        let (_stop_tx, stop) = tokio::sync::watch::channel(true);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(QueuedRuntimeEffects {
+                enqueued_at: Instant::now(),
+                effects: vec![tm_runtime::RuntimeEffect::ClaimBonus {
+                    channel_id: String::from("channel"),
+                    claim_id: String::from("claim"),
+                }],
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        super::spawn_pubsub_effect_task(stop, context, receiver)
+            .await
+            .unwrap();
+        assert_eq!(runtime.metrics_handle().snapshot().effects_started, 0);
     }
 
     fn error_cases() -> Vec<(tm_pubsub::PubSubError, &'static str)> {
@@ -749,6 +999,7 @@ mod tests {
                     earned: 1,
                     reason: String::from("watch"),
                     balance: 2,
+                    source_id: None,
                 },
                 "points-user",
             ),
@@ -1009,7 +1260,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heartbeat_only_marks_ready_pubsub_healthy_and_closed_effect_queue_stops_task() {
+    async fn heartbeat_marks_ready_and_empty_effects_do_not_touch_closed_queues() {
         let runtime = test_runtime();
         let observability = test_observability();
         let health = HealthTracker::default();
@@ -1042,7 +1293,7 @@ mod tests {
         assert_eq!(health.task_consecutive_failures("pubsub"), Some(0));
 
         assert!(
-            handle_pubsub_message(
+            !handle_pubsub_message(
                 &runtime,
                 &observability,
                 &effect_sender,
@@ -1098,5 +1349,99 @@ mod tests {
                 .as_deref(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn closed_nonempty_effect_queue_stops_event_processing() {
+        let config = tm_config::ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..tm_config::ConfigFile::default()
+        };
+        let mut state =
+            tm_runtime::RuntimeState::from_config(&config, tm_domain::OffsetDateTime::UNIX_EPOCH);
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points_enabled = Some(true);
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let observability = test_observability();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        let (effect_sender, effect_receiver) = tokio::sync::mpsc::channel(1);
+        drop(effect_receiver);
+
+        assert!(
+            handle_pubsub_message(
+                &runtime,
+                &observability,
+                &effect_sender,
+                &health,
+                SupervisedPubSubEvent::Transport(tm_pubsub::PubSubConnectionEvent::Event(
+                    Box::new(MinerEvent::ClaimAvailable {
+                        channel_id: String::from("100"),
+                        claim_id: String::from("claim"),
+                    }),
+                )),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn full_effect_queue_can_be_stopped_without_waiting_for_capacity() {
+        let config = tm_config::ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..tm_config::ConfigFile::default()
+        };
+        let mut state =
+            tm_runtime::RuntimeState::from_config(&config, tm_domain::OffsetDateTime::UNIX_EPOCH);
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points_enabled = Some(true);
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let observability = test_observability();
+        let health = HealthTracker::default();
+        health.register("pubsub", Duration::from_secs(60));
+        let (effect_sender, mut effect_receiver) = tokio::sync::mpsc::channel(1);
+        effect_sender
+            .send(QueuedRuntimeEffects {
+                enqueued_at: Instant::now(),
+                effects: vec![tm_runtime::RuntimeEffect::ClaimBonus {
+                    channel_id: String::from("100"),
+                    claim_id: String::from("already-queued"),
+                }],
+            })
+            .await
+            .unwrap();
+        let (prediction_sender, _prediction_receiver) = tokio::sync::mpsc::channel(1);
+        let (event_sender, event_receiver) = tokio::sync::mpsc::channel(1);
+        let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+        let event_context = PubSubEventContext {
+            runtime: runtime.clone(),
+            observability,
+            health,
+            journal: PredictionPlacementJournal::memory(),
+            account_id: String::from("test-account"),
+        };
+        let task = spawn_pubsub_event_task(
+            stop_receiver,
+            event_context,
+            event_receiver,
+            effect_sender,
+            prediction_sender,
+        );
+        event_sender
+            .send(SupervisedPubSubEvent::Transport(
+                tm_pubsub::PubSubConnectionEvent::Event(Box::new(MinerEvent::ClaimAvailable {
+                    channel_id: String::from("100"),
+                    claim_id: String::from("blocked"),
+                })),
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        stop_sender.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("full effect queue must observe shutdown")
+            .expect("event task must shut down cleanly");
+        assert!(effect_receiver.try_recv().is_ok());
     }
 }
