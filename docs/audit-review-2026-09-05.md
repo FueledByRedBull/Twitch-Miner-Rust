@@ -106,6 +106,24 @@ example configuration. These development checks were followed by the clean-sourc
 package and CI checks linked from the pull request; they do not constitute live
 release acceptance.
 
+Clean Windows packages were built from
+`5fce110bc6d7ba2edb4706d2dcc3664a7a3a891f`. WiX validation passed; administrative
+MSI extraction and ZIP extraction produced executables identical to the release
+binary by SHA-256. Each extracted executable passed version/revision and example
+configuration checks. The executable was 7,411,712 bytes, compared with the
+7,008,256-byte baseline. In 31 alternating warm `--version` samples, baseline
+and candidate medians were 15.5127 and 15.2311 milliseconds respectively. This
+desktop measurement does not demonstrate a meaningful startup improvement or
+mining throughput change.
+
+The same source bundle was extracted and built with `cargo run --release
+--locked --offline`; its executable reported the recorded 0.2.0 revision.
+The first CI pass also completed native AMD64/ARM64 builds, reproducibility,
+Windows install/uninstall, fuzzing, and both coverage floors. It exposed a Linux
+temporary-directory assumption and an exact SPDX predicate mismatch; these were
+corrected before rerunning the pipelines. The actual signed SPDX 2.3 subject was
+independently verified with GitHub CLI.
+
 ## Finding dispositions
 
 These rows record the disposition of each supplied finding. Test and package

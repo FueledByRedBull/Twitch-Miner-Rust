@@ -169,7 +169,7 @@ if (-not $?) {
 }
 
 & "$PSScriptRoot/verify-release-evidence.ps1" `
-    -EvidencePath (Join-Path $env:TEMP 'release-evidence-validation.json') `
+    -EvidencePath (Join-Path ([System.IO.Path]::GetTempPath()) 'release-evidence-validation.json') `
     -ExpectedRevision ('c' * 40) `
     -ExpectedDigest "sha256:$candidateDigest" `
     -ValidateOnly

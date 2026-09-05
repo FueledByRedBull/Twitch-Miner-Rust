@@ -74,6 +74,19 @@ Keep that checksum in the release record and store the bundle outside the
 repository. The bundle excludes working-tree edits and contains no runtime
 configuration, cookies, logs, or credentials.
 
+After verifying the checksum and extracting the bundle, build from its root with
+the pinned Rust toolchain and native compiler already installed. Preserve the
+recorded revision in the executable:
+
+```powershell
+$env:BUILD_REVISION = (Get-Content SOURCE_REVISION -Raw).Trim()
+cargo build --release --locked --offline -p tm-app
+```
+
+The bundle supplies Cargo sources, not the Rust toolchain or operating-system
+build tools. Windows portable distribution still requires the static-CRT flags
+and import verification used by `build-windows-release.ps1`.
+
 Maintainers can exercise the complete procedure without retaining the generated
 archive by adding `-ValidateOnly`; that mode is restricted to output under
 `target/`.

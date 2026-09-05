@@ -90,6 +90,7 @@ foreach ($platform in @('linux/amd64', 'linux/arm64')) {
         throw "Published manifest ${ImageReference} has no child image for $platform."
     }
     $descriptor = $descriptor[0]
+    $platformReference = "$imageName@$($descriptor.digest)"
 
     $attestations = @($index.manifests | Where-Object {
             $_.platform.os -eq 'unknown' -and
@@ -147,7 +148,6 @@ foreach ($platform in @('linux/amd64', 'linux/arm64')) {
     }
 
     if ($VerifyAttestations) {
-        $platformReference = "$imageName@$($descriptor.digest)"
         if ([string]::IsNullOrWhiteSpace($Repository)) {
             throw 'Repository is required when verifying signed attestations.'
         }
@@ -226,9 +226,9 @@ foreach ($platform in @('linux/amd64', 'linux/arm64')) {
             }
         }
 
-        $verifiedSbomAttestations = Invoke-GhAttestation 'https://spdx.dev/Document'
+        $verifiedSbomAttestations = Invoke-GhAttestation 'https://spdx.dev/Document/v2.3'
         $matchingSbom = @($verifiedSbomAttestations | Where-Object {
-                $_.verificationResult.statement.predicateType -eq 'https://spdx.dev/Document' -and
+                $_.verificationResult.statement.predicateType -eq 'https://spdx.dev/Document/v2.3' -and
                 @($_.verificationResult.statement.subject | Where-Object {
                         $_.digest.sha256 -eq $subjectDigest
                     }).Count -gt 0
@@ -238,13 +238,13 @@ foreach ($platform in @('linux/amd64', 'linux/arm64')) {
         }
         foreach ($sbomAttestation in $matchingSbom) {
             $sbom = $sbomAttestation.verificationResult.statement.predicate
-            if ($sbom.spdxVersion -notmatch '^SPDX-' -or @($sbom.packages).Count -eq 0) {
+            if ($sbom.spdxVersion -notmatch '^SPDX-' -or
+                @($sbom.packages | Where-Object { $_.name -and $_.SPDXID }).Count -eq 0) {
                 throw "Signed SBOM for ${platform} did not contain a package inventory."
             }
         }
     }
 
-    $platformReference = "$imageName@$($descriptor.digest)"
     $help = docker run --rm --platform $platform $platformReference --help 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Published manifest smoke test failed for ${platform}: $($help -join ' ')"

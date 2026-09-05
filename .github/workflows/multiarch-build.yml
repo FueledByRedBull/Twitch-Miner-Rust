@@ -139,7 +139,8 @@ jobs:
           } catch {
             throw 'BuildKit returned an invalid SPDX SBOM document.'
           }
-          if ($document.spdxVersion -notmatch '^SPDX-' -or @($document.packages).Count -eq 0) {
+          if ($document.spdxVersion -notmatch '^SPDX-' -or
+              @($document.packages | Where-Object { $_.name -and $_.SPDXID }).Count -eq 0) {
             throw 'BuildKit returned an incomplete SPDX SBOM document.'
           }
           [System.IO.File]::WriteAllText(
