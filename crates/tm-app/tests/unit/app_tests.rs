@@ -924,11 +924,11 @@ mod tests {
 
     #[test]
     fn observability_presence_messages_include_privacy_safe_streak_context() {
-        let visible = AppObservability::new(
-            None,
-            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            AppObservabilitySettings::default(),
-        );
+        let config = ConfigFile {
+            timezone: Some(String::from("Europe/Athens")),
+            ..ConfigFile::default()
+        };
+        let visible = crate::observability::build_observability(&config).unwrap();
         let private = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
@@ -959,9 +959,9 @@ mod tests {
         for expected in [
             "streak missing false",
             "streak length 7",
-            &format!("expires at {expires_at}"),
-            &format!("observed online at {observed_online_at}"),
-            &format!("streak resolved at {resolved_at}"),
+            "expires at 1970-01-01 02:06:40 +02:00",
+            "observed online at 1970-01-01 02:01:40 +02:00",
+            "streak resolved at 1970-01-01 02:03:20 +02:00",
         ] {
             assert!(online.contains(expected));
             assert!(offline.contains(expected));
@@ -972,6 +972,7 @@ mod tests {
         for hidden in [expires_at, observed_online_at, resolved_at] {
             assert!(!anonymized.contains(&hidden.to_string()));
         }
+        assert!(!anonymized.contains(" at "));
     }
 
     #[test]
@@ -1098,6 +1099,7 @@ mod tests {
                 emoji: true,
                 show_claimed_bonus: true,
                 show_game: true,
+                timezone: Some(chrono_tz::Europe::Athens),
             },
         );
         let streamer = Streamer {

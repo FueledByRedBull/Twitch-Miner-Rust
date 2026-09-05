@@ -22,6 +22,7 @@ pub(crate) struct AppObservability {
     pub(crate) emoji: bool,
     pub(crate) show_claimed_bonus: bool,
     show_game: bool,
+    timezone: Option<chrono_tz::Tz>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -33,6 +34,7 @@ pub(crate) struct AppObservabilitySettings {
     pub(crate) emoji: bool,
     pub(crate) show_claimed_bonus: bool,
     pub(crate) show_game: bool,
+    pub(crate) timezone: Option<chrono_tz::Tz>,
 }
 
 impl AppObservability {
@@ -50,6 +52,7 @@ impl AppObservability {
             emoji: settings.emoji,
             show_claimed_bonus: settings.show_claimed_bonus,
             show_game: settings.show_game,
+            timezone: settings.timezone,
         }
     }
 
@@ -133,6 +136,11 @@ impl AppObservability {
             ("streak resolved at", stream.watch_streak_resolved_at),
         ] {
             if let Some(value) = value {
+                let value = tm_observability::format_timestamp(
+                    value.into(),
+                    self.timezone,
+                    "%Y-%m-%d %H:%M:%S %:z",
+                );
                 let _ = write!(message, " | {label} {value}");
             }
         }
@@ -454,6 +462,10 @@ pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservabilit
             emoji: config.emojis,
             show_claimed_bonus: config.show_claimed_bonus_msg,
             show_game: config.show_game,
+            timezone: config
+                .timezone
+                .as_deref()
+                .and_then(|value| value.parse().ok()),
         },
     ))
 }

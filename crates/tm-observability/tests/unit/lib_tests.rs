@@ -231,14 +231,19 @@ fn report_line_omits_level_and_operation_envelope() {
 
 #[test]
 fn current_log_timestamp_uses_requested_timezone() {
-    let utc = chrono::DateTime::parse_from_rfc3339("2026-03-27T08:09:10Z")
-        .unwrap()
-        .with_timezone(&Utc);
     let athens = "Europe/Athens".parse::<Tz>().unwrap();
-    assert_eq!(
-        utc.with_timezone(&athens)
-            .format("%H:%M %d/%m/%y")
-            .to_string(),
-        "10:09 27/03/26"
-    );
+    for (utc, expected) in [
+        ("2026-01-05T20:19:40Z", "2026-01-05 22:19:40 +02:00"),
+        ("2026-09-05T20:19:40Z", "2026-09-05 23:19:40 +03:00"),
+        ("2026-03-29T00:59:59Z", "2026-03-29 02:59:59 +02:00"),
+        ("2026-03-29T01:00:00Z", "2026-03-29 04:00:00 +03:00"),
+        ("2026-10-25T00:59:59Z", "2026-10-25 03:59:59 +03:00"),
+        ("2026-10-25T01:00:00Z", "2026-10-25 03:00:00 +02:00"),
+    ] {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(utc).unwrap().into();
+        assert_eq!(
+            format_timestamp(timestamp, Some(athens), "%Y-%m-%d %H:%M:%S %:z"),
+            expected
+        );
+    }
 }

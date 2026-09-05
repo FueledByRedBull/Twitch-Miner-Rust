@@ -16,8 +16,8 @@
   replay adapter; Hermes does not have live transport or mutation authority.
 - Adds Windows portable ZIP and MSI packaging and strengthens immutable image
   verification, deployment pinning, and evidence-gated release promotion.
-- Records the audit findings and verification boundaries in
-  `docs/audit-review-2026-09-05.md`.
+- Displays embedded streak timestamps in the configured timezone, matching log
+  headers and accounting for daylight-saving transitions.
 
 - Reconciles unresolved streak state once after a confirmed bonus claim and
   once after accepted offline-recovery playback settles, using Twitch's typed
