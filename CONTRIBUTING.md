@@ -49,14 +49,18 @@ cargo build --workspace --release --locked
 ./scripts/verify-build-integrity.ps1
 ./scripts/verify-architecture.ps1
 ./scripts/verify-docs.ps1
+./scripts/tests/verify-docs.tests.ps1
 ./scripts/verify-release-hygiene.ps1
 ./scripts/verify-go-baseline.ps1 -GoRoot ../Twitch-Channel-Points-Miner
 ```
 
-The manually dispatched/weekly `Deep Quality` workflow pins its nightly and
-analysis executables. It preserves the 60% critical-core branch floor and a
-separate 46.0% `tm-app` ratchet and runs bounded pure-parser fuzzing from the
-isolated `fuzz/` workspace. Do not expand it to network effects or weaken the
+The Markdown check uses tracked files; include new, unstaged documents with
+`./scripts/verify-docs.ps1 -AdditionalPaths path/to/new-document.md`.
+
+The `Deep Quality` workflow runs in required CI, on manual dispatch, and weekly.
+It pins its nightly and analysis executables, preserves the 60% critical-core
+branch floor and a separate 46.0% `tm-app` ratchet, and runs bounded pure-parser
+fuzzing from the isolated `fuzz/` workspace. Do not expand it to network effects or weaken the
 coverage floors.
 
 Protocol changes need a sanitized fixture, parser test, and parity-matrix

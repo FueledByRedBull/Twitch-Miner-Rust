@@ -92,18 +92,20 @@ if ($installer -match 'Guid="\*"' -or
     $installer -notmatch 'config\.example\.json') {
     throw 'WiX installer must use a stable component identity and keep runtime data out of Program Files.'
 }
-foreach ($workflowContent in @($windowsWorkflow, $ciWindowsWorkflow)) {
-    if ($workflowContent -notmatch 'dotnet tool install wix .*--version 4\.0\.6 .*--allow-roll-forward' -or
-        $workflowContent -notmatch 'DOTNET_ROLL_FORWARD:\s*Major') {
-        throw 'Windows WiX jobs must pin 4.0.6 and allow roll-forward on the Windows 2025 runner.'
-    }
-    if ($workflowContent -match 'twitch-miner-\*\.(?:zip|msi)' -or
-        $workflowContent -notmatch 'steps\.package\.outputs\.base' -or
-        $workflowContent -notmatch 'Start-Process msiexec\.exe.*-WindowStyle Hidden' -or
-        $workflowContent -notmatch '--version' -or
-        $workflowContent -notmatch 'verify-windows-installer\.ps1') {
-        throw 'Windows packaging jobs must select current version outputs, hide MSI operations, and smoke-test the installed and portable executables.'
-    }
+if ($windowsWorkflow -notmatch 'workflow_call:' -or
+    $ciWindowsWorkflow -notmatch '(?ms)^  windows-package:\s*\r?\n\s+permissions:\s*\r?\n\s+contents: read\s*\r?\n\s+uses: \./\.github/workflows/windows-release\.yml\s*\r?\n\s+with:\s*\r?\n\s+artifact-name: windows-package') {
+    throw 'CI must reuse the Windows release packaging job with read-only permissions.'
+}
+if ($windowsWorkflow -notmatch 'dotnet tool install wix .*--version 4\.0\.6 .*--allow-roll-forward' -or
+    $windowsWorkflow -notmatch 'DOTNET_ROLL_FORWARD:\s*Major') {
+    throw 'Windows WiX jobs must pin 4.0.6 and allow roll-forward on the Windows 2025 runner.'
+}
+if ($windowsWorkflow -match 'twitch-miner-\*\.(?:zip|msi)' -or
+    $windowsWorkflow -notmatch 'steps\.package\.outputs\.base' -or
+    $windowsWorkflow -notmatch 'Start-Process msiexec\.exe.*-WindowStyle Hidden' -or
+    $windowsWorkflow -notmatch '--version' -or
+    $windowsWorkflow -notmatch 'verify-windows-installer\.ps1') {
+    throw 'Windows packaging jobs must select current version outputs, hide MSI operations, and smoke-test the installed and portable executables.'
 }
 if ($windowsBuildScript -notmatch 'LastWriteTimeUtc' -or
     $windowsBuildScript -notmatch 'SOURCE_DATE_EPOCH' -or

@@ -15,13 +15,6 @@ const MAX_STEALTH_OFFSET: u8 = 5;
 /// one prediction.
 pub const MAX_PREDICTION_POINTS: u32 = 250_000;
 
-fn safe_duration_from_seconds(seconds: f64) -> std::time::Duration {
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return std::time::Duration::ZERO;
-    }
-    std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX)
-}
-
 fn i64_as_f64(value: i64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let converted = value as f64;
@@ -111,12 +104,6 @@ impl PredictionEvent {
                 0.0
             };
         }
-    }
-
-    #[must_use]
-    pub fn closing_after(&self, now: OffsetDateTime) -> std::time::Duration {
-        let elapsed = (now - self.created_at).as_seconds_f64();
-        safe_duration_from_seconds(self.window_seconds - elapsed)
     }
 
     pub fn decide(&mut self, balance: i64) -> PredictionDecision {
@@ -527,30 +514,6 @@ mod tests {
                 ),
                 Some(0),
                 "strategy={strategy:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn closing_after_is_safe_for_invalid_prediction_windows() {
-        for window_seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-            let event = PredictionEvent {
-                streamer: Streamer::default(),
-                event_id: String::new(),
-                title: String::new(),
-                status: String::new(),
-                created_at: datetime!(2026-03-27 06:00 UTC),
-                window_seconds,
-                outcomes: Vec::new(),
-                decision: PredictionDecision::default(),
-                bet_placed: false,
-                bet_confirmed: false,
-                result_type: String::new(),
-                result_string: String::new(),
-            };
-            assert_eq!(
-                event.closing_after(datetime!(2026-03-27 06:00 UTC)),
-                std::time::Duration::ZERO
             );
         }
     }

@@ -18,6 +18,9 @@
   verification, deployment pinning, and evidence-gated release promotion.
 - Displays embedded streak timestamps in the configured timezone, matching log
   headers and accounting for daylight-saving transitions.
+- Removes unused internal authentication and prediction helpers, shares Windows
+  packaging checks between CI and releases, and includes the isolated fuzz
+  workspace in dependency updates and policy checks.
 
 - Reconciles unresolved streak state once after a confirmed bonus claim and
   once after accepted offline-recovery playback settles, using Twitch's typed

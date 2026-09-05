@@ -8,7 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-base64.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

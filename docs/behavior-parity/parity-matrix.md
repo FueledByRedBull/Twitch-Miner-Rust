@@ -42,7 +42,8 @@ contract used by streak prioritization.
 
 Rust's transition diagnostics report `stream_up_at`, the time this miner
 observed the current broadcast online, rather than Go's Twitch-sourced
-`createdAt`. Timestamp values retain their explicit source offset. The same
+`createdAt`. Displayed timestamps use the configured timezone, including its
+daylight-saving offset, matching log headers. The same
 online/offline message is sent to Discord when that notifier is enabled; privacy
 anonymization suppresses exact streak timestamps before either destination.
 

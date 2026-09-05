@@ -190,10 +190,6 @@ impl AuthSession {
         scopes.iter().any(|scope| self.has_scope(scope))
     }
 
-    pub fn ensure_tokens(&mut self, auth_token: Option<&str>, user_id: Option<&str>) {
-        ensure_session_cookies(&mut self.store, auth_token, user_id);
-    }
-
     #[must_use]
     pub fn cookie_header_for_host(&self, host: &str) -> Option<String> {
         let request_host = host.trim().trim_start_matches('.').to_lowercase();
@@ -579,25 +575,6 @@ mod tests {
             .with_extension("json.bak");
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-    }
-
-    #[test]
-    fn session_can_fill_missing_special_tokens() {
-        let mut session = AuthSession::new(
-            "tester",
-            CookieStore::from([(
-                "session".into(),
-                PersistedCookie {
-                    value: "abc".into(),
-                    path: None,
-                    domain: None,
-                },
-            )]),
-        );
-
-        session.ensure_tokens(Some("token"), Some("user-1"));
-        assert_eq!(session.auth_token(), Some("token"));
-        assert_eq!(session.user_id(), Some("user-1"));
     }
 
     #[test]

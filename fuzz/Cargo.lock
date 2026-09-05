@@ -1080,7 +1080,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tm-twitch",
- "tokio",
 ]
 
 [[package]]
@@ -1124,7 +1123,6 @@ dependencies = [
 name = "tm-twitch"
 version = "0.2.0"
 dependencies = [
- "base64",
  "reqwest",
  "serde",
  "serde_json",

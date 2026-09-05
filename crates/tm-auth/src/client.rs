@@ -1,5 +1,4 @@
 use std::fmt;
-use std::path::Path;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -8,10 +7,8 @@ use thiserror::Error;
 
 use crate::device_flow::{
     build_device_code_request_with_scope, build_token_poll_request, build_validate_login_request,
-    device_flow_scope, DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
+    DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
 };
-use crate::session::AuthSession;
-use crate::CookieStore;
 
 pub const ACTIVATE_URL: &str = "https://www.twitch.tv/activate";
 
@@ -35,12 +32,6 @@ impl fmt::Debug for DeviceCodePrompt {
             .field("expires_in", &self.expires_in)
             .finish()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoginResult {
-    pub session: AuthSession,
-    pub prompt: DeviceCodePrompt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +86,6 @@ pub enum AuthClientError {
         status: StatusCode,
         context: &'static str,
     },
-    #[error("device flow expired before authorization")]
-    DeviceFlowExpired,
     #[error("oauth token missing from response")]
     MissingAccessToken,
     #[error("login missing from validation response")]
@@ -110,8 +99,6 @@ pub enum AuthClientError {
         expected_login: String,
         actual_login: String,
     },
-    #[error("session error: {0}")]
-    Session(#[from] crate::AuthSessionError),
 }
 
 #[derive(Debug)]
@@ -160,14 +147,6 @@ impl TwitchAuthClient {
     #[must_use]
     pub fn with_client_and_endpoints(client: reqwest::Client, endpoints: AuthEndpoints) -> Self {
         Self { client, endpoints }
-    }
-
-    pub async fn request_device_code(
-        &self,
-        device_id: &str,
-    ) -> Result<DeviceCodePrompt, AuthClientError> {
-        self.request_device_code_with_scope(device_id, device_flow_scope())
-            .await
     }
 
     pub async fn request_device_code_with_scope(
@@ -279,44 +258,6 @@ impl TwitchAuthClient {
             .await
             .map_err(AuthClientError::Http)?;
         login_validation_from_payload(&payload, username)
-    }
-
-    pub async fn login_with_device_flow(
-        &self,
-        username: &str,
-        device_id: &str,
-        user_agent: &str,
-        base_dir: impl AsRef<Path>,
-    ) -> Result<LoginResult, AuthClientError> {
-        let prompt = self.request_device_code(device_id).await?;
-        let started = std::time::Instant::now();
-        let mut poll_interval = prompt.interval;
-        let token = loop {
-            if started.elapsed() >= prompt.expires_in {
-                return Err(AuthClientError::DeviceFlowExpired);
-            }
-            match self
-                .poll_access_token(device_id, &prompt.device_code)
-                .await?
-            {
-                TokenPollOutcome::AccessToken(token) => break token,
-                outcome @ (TokenPollOutcome::Pending | TokenPollOutcome::SlowDown) => {
-                    poll_interval = outcome.next_interval(poll_interval);
-                    tokio::time::sleep(poll_interval).await;
-                }
-            }
-        };
-
-        let validation = self
-            .validate_login_details(&token, device_id, username, user_agent)
-            .await?;
-        let mut session = AuthSession::new(username, CookieStore::new());
-        session.set_auth_token(token);
-        session.set_user_id(validation.user_id);
-        session.set_scopes(validation.scopes);
-        session.save_to_dir(base_dir)?;
-
-        Ok(LoginResult { session, prompt })
     }
 }
 

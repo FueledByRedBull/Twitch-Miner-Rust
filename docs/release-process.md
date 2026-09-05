@@ -24,7 +24,7 @@ the release-only comparison.
 The Windows lane uses `scripts/build-windows-release.ps1`. It builds an explicit
 `x86_64-pc-windows-msvc` binary with a statically linked MSVC CRT, embeds the
 full source revision and source date, and produces a portable ZIP with a SHA-256
-sidecar. The tag/manual Windows workflow also builds an MSI from
+sidecar. CI reuses the same Windows job as tag/manual releases, building an MSI from
 `installer/Product.wxs` with the pinned WiX 4.0.6 tool. The MSI contains only
 the executable and documentation under Program Files; it does not create a
 configuration, cookie, or runtime-status file there. Use a user-writable path

@@ -1,6 +1,11 @@
 name: Windows Release
 
 on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        type: string
+        required: true
   workflow_dispatch:
   push:
     tags:
@@ -70,6 +75,10 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '${{ github.sha }}') {
             throw "Portable Windows executable revision smoke test failed: $($version -join ' ')"
           }
+          $help = & $zipExe[0].FullName --help 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($help -join "`n") -notmatch '--check-config') {
+            throw 'Portable Windows executable help smoke test failed.'
+          }
           $msiRoot = Join-Path $env:RUNNER_TEMP 'msi-admin-extract'
           New-Item -ItemType Directory -Path $msiRoot -Force | Out-Null
           $msiLog = Join-Path $env:RUNNER_TEMP 'msi-admin-extract.log'
@@ -117,7 +126,7 @@ jobs:
           "name=windows-release-$env:GITHUB_SHA" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ steps.artifact_metadata.outputs.name }}
+          name: ${{ inputs.artifact-name || steps.artifact_metadata.outputs.name }}
           path: |
             target/windows-release/${{ steps.package.outputs.base }}.zip
             target/windows-release/${{ steps.package.outputs.base }}.zip.sha256
