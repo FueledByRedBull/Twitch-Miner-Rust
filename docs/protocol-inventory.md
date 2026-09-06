@@ -177,9 +177,10 @@ No response payload, token, or cookie is logged.
 
 Playback priming deliberately remains uncached. The scheduler gives each
 selected channel a nominal 20-second interval; with the normal two slots it
-serializes the sends 10 seconds apart. Because the interval sleep begins after
-each request finishes, a channel is revisited after both selected requests plus
-the two nominal sleeps (about 20 seconds when requests are short).
+serializes attempts at nominal 10-second intervals. Snapshot and request time
+consume that interval, and only the remaining time is slept. An overrun starts
+the next attempt without replaying missed ticks; it does not queue catch-up
+requests. Watch-selection work can still add time between passes.
 Every tick performs one `PlaybackAccessToken` GQL request, one master-playlist
 GET, one selected media-playlist GET, and one newest-complete-segment HEAD before
 the spade POST. Local request-count savings did not establish credited

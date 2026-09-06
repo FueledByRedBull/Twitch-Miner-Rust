@@ -2,6 +2,8 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Includes request time in watch pacing so network latency does not extend every
+  interval, without replaying missed ticks after a slow request.
 - Hardens EventSub capacity recovery and verifies inherited reconnect
   subscriptions by channel conditions and unique subscription identities.
 - Preserves spare-slot rotation across campaign changes, separates metadata

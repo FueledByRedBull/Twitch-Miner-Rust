@@ -535,6 +535,7 @@ async fn watch_streamer_login(
     slot: usize,
     interval: std::time::Duration,
 ) -> (WatchAction, Option<WatchAttemptOutcome>) {
+    let started = StdInstant::now();
     let Some(snapshot) =
         snapshot_or_log(&context.runtime, "minute watcher refresh snapshot failed").await
     else {
@@ -571,7 +572,9 @@ async fn watch_streamer_login(
         )
         .await,
     );
-    if sleep_or_stop(stop, interval).await {
+    // Request work consumes the interval; an overrun starts a fresh attempt,
+    // without accumulating missed ticks to replay.
+    if sleep_or_stop(stop, interval.saturating_sub(started.elapsed())).await {
         (WatchAction::Stop, Some(outcome))
     } else {
         (WatchAction::Continue, Some(outcome))
@@ -1296,6 +1299,110 @@ mod tests {
 
     fn timestamp(seconds: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(seconds).expect("valid fixture timestamp")
+    }
+
+    #[tokio::test]
+    async fn watch_cadence_includes_request_time_without_catch_up() {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let interval = Duration::from_millis(500);
+        let delays = [200, 200, 200, 700, 0];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for delay in delays.into_iter().chain([0]) {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                assert!(content_length <= 4096);
+                reader.read_exact(&mut vec![0_u8; content_length]).unwrap();
+                thread::sleep(Duration::from_millis(delay));
+                let body = r#"{"data":{"streamPlaybackAccessToken":null}}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let mut state = tm_runtime::RuntimeState::from_targets(
+            &ConfigFile::default(),
+            &[String::from("alice")],
+            time_now(),
+        );
+        state.streamers[0] = measured_streamer(true, "broadcast-1", None, None);
+        state.streamers[0].stream.as_mut().unwrap().last_update = Some(time_now());
+        let context = MinuteWatcherContext {
+            runtime: tm_runtime::spawn_runtime_state(state),
+            twitch: Arc::new(TwitchClient::with_client_and_endpoints(
+                reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+                "synthetic-token",
+                "test-agent",
+                TwitchEndpoints {
+                    twitch_url: base.clone(),
+                    gql_url: format!("{base}/gql"),
+                    playback_url: format!("{base}/hls/"),
+                },
+            )),
+            user_id: String::from("synthetic-viewer"),
+            observability: AppObservability::new(
+                None,
+                DiscordClient::new(Duration::from_secs(1)).unwrap(),
+                AppObservabilitySettings::default(),
+            ),
+            health: HealthTracker::default(),
+            claim_coordinator: crate::drops::DropClaimCoordinator::default(),
+            spade_urls: tokio::sync::Mutex::new(HashMap::new()),
+        };
+        let (sender, mut stop) = tokio::sync::watch::channel(false);
+        let mut elapsed = Vec::new();
+        for _ in delays {
+            let started = Instant::now();
+            let (action, outcome) =
+                watch_streamer_login(&mut stop, &context, "alice", 0, interval).await;
+            assert!(action == WatchAction::Continue);
+            assert!(outcome == Some(WatchAttemptOutcome::RequestFailure));
+            elapsed.push(started.elapsed());
+        }
+        let cancel = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            sender.send(true).unwrap();
+        });
+        let cancellation_started = Instant::now();
+        let (action, _) = watch_streamer_login(&mut stop, &context, "alice", 0, interval).await;
+        cancel.await.unwrap();
+        server.join().unwrap();
+        assert!(action == WatchAction::Stop);
+        assert!(cancellation_started.elapsed() < interval);
+        println!(
+            "watch cadence elapsed milliseconds: {:?}",
+            elapsed.iter().map(Duration::as_millis).collect::<Vec<_>>()
+        );
+        // Aggregate three attempts to tolerate scheduler noise while rejecting
+        // the old extra 200 ms wait on every request.
+        assert!(elapsed[..3].iter().sum::<Duration>() < Duration::from_millis(1_800));
+        assert!(elapsed.iter().all(|duration| *duration >= interval));
+        assert!(elapsed[3] >= Duration::from_millis(700));
+        assert!(elapsed[3] < Duration::from_millis(1_000));
     }
 
     fn pending_inventory_server(
