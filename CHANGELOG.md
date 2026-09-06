@@ -4,6 +4,8 @@
 
 - Includes request time in watch pacing so network latency does not extend every
   interval, without replaying missed ticks after a slow request.
+- Lets EventSub connection failures reach reconnect handling when their event
+  queue closes, instead of spinning until task supervision restarts the process.
 - Hardens EventSub capacity recovery and verifies inherited reconnect
   subscriptions by channel conditions and unique subscription identities.
 - Preserves spare-slot rotation across campaign changes, separates metadata

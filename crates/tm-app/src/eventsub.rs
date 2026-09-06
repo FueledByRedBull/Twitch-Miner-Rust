@@ -95,10 +95,7 @@ async fn listen_once(
                     return None;
                 }
             }
-            message = receiver.recv() => {
-                let Some(message) = message else {
-                    continue;
-                };
+            Some(message) = receiver.recv() => {
                 if matches!(&message, EventSubConnectionEvent::Heartbeat) {
                     *failure_attempt = 0;
                 }
@@ -505,7 +502,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        classify_eventsub_error, eventsub_reconnect_delay, poll_presence_fallback,
+        classify_eventsub_error, eventsub_reconnect_delay, listen_once, poll_presence_fallback,
         process_eventsub_message, record_connection_result, update_presence_fallback,
         EventSubTaskContext,
     };
@@ -821,8 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_and_heartbeat_restore_eventsub_health_and_fallback_state() -> anyhow::Result<()>
-    {
+    async fn setup_heartbeat_and_closed_queue_preserve_eventsub_recovery() -> anyhow::Result<()> {
         let config = tm_config::ConfigFile {
             streamers: vec![String::from("alice")],
             ..tm_config::ConfigFile::default()
@@ -838,7 +834,7 @@ mod tests {
         health.register("eventsub", Duration::from_secs(60));
         health.failure("eventsub", "connection-reset");
         let (fallback_tx, fallback_rx) = tokio::sync::watch::channel(vec![0]);
-        let context = EventSubTaskContext {
+        let mut context = EventSubTaskContext {
             effects: RuntimeEffectContext::new(
                 runtime,
                 Arc::new(TwitchClient::with_client_and_endpoints(
@@ -887,6 +883,21 @@ mod tests {
         health.failure("eventsub", "keepalive-timeout");
         assert!(!process_eventsub_message(&context, EventSubConnectionEvent::Heartbeat).await);
         assert_eq!(health.task_consecutive_failures("eventsub"), Some(0));
+        // No subscriptions exits before networking and closes the event queue.
+        // That closure must not hide the completed connection task from select.
+        context.tracked_streamers.clear();
+        let (_sender, mut stop) = tokio::sync::watch::channel(false);
+        let mut attempts = 0;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            listen_once(&mut stop, &context, &mut attempts),
+        )
+        .await
+        .expect("closed queue must allow connection completion")
+        .expect("connection should finish without shutdown");
+        assert!(matches!(result, Ok(Err(EventSubError::NoSubscriptions))));
+        assert!(record_connection_result(result, &health, &mut attempts));
+        assert_eq!(attempts, 1);
         Ok(())
     }
 
