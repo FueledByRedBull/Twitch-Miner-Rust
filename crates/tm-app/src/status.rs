@@ -70,8 +70,23 @@ struct DropProgressSnapshot {
     last_progress_increase_unix: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WatchProgress {
+    #[default]
+    MeasurementUnavailable,
+    AwaitingFirstCredit,
+    FirstCreditOverdue,
+    Earning,
+    Stalled,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct WatchSlotStatus {
+    #[serde(default)]
+    progress: WatchProgress,
+    #[serde(default)]
+    progress_age_seconds: Option<u64>,
     slot: usize,
     channel_index: Option<usize>,
     channel_key: Option<String>,
@@ -299,6 +314,8 @@ impl HealthTracker {
         for slot in slots.iter_mut() {
             slot.selected = false;
             slot.selection_reason = None;
+            slot.progress = WatchProgress::MeasurementUnavailable;
+            slot.progress_age_seconds = None;
         }
         for (slot, channel_index, channel_id, broadcast_id, reason) in selected {
             let Some(status) = watch_slot_mut(&mut slots, *slot) else {
@@ -364,6 +381,22 @@ impl HealthTracker {
             if let Some(timestamp) = last_context_observed_at {
                 status.last_context_observed_unix = u64::try_from(timestamp.unix_timestamp()).ok();
             }
+        }
+    }
+
+    pub(crate) fn watch_slot_progress(
+        &self,
+        slot: usize,
+        progress: WatchProgress,
+        age: Option<u64>,
+    ) {
+        let mut slots = self
+            .watch_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = watch_slot_mut(&mut slots, slot) {
+            status.progress = progress;
+            status.progress_age_seconds = age;
         }
     }
 
@@ -667,6 +700,8 @@ fn watch_slot_mut(slots: &mut Vec<WatchSlotStatus>, slot: usize) -> Option<&mut 
     while slots.len() <= slot {
         let index = slots.len();
         slots.push(WatchSlotStatus {
+            progress: WatchProgress::MeasurementUnavailable,
+            progress_age_seconds: None,
             slot: index,
             channel_index: None,
             channel_key: None,
@@ -906,17 +941,24 @@ mod tests {
     }
 
     #[test]
-    fn watch_slot_health_resets_when_the_broadcast_changes() {
+    fn watch_slot_health_resets_when_the_broadcast_changes() -> anyhow::Result<()> {
         let health = HealthTracker::default();
         health.set_watch_selection(&[(0, 0, "channel-a", "broadcast-a", "watch-order")]);
         health.watch_slot_success(0);
         health.watch_slot_failure(0, "watch-timeout");
+        health.watch_slot_progress(0, super::WatchProgress::FirstCreditOverdue, Some(1_800));
+        let serialized = serde_json::to_value(&health.watch_slots_snapshot()[0])?;
+        assert_eq!(serialized["progress"], "first_credit_overdue");
+        assert_eq!(serialized["progress_age_seconds"], 1_800);
         health.set_watch_selection(&[(0, 0, "channel-a", "broadcast-b", "watch-order")]);
 
         let slot = &health.watch_slots_snapshot()[0];
         assert!(slot.last_accepted_watch_unix.is_none());
         assert_eq!(slot.consecutive_failures, 0);
         assert!(slot.broadcast_key.as_deref().is_some());
+        assert_eq!(slot.progress, super::WatchProgress::MeasurementUnavailable);
+        assert_eq!(slot.progress_age_seconds, None);
+        Ok(())
     }
 
     #[test]

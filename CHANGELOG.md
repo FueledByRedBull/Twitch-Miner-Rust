@@ -2,6 +2,13 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Sends newly selected watch channels first and preserves request order while
+  the selected pair remains unchanged, without changing rotation frequency.
+- Applies the prediction journal's 128-placement limit only to unresolved
+  requests, retaining seven-day replay protection within the bounded file.
+- Reports unavailable earning measurement, first-credit waits, earning and
+  stalls in watch-slot status. Prolonged first-credit waits do not rotate slots.
+
 - Includes request time in watch pacing so network latency does not extend every
   interval, without replaying missed ticks after a slow request.
 - Lets EventSub connection failures reach reconnect handling when their event

@@ -165,9 +165,9 @@ impl PredictionPlacementJournal {
         if state.pending.contains_key(&key) {
             return Ok(false);
         }
-        if state.pending.len() >= MAX_PENDING_PLACEMENTS {
+        if unresolved_count(&state.pending) >= MAX_PENDING_PLACEMENTS {
             return Err(anyhow!(
-                "prediction placement journal reached its {MAX_PENDING_PLACEMENTS} entry limit"
+                "prediction placement journal reached its {MAX_PENDING_PLACEMENTS} unresolved placement limit"
             ));
         }
         state.pending.insert(
@@ -334,11 +334,23 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+fn unresolved_count(pending: &BTreeMap<String, PendingPlacement>) -> usize {
+    pending
+        .values()
+        .filter(|entry| {
+            matches!(
+                entry.status,
+                PlacementStatus::Pending | PlacementStatus::Unknown
+            )
+        })
+        .count()
+}
+
 fn validate_pending(pending: &BTreeMap<String, PendingPlacement>) -> Result<()> {
-    if pending.len() > MAX_PENDING_PLACEMENTS {
+    if unresolved_count(pending) > MAX_PENDING_PLACEMENTS {
         return Err(anyhow!(
-            "prediction placement journal contains {} entries; maximum is {}",
-            pending.len(),
+            "prediction placement journal contains {} unresolved placements; maximum is {}",
+            unresolved_count(pending),
             MAX_PENDING_PLACEMENTS
         ));
     }
@@ -481,6 +493,10 @@ fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
     };
     fs::File::open(parent)?.sync_all()
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/prediction_capacity_tests.rs"]
+mod capacity_tests;
 
 #[cfg(test)]
 mod tests {

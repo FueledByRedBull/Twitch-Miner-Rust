@@ -47,6 +47,28 @@ daylight-saving offset, matching log headers. The same
 online/offline message is sent to Discord when that notifier is enabled; privacy
 anonymization suppresses exact streak timestamps before either destination.
 
+When watch selection changes, newly selected channels receive requests before
+retained channels. That dispatch order persists on subsequent passes while
+logical health-slot attribution remains tied to selection order. The two-slot
+limit, fair-rotation policy and request interval are unchanged. Moving a new
+channel first delays the retained channel by one stagger at handover; faster
+request dispatch does not establish faster server credit or higher earnings.
+
+## Earning status and prediction capacity
+
+Watch-slot status distinguishes `measurement_unavailable`, `awaiting_first_credit`,
+`first_credit_overdue`, `earning`, and `stalled`. The accompanying
+`progress_age_seconds` is monotonic time observed with valid measurement since
+the first-credit wait began or the last confirmed point changed. Thirty minutes
+without a first credit marks it overdue for operator review, without triggering
+rotation. Lost measurement, deselection or a changed broadcast resets the wait.
+
+Prediction placement capacity counts at most 128 unresolved requests separately
+from confirmed/rejected replay records. Terminal records remain protected for
+seven days, and the entire journal remains bounded to 256 KiB. Full storage
+fails closed rather than evicting unresolved requests or recent replay records.
+Reload and capacity tests cover more than 128 resolved placements.
+
 ## Configuration compatibility
 
 All Go-era operational fields remain accepted unless they were unsafe or had no

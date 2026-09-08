@@ -272,6 +272,15 @@ persistent-state guarantee;
 it cannot reverse remote Twitch mutations, and a rollback binary still needs a
 compatible data-format check.
 
+Prediction journals can retain more than 128 resolved replay records, while
+limiting unresolved placements to 128 and the file to 256 KiB. Older binaries
+that count all records against 128 will reject such a journal. Before rollback,
+verify the rollback binary accepts the current journal; do not delete records
+or restore a pre-placement journal to make it start. A data backup cannot undo
+accepted Twitch bets, and losing their reservations can permit duplicate spending.
+If journal compatibility fails, keep the service stopped until a compatible
+binary is available or the outcomes have been authoritatively reconciled.
+
 ## Power-loss limits
 
 Config, cookie, and runtime-status publication uses a temporary file, file

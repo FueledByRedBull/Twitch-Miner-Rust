@@ -69,6 +69,7 @@ impl Drop for MetadataRefreshHandle {
 struct MinuteWatcherState {
     watch_rotation: WatchRotation,
     selected_channel_ids: HashSet<String>,
+    dispatch_order: Vec<String>,
     last_loop_at: tm_runtime::RuntimeTime,
     metadata_refresh: Option<MetadataRefreshHandle>,
     watch_failures: HashMap<String, WatchFailureState>,
@@ -98,6 +99,7 @@ struct WatchdogRecord {
     broadcast_id: String,
     last_points_at: Option<OffsetDateTime>,
     stalled_since: Option<StdInstant>,
+    awaiting_since: Option<StdInstant>,
     recovery_attempted: bool,
 }
 
@@ -186,6 +188,7 @@ impl WatchdogState {
                     broadcast_id: stream.broadcast_id.clone(),
                     last_points_at: None,
                     stalled_since: None,
+                    awaiting_since: None,
                     recovery_attempted: false,
                 });
 
@@ -193,6 +196,7 @@ impl WatchdogState {
                 record.broadcast_id.clone_from(&stream.broadcast_id);
                 record.last_points_at = None;
                 record.stalled_since = None;
+                record.awaiting_since = None;
                 record.recovery_attempted = false;
             }
 
@@ -202,12 +206,21 @@ impl WatchdogState {
             // Channels with no confirmed point event for the current broadcast
             // stay unmeasured. The available drop payload has no per-channel
             // progress identity that could safely establish that baseline.
-            if points_at.is_none() || context_at.is_none() {
+            if context_at.is_none() {
+                record.awaiting_since = None;
                 record.last_points_at = points_at;
                 record.stalled_since = None;
                 record.recovery_attempted = false;
                 continue;
             }
+            if points_at.is_none() {
+                record.awaiting_since.get_or_insert(monotonic_now);
+                record.last_points_at = None;
+                record.stalled_since = None;
+                record.recovery_attempted = false;
+                continue;
+            }
+            record.awaiting_since = None;
             if record.last_points_at != points_at {
                 record.last_points_at = points_at;
                 record.stalled_since = Some(monotonic_now);
@@ -228,6 +241,37 @@ impl WatchdogState {
             }
         }
         stalled
+    }
+
+    fn progress(
+        &self,
+        channel_id: &str,
+        broadcast_id: &str,
+        now: StdInstant,
+    ) -> (crate::status::WatchProgress, Option<u64>) {
+        use crate::status::WatchProgress;
+        let Some(record) = self
+            .records
+            .get(channel_id)
+            .filter(|record| record.broadcast_id == broadcast_id)
+        else {
+            return (WatchProgress::MeasurementUnavailable, None);
+        };
+        let (since, waiting) = if let Some(since) = record.awaiting_since {
+            (since, true)
+        } else if let Some(since) = record.stalled_since {
+            (since, false)
+        } else {
+            return (WatchProgress::MeasurementUnavailable, None);
+        };
+        let age = now.saturating_duration_since(since).as_secs();
+        let progress = match (waiting, age >= WATCHDOG_STALL_SECONDS) {
+            (true, false) => WatchProgress::AwaitingFirstCredit,
+            (true, true) => WatchProgress::FirstCreditOverdue,
+            (false, false) => WatchProgress::Earning,
+            (false, true) => WatchProgress::Stalled,
+        };
+        (progress, Some(age))
     }
 
     fn mark_recovery_attempted(&mut self, channel_id: &str) {
@@ -271,6 +315,7 @@ async fn run_minute_watcher_loop(
     let mut state = MinuteWatcherState {
         watch_rotation: WatchRotation::default(),
         selected_channel_ids: HashSet::new(),
+        dispatch_order: Vec::new(),
         last_loop_at: time_now(),
         metadata_refresh: None,
         watch_failures: HashMap::new(),
@@ -296,6 +341,7 @@ async fn run_minute_watcher_pass(
     let Some(watch_logins) = select_watch_logins(context, state, now).await else {
         return WatchAction::Stop;
     };
+    let watch_logins = order_watch_requests(watch_logins, &mut state.dispatch_order);
     if watch_logins.is_empty() {
         context.health.success("minute");
         context.health.success("minute-watch");
@@ -313,7 +359,7 @@ async fn run_minute_watcher_pass(
         tracing::warn!("{message}");
     }
     let interval = tm_domain::watch_interval(watch_logins.len());
-    for (slot, login) in watch_logins.into_iter().enumerate() {
+    for (slot, login) in watch_logins {
         if *stop.borrow() {
             return WatchAction::Stop;
         }
@@ -326,6 +372,20 @@ async fn run_minute_watcher_pass(
         }
     }
     WatchAction::Continue
+}
+
+fn order_watch_requests(selected: Vec<String>, previous: &mut Vec<String>) -> Vec<(usize, String)> {
+    // Keep logical health slots while moving new channels ahead of retained
+    // ones. Preserve that order next pass to avoid a second pacing shift.
+    let mut requests = selected.into_iter().enumerate().collect::<Vec<_>>();
+    requests.sort_by_key(|(_, login)| {
+        previous
+            .iter()
+            .position(|previous| previous == login)
+            .map_or(0, |index| index + 1)
+    });
+    *previous = requests.iter().map(|(_, login)| login.clone()).collect();
+    requests
 }
 
 #[allow(clippy::too_many_lines)]
@@ -440,9 +500,26 @@ async fn select_watch_logins(
         {
             context.health.watch_slot_measurement(
                 slot,
-                streamer.last_server_confirmed_points_at,
+                streamer
+                    .last_server_confirmed_points_at
+                    .filter(|points_at| {
+                        streamer
+                            .stream
+                            .as_ref()
+                            .and_then(|stream| stream.stream_up_at)
+                            .is_some_and(|start| *points_at >= start)
+                    }),
                 streamer.last_context_observed_at,
             );
+            let (progress, age) = state.watchdog.progress(
+                &streamer.channel_id,
+                streamer
+                    .stream
+                    .as_ref()
+                    .map_or("", |stream| stream.broadcast_id.as_str()),
+                StdInstant::now(),
+            );
+            context.health.watch_slot_progress(slot, progress, age);
         }
     }
     let selected_channel_ids = watch_logins
@@ -1281,6 +1358,10 @@ pub(crate) fn build_minute_watched_event(
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/watch_dispatch_tests.rs"]
+mod watch_dispatch_tests;
+
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -1496,6 +1577,54 @@ mod tests {
             true,
             monotonic_now,
         )
+    }
+
+    #[test]
+    fn first_credit_visibility_never_triggers_rotation_and_resets_with_measurement() {
+        use crate::status::WatchProgress;
+        let selected = HashSet::from([String::from("channel-alice")]);
+        let mut watchdog = WatchdogState::default();
+        let mut streamer = measured_streamer(true, "broadcast-1", None, Some(timestamp(130)));
+        let start = Instant::now();
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", start),
+            (WatchProgress::AwaitingFirstCredit, Some(0))
+        );
+        let later = start + Duration::from_secs(1_800);
+        assert!(observe(&mut watchdog, &streamer, &selected, later).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", later),
+            (WatchProgress::FirstCreditOverdue, Some(1_800))
+        );
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-2", later),
+            (WatchProgress::MeasurementUnavailable, None)
+        );
+        streamer.last_context_observed_at = None;
+        assert!(observe(&mut watchdog, &streamer, &selected, later).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", later),
+            (WatchProgress::MeasurementUnavailable, None)
+        );
+        streamer.last_context_observed_at = Some(timestamp(150));
+        assert!(observe(&mut watchdog, &streamer, &selected, later).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", later),
+            (WatchProgress::AwaitingFirstCredit, Some(0))
+        );
+        streamer.last_server_confirmed_points_at = Some(timestamp(160));
+        assert!(observe(&mut watchdog, &streamer, &selected, later).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", later),
+            (WatchProgress::Earning, Some(0))
+        );
+        let stalled = later + Duration::from_secs(1_800);
+        assert!(!observe(&mut watchdog, &streamer, &selected, stalled).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", stalled),
+            (WatchProgress::Stalled, Some(1_800))
+        );
     }
 
     #[test]
@@ -1767,6 +1896,7 @@ mod tests {
         let mut state = MinuteWatcherState {
             watch_rotation: WatchRotation::default(),
             selected_channel_ids: HashSet::new(),
+            dispatch_order: Vec::new(),
             last_loop_at: now,
             metadata_refresh: None,
             watch_failures: HashMap::new(),
@@ -1816,6 +1946,7 @@ mod tests {
                 let _state = MinuteWatcherState {
                     watch_rotation: WatchRotation::default(),
                     selected_channel_ids: HashSet::new(),
+                    dispatch_order: Vec::new(),
                     last_loop_at: timestamp(10_000),
                     metadata_refresh: Some(MetadataRefreshHandle::new(child)),
                     watch_failures: HashMap::new(),
