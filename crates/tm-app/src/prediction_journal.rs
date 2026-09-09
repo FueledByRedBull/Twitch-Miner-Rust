@@ -79,6 +79,17 @@ struct JournalSnapshot {
 struct JournalState {
     path: Option<PathBuf>,
     pending: BTreeMap<String, PendingPlacement>,
+    capacity_blocked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JournalCapacity {
+    pub(crate) bytes: usize,
+    pub(crate) byte_limit: u64,
+    pub(crate) unresolved_count: usize,
+    pub(crate) unresolved_limit: usize,
+    pub(crate) retained_count: usize,
+    pub(crate) capacity_blocked: bool,
 }
 
 /// Shared process-local journal for prediction placement reservations.
@@ -98,6 +109,7 @@ impl PredictionPlacementJournal {
             state: Arc::new(Mutex::new(JournalState {
                 path: None,
                 pending: BTreeMap::new(),
+                capacity_blocked: false,
             })),
         }
     }
@@ -112,6 +124,7 @@ impl PredictionPlacementJournal {
         Ok(Self {
             state: Arc::new(Mutex::new(JournalState {
                 path: Some(path),
+                capacity_blocked: unresolved_count(&pending) >= MAX_PENDING_PLACEMENTS,
                 pending,
             })),
         })
@@ -166,6 +179,7 @@ impl PredictionPlacementJournal {
             return Ok(false);
         }
         if unresolved_count(&state.pending) >= MAX_PENDING_PLACEMENTS {
+            state.capacity_blocked = true;
             return Err(anyhow!(
                 "prediction placement journal reached its {MAX_PENDING_PLACEMENTS} unresolved placement limit"
             ));
@@ -184,10 +198,24 @@ impl PredictionPlacementJournal {
                 status: PlacementStatus::Pending,
             },
         );
-        if let Err(error) = persist_locked(&state) {
+        // A confirmation adds a timestamp and a longer status. Reserve room for
+        // every unresolved record to reach its largest terminal representation.
+        let admission = admission_bytes(&state.pending);
+        if admission
+            .as_ref()
+            .is_ok_and(|bytes| *bytes > usize::try_from(MAX_JOURNAL_BYTES).unwrap_or(usize::MAX))
+        {
+            state.pending.remove(&key);
+            state.capacity_blocked = true;
+            return Err(anyhow!(
+                "prediction placement journal has insufficient byte capacity"
+            ));
+        }
+        if let Err(error) = admission.and_then(|_| persist_locked(&state)) {
             state.pending.remove(&key);
             return Err(error);
         }
+        state.capacity_blocked = false;
         Ok(true)
     }
 
@@ -266,12 +294,30 @@ impl PredictionPlacementJournal {
             }
             return Err(error);
         }
+        state.capacity_blocked = false;
         Ok(())
     }
 
     #[cfg(test)]
     fn pending_len(&self) -> Result<usize> {
         Ok(self.lock()?.pending.len())
+    }
+
+    pub(crate) fn capacity(&self) -> Result<JournalCapacity> {
+        let state = self.lock()?;
+        let unresolved = unresolved_count(&state.pending);
+        Ok(JournalCapacity {
+            bytes: if state.pending.is_empty() {
+                0
+            } else {
+                snapshot_bytes(&state.pending)?.len() + 1
+            },
+            byte_limit: MAX_JOURNAL_BYTES,
+            unresolved_count: unresolved,
+            unresolved_limit: MAX_PENDING_PLACEMENTS,
+            retained_count: state.pending.len() - unresolved,
+            capacity_blocked: state.capacity_blocked || unresolved >= MAX_PENDING_PLACEMENTS,
+        })
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, JournalState>> {
@@ -346,6 +392,19 @@ fn unresolved_count(pending: &BTreeMap<String, PendingPlacement>) -> usize {
         .count()
 }
 
+fn snapshot_bytes(pending: &BTreeMap<String, PendingPlacement>) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&JournalSnapshot {
+        schema_version: JOURNAL_SCHEMA_VERSION,
+        pending: pending.clone(),
+    })?)
+}
+
+fn admission_bytes(pending: &BTreeMap<String, PendingPlacement>) -> Result<usize> {
+    // "confirmed" is two bytes longer than "pending"/"unknown"; the longest
+    // i64 timestamp is 16 bytes longer than null. Include the trailing newline.
+    Ok(snapshot_bytes(pending)?.len() + 1 + 18 * unresolved_count(pending))
+}
+
 fn validate_pending(pending: &BTreeMap<String, PendingPlacement>) -> Result<()> {
     if unresolved_count(pending) > MAX_PENDING_PLACEMENTS {
         return Err(anyhow!(
@@ -393,6 +452,7 @@ fn prune_terminal(state: &mut JournalState, now_unix_seconds: i64) -> Result<()>
             state.pending.extend(removed);
             return Err(error);
         }
+        state.capacity_blocked = false;
     }
     Ok(())
 }

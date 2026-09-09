@@ -103,6 +103,18 @@ generated container name. The image is `scratch`: direct `docker exec` of
 `/twitch-miner` also works when you provide the actual container name or ID,
 but there is no `sh` or `bash` to start for an interactive shell.
 
+Overdue first-credit observations produce a warning at most once per 30 minutes
+across both watch slots. To deliver these warnings through an existing Discord
+webhook, include `WATCH_STATUS` in its event list (an empty list permits all
+events). They do not cause rotation or make process health fail.
+
+The `prediction_journal` status object reports serialized bytes, the byte limit,
+unresolved and retained record counts, the unresolved limit, and a capacity
+rejection flag. See [capacity semantics](parity-matrix.md#earning-status-and-prediction-capacity).
+At capacity, new predictions are refused safely; never delete recent records or
+restore an old journal to make room. Expired resolved records are pruned during
+normal journal access, while unknown outcomes remain protected.
+
 `--status` prints only the sanitized runtime-status document. It includes each
 task's last successful work and last activity, bounded
 claim/bet/reconnect/refresh counters, the last redacted error class, runtime

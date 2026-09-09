@@ -27,7 +27,7 @@ pub(crate) struct WatchRotation {
     pinned_campaign: Option<String>,
     spare_since: Option<RuntimeTime>,
     promoted_streak_broadcasts: HashMap<String, String>,
-    last_streak_promotion: Option<RuntimeTime>,
+    last_voluntary_switch: Option<RuntimeTime>,
     last_fair_rotation: Option<RuntimeTime>,
     selection_reasons: HashMap<String, &'static str>,
     watchdog_rotation_pending: bool,
@@ -96,7 +96,7 @@ impl WatchRotation {
         if self.queue.is_empty() {
             self.spare_since = None;
             self.last_fair_rotation = None;
-            self.last_streak_promotion = None;
+            self.last_voluntary_switch = None;
             self.selection_reasons.clear();
             self.watchdog_rotation_pending = false;
             if let Some(pinned) = &self.pinned_campaign {
@@ -119,7 +119,7 @@ impl WatchRotation {
             .is_some_and(|last| (now - last).whole_seconds() >= MAX_ROTATION_DEFERRAL_SECONDS);
         let promotion_allowed = !fair_rotation_overdue
             && self
-                .last_streak_promotion
+                .last_voluntary_switch
                 .is_none_or(|last| (now - last).whole_seconds() >= WATCH_ROTATION_SECONDS);
         let promotion = promotion_allowed.then(|| {
             streak_candidates.iter().find_map(|candidate| {
@@ -139,7 +139,7 @@ impl WatchRotation {
                 self.queue.push_front(login);
                 self.promoted_streak_broadcasts
                     .insert(candidate.login, candidate.broadcast_id);
-                self.last_streak_promotion = Some(now);
+                self.last_voluntary_switch = Some(now);
                 self.spare_since = Some(now);
             }
         } else if self.queue.len() > rotating_slots
@@ -154,6 +154,9 @@ impl WatchRotation {
             }
             self.spare_since = Some(now);
             self.last_fair_rotation = Some(now);
+            // Give the fair-selected channels their turn before a promotion
+            // can replace them and interrupt newly started credit progress.
+            self.last_voluntary_switch = Some(now);
             fair_rotated = true;
         }
 
@@ -167,9 +170,10 @@ impl WatchRotation {
         for login in &selected {
             let reason = if self.pinned_campaign.as_ref() == Some(login) {
                 "campaign-priority"
-            } else if self
-                .last_streak_promotion
-                .is_some_and(|promoted_at| promoted_at == now)
+            } else if !fair_rotated
+                && self
+                    .last_voluntary_switch
+                    .is_some_and(|promoted_at| promoted_at == now)
                 && streak_candidates.iter().any(|candidate| {
                     candidate.login == *login
                         && self.promoted_streak_broadcasts.get(&candidate.login)
@@ -277,6 +281,34 @@ mod tests {
             rotation.select_with_campaigns(&eligible, &[], &[], ts(2_700)),
             logins(&["bravo", "charlie"])
         );
+    }
+
+    #[test]
+    fn fair_rotation_gets_a_full_turn_before_another_streak_promotion() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let campaigns = logins(&["alpha"]);
+        let mut rotation = WatchRotation::default();
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &campaigns, &[], ts(0)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &campaigns, &[], ts(900)),
+            logins(&["alpha", "charlie"])
+        );
+        assert_eq!(rotation.selection_reason("charlie"), "fair-rotation");
+        let candidates = [streak("delta", "broadcast-d")];
+        for seconds in [920, 1_799] {
+            assert_eq!(
+                rotation.select_with_campaigns(&eligible, &campaigns, &candidates, ts(seconds)),
+                logins(&["alpha", "charlie"])
+            );
+        }
+        assert_eq!(
+            rotation.select_with_campaigns(&eligible, &campaigns, &candidates, ts(1_800)),
+            logins(&["alpha", "delta"])
+        );
+        assert_eq!(rotation.selection_reason("delta"), "streak-promotion");
     }
 
     #[test]

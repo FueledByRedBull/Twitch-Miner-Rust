@@ -77,6 +77,7 @@ pub(crate) struct BackgroundTaskParams<'a> {
 pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Result<BackgroundTasks> {
     let username = normalized_username(&params.config.username)?;
     let prediction_journal = PredictionPlacementJournal::open(params.work_dir)?;
+    params.health.set_journal(prediction_journal.clone());
     let prediction_scheduler = params.user_id.map(|_| {
         PredictionEvaluationScheduler::start(params.stop_rx.clone(), params.observability)
     });

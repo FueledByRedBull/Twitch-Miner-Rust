@@ -45,6 +45,8 @@ struct RuntimeStatus {
     runtime_metrics: RuntimeMetricsSnapshot,
     eventsub: Option<tm_pubsub::EventSubSetupReport>,
     pubsub: Option<tm_pubsub::PubSubSetupReport>,
+    #[serde(default)]
+    prediction_journal: Option<crate::prediction_journal::JournalCapacity>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -108,9 +110,20 @@ pub(crate) struct HealthTracker {
     eventsub: Arc<Mutex<Option<tm_pubsub::EventSubSetupReport>>>,
     pubsub: Arc<Mutex<Option<tm_pubsub::PubSubSetupReport>>>,
     watch_slots: Arc<Mutex<Vec<WatchSlotStatus>>>,
+    prediction_journal: Arc<Mutex<Option<crate::prediction_journal::PredictionPlacementJournal>>>,
 }
 
 impl HealthTracker {
+    pub(crate) fn set_journal(
+        &self,
+        journal: crate::prediction_journal::PredictionPlacementJournal,
+    ) {
+        *self
+            .prediction_journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
+    }
+
     pub(crate) fn register(&self, name: &'static str, stale_after: std::time::Duration) {
         let now = unix_now_infallible();
         self.lock_tasks().insert(
@@ -549,6 +562,14 @@ impl StatusReporter {
             runtime_metrics: self.metrics.snapshot(),
             eventsub: self.health.eventsub_snapshot(),
             pubsub: self.health.pubsub_snapshot(),
+            prediction_journal: self
+                .health
+                .prediction_journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(crate::prediction_journal::PredictionPlacementJournal::capacity)
+                .transpose()?,
         };
         atomic_json_write(&self.path, &status)?;
         Ok((status, now))
@@ -842,6 +863,65 @@ mod tests {
     }
 
     #[test]
+    fn journal_capacity_is_reported_without_identities_or_health_failure() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let journal =
+            crate::prediction_journal::PredictionPlacementJournal::open(directory.path())?;
+        let request = crate::prediction_journal::PredictionPlacementRequest {
+            account_id: "private-account",
+            channel_id: "private-channel",
+            event_id: "private-event",
+            choice: Some(0),
+            outcome_id: "private-outcome",
+            amount: 10,
+            reserved_at_unix_seconds: 1,
+        };
+        assert!(journal.reserve(&request)?);
+        let health = HealthTracker::default();
+        health.set_journal(journal.clone());
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        let (status, _) = reporter.publish_heartbeat()?;
+        let serialized = serde_json::to_string(&status)?;
+        assert!(!serialized.contains("private-"));
+        let capacity = status
+            .prediction_journal
+            .ok_or_else(|| anyhow::anyhow!("missing journal capacity"))?;
+        assert_eq!(capacity.unresolved_count, 1);
+        assert_eq!(capacity.retained_count, 0);
+        assert_eq!(
+            capacity.bytes as u64,
+            std::fs::metadata(directory.path().join("prediction-placements.json"))?.len()
+        );
+        let oversized = "x".repeat(256 * 1024);
+        assert!(journal
+            .reserve(&crate::prediction_journal::PredictionPlacementRequest {
+                event_id: &oversized,
+                ..request
+            })
+            .is_err());
+        reporter.heartbeat()?;
+        assert!(reporter
+            .publish_heartbeat()?
+            .0
+            .prediction_journal
+            .is_some_and(|capacity| capacity.capacity_blocked));
+        journal.confirm(request.account_id, request.channel_id, request.event_id)?;
+        reporter.heartbeat()?;
+        let (status, _) = reporter.publish_heartbeat()?;
+        assert_eq!(
+            status
+                .prediction_journal
+                .map(|capacity| capacity.retained_count),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stale_or_repeatedly_failing_tasks_fail_health() {
         let mut status = RuntimeStatus {
             schema_version: STATUS_SCHEMA_VERSION,
@@ -864,6 +944,7 @@ mod tests {
             runtime_metrics: RuntimeMetricsSnapshot::default(),
             eventsub: None,
             pubsub: None,
+            prediction_journal: None,
         };
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());

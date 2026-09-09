@@ -247,3 +247,19 @@ fn current_log_timestamp_uses_requested_timezone() {
         );
     }
 }
+
+#[test]
+fn watch_status_notification_respects_event_filter() {
+    let mut webhook = new_discord_webhook(&DiscordSettings {
+        webhook_api: "https://example.invalid".into(),
+        events: vec![" watch_status ".into()],
+    })
+    .unwrap();
+    assert_eq!(webhook.events, vec![Event::WatchStatus]);
+    assert_eq!(
+        discord_message(&webhook, "Overdue first credit", Some(Event::WatchStatus)),
+        Some("Overdue first credit".into())
+    );
+    webhook.events = vec![Event::StreamerOnline];
+    assert!(discord_message(&webhook, "Overdue first credit", Some(Event::WatchStatus)).is_none());
+}

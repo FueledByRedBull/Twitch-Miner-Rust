@@ -50,9 +50,17 @@ anonymization suppresses exact streak timestamps before either destination.
 When watch selection changes, newly selected channels receive requests before
 retained channels. That dispatch order persists on subsequent passes while
 logical health-slot attribution remains tied to selection order. The two-slot
-limit, fair-rotation policy and request interval are unchanged. Moving a new
+limit and request interval are unchanged. Moving a new
 channel first delays the retained channel by one stagger at handover; faster
 request dispatch does not establish faster server credit or higher earnings.
+
+Fair rotations and streak promotions share a 15-minute promotion cooldown.
+A streak candidate arriving just after a fair rotation waits until the next
+turn instead of displacing a channel that has only just started watching.
+Startup promotions, campaign preemption, unavailable-channel replacement and
+watchdog recovery retain their existing behavior. The 30-minute fairness ceiling
+still limits streak deferrals. This bounds voluntary switching; it does not
+guarantee that Twitch will credit every partial watch interval.
 
 ## Earning status and prediction capacity
 
@@ -62,12 +70,31 @@ Watch-slot status distinguishes `measurement_unavailable`, `awaiting_first_credi
 the first-credit wait began or the last confirmed point changed. Thirty minutes
 without a first credit marks it overdue for operator review, without triggering
 rotation. Lost measurement, deselection or a changed broadcast resets the wait.
+An overdue first credit produces an operator warning, rate-limited to one per
+30 minutes across both slots, including measurement resets and channel changes.
+Configured Discord notifications can include `WATCH_STATUS`; the warning does
+not increment task failure counters or change health/restart decisions.
 
 Prediction placement capacity counts at most 128 unresolved requests separately
 from confirmed/rejected replay records. Terminal records remain protected for
 seven days, and the entire journal remains bounded to 256 KiB. Full storage
 fails closed rather than evicting unresolved requests or recent replay records.
 Reload and capacity tests cover more than 128 resolved placements.
+Admission reserves the maximum serialized growth of every unresolved record so
+later confirmation/rejection fits. A synthetic saturation test with nine-digit
+account/channel IDs, UUID-sized event/outcome IDs and 50,000-point stakes retains
+757 confirmed records (261,955 bytes) before rejecting the next reservation.
+This characterizes that fixture, not a universal record limit or a live workload.
+At seven-day retention it represents about 108 such records per day.
+
+Runtime status includes `prediction_journal` with `bytes`, `byte_limit`,
+`unresolved_count`, `unresolved_limit`, `retained_count` and `capacity_blocked`.
+The byte count includes the newline and excludes temporary files. The blocked
+flag reports a full unresolved limit or a capacity rejection in this process;
+a successful reservation, resolution or expiry clears the rejection flag.
+After restart, only the unresolved limit is known until another admission is
+attempted. A false flag does not guarantee that an arbitrarily sized request
+fits. Counts and bytes contain no account, channel or prediction identities.
 
 ## Configuration compatibility
 

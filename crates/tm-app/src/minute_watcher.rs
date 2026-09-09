@@ -92,6 +92,7 @@ pub(crate) enum WatchAttemptOutcome {
 #[derive(Debug, Default)]
 struct WatchdogState {
     records: HashMap<String, WatchdogRecord>,
+    last_first_credit_alert: Option<StdInstant>,
 }
 
 #[derive(Debug)]
@@ -278,6 +279,22 @@ impl WatchdogState {
         if let Some(record) = self.records.get_mut(channel_id) {
             record.recovery_attempted = true;
         }
+    }
+
+    fn first_credit_alert_due(
+        &mut self,
+        progress: crate::status::WatchProgress,
+        now: StdInstant,
+    ) -> bool {
+        if progress != crate::status::WatchProgress::FirstCreditOverdue
+            || self.last_first_credit_alert.is_some_and(|last| {
+                now.saturating_duration_since(last).as_secs() < WATCHDOG_STALL_SECONDS
+            })
+        {
+            return false;
+        }
+        self.last_first_credit_alert = Some(now);
+        true
     }
 }
 
@@ -520,6 +537,23 @@ async fn select_watch_logins(
                 StdInstant::now(),
             );
             context.health.watch_slot_progress(slot, progress, age);
+            if state
+                .watchdog
+                .first_credit_alert_due(progress, StdInstant::now())
+            {
+                let message = format!(
+                    "No first channel-point credit observed for {} after {} minutes of measurable watching; check watch status and stream eligibility",
+                    context.observability.streamer_name(streamer), age.unwrap_or_default() / 60,
+                );
+                tracing::warn!(
+                    task = "minute-watch",
+                    error_class = "first-credit-overdue",
+                    "{message}"
+                );
+                context
+                    .observability
+                    .spawn_event(DiscordEvent::WatchStatus, message);
+            }
         }
     }
     let selected_channel_ids = watch_logins
@@ -1625,6 +1659,31 @@ mod tests {
             watchdog.progress("channel-alice", "broadcast-1", stalled),
             (WatchProgress::Stalled, Some(1_800))
         );
+    }
+
+    #[test]
+    fn first_credit_alerts_are_bounded_across_slots_and_measurement_resets() {
+        use crate::status::WatchProgress;
+        let mut watchdog = WatchdogState::default();
+        let start = StdInstant::now();
+        for progress in [
+            WatchProgress::MeasurementUnavailable,
+            WatchProgress::AwaitingFirstCredit,
+            WatchProgress::Earning,
+            WatchProgress::Stalled,
+        ] {
+            assert!(!watchdog.first_credit_alert_due(progress, start));
+        }
+        assert!(watchdog.first_credit_alert_due(WatchProgress::FirstCreditOverdue, start));
+        watchdog.records.clear();
+        assert!(!watchdog.first_credit_alert_due(
+            WatchProgress::FirstCreditOverdue,
+            start + std::time::Duration::from_secs(1_799)
+        ));
+        assert!(watchdog.first_credit_alert_due(
+            WatchProgress::FirstCreditOverdue,
+            start + std::time::Duration::from_secs(1_800)
+        ));
     }
 
     #[test]

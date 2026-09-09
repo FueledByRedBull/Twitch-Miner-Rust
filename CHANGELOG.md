@@ -2,6 +2,12 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Reserves journal space for later prediction confirmations and exposes journal
+  bytes, unresolved/retained counts and capacity rejection in runtime status.
+- Warns about overdue first credit at most once per 30 minutes across watch
+  slots; optional Discord delivery uses the `WATCH_STATUS` event.
+- Shares the streak-promotion cooldown with fair rotations so a newly rotated
+  channel is not displaced again before its scheduled turn finishes.
 - Sends newly selected watch channels first and preserves request order while
   the selected pair remains unchanged, without changing rotation frequency.
 - Applies the prediction journal's 128-placement limit only to unresolved
