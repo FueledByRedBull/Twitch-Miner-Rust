@@ -198,8 +198,8 @@ impl PredictionPlacementJournal {
                 status: PlacementStatus::Pending,
             },
         );
-        // A confirmation adds a timestamp and a longer status. Reserve room for
-        // every unresolved record to reach its largest terminal representation.
+        // Leave room for every record that can still receive an authoritative
+        // outcome, including a confirmation that upgrades an earlier rejection.
         let admission = admission_bytes(&state.pending);
         if admission
             .as_ref()
@@ -400,9 +400,16 @@ fn snapshot_bytes(pending: &BTreeMap<String, PendingPlacement>) -> Result<Vec<u8
 }
 
 fn admission_bytes(pending: &BTreeMap<String, PendingPlacement>) -> Result<usize> {
-    // "confirmed" is two bytes longer than "pending"/"unknown"; the longest
-    // i64 timestamp is 16 bytes longer than null. Include the trailing newline.
-    Ok(snapshot_bytes(pending)?.len() + 1 + 18 * unresolved_count(pending))
+    // Rejections can still become confirmations. Budget every mutable record
+    // at its largest final representation, including timestamp growth.
+    let mut largest = pending.clone();
+    for entry in largest.values_mut() {
+        if !matches!(entry.status, PlacementStatus::Confirmed) {
+            entry.status = PlacementStatus::Confirmed;
+            entry.resolved_at_unix_seconds = Some(i64::MIN);
+        }
+    }
+    Ok(snapshot_bytes(&largest)?.len() + 1)
 }
 
 fn validate_pending(pending: &BTreeMap<String, PendingPlacement>) -> Result<()> {

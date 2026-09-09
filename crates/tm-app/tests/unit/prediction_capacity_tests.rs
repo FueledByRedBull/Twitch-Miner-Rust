@@ -218,3 +218,57 @@ fn admission_leaves_room_for_terminal_updates() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn saturated_rejected_history_can_be_confirmed_after_reopening() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let journal = PredictionPlacementJournal::open(directory.path())?;
+    let request = PredictionPlacementRequest {
+        account_id: "123456789",
+        channel_id: "987654321",
+        event_id: "",
+        choice: Some(1),
+        outcome_id: "12345678-1234-1234-1234-123456789abc",
+        amount: 50_000,
+        reserved_at_unix_seconds: unix_now_seconds(),
+    };
+    let mut events = Vec::new();
+    for index in 0..2_000 {
+        let event = format!("00000000-0000-0000-0000-{index:012}");
+        match journal.reserve(&PredictionPlacementRequest {
+            event_id: &event,
+            ..request
+        }) {
+            Ok(true) => {
+                journal.reject(request.account_id, request.channel_id, &event)?;
+                events.push(event);
+            }
+            Ok(false) => panic!("unique event must not be a replay"),
+            Err(error) => {
+                assert!(error.to_string().contains("byte capacity"));
+                break;
+            }
+        }
+    }
+    assert!((500..1_000).contains(&events.len()));
+    let reopened = PredictionPlacementJournal::open(directory.path())?;
+    for event in &events {
+        reopened.confirm(request.account_id, request.channel_id, event)?;
+    }
+    let reopened = PredictionPlacementJournal::open(directory.path())?;
+    assert_eq!(reopened.capacity()?.retained_count, events.len());
+    assert!(reopened.capacity()?.bytes as u64 <= MAX_JOURNAL_BYTES);
+    for event in &events {
+        assert_eq!(
+            reopened
+                .lookup(request.account_id, request.channel_id, event)?
+                .map(|entry| entry.status),
+            Some(PredictionPlacementStatus::Confirmed)
+        );
+        assert!(!reopened.reserve(&PredictionPlacementRequest {
+            event_id: event,
+            ..request
+        })?);
+    }
+    Ok(())
+}

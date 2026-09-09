@@ -2,6 +2,8 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Retains journal headroom for rejected-to-confirmed upgrades and includes all
+  overdue watch slots in each rate-limited first-credit warning.
 - Reserves journal space for later prediction confirmations and exposes journal
   bytes, unresolved/retained counts and capacity rejection in runtime status.
 - Warns about overdue first credit at most once per 30 minutes across watch

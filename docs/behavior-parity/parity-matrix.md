@@ -72,6 +72,7 @@ without a first credit marks it overdue for operator review, without triggering
 rotation. Lost measurement, deselection or a changed broadcast resets the wait.
 An overdue first credit produces an operator warning, rate-limited to one per
 30 minutes across both slots, including measurement resets and channel changes.
+Each warning includes all currently overdue slots and their observed wait times.
 Configured Discord notifications can include `WATCH_STATUS`; the warning does
 not increment task failure counters or change health/restart decisions.
 
@@ -80,8 +81,10 @@ from confirmed/rejected replay records. Terminal records remain protected for
 seven days, and the entire journal remains bounded to 256 KiB. Full storage
 fails closed rather than evicting unresolved requests or recent replay records.
 Reload and capacity tests cover more than 128 resolved placements.
-Admission reserves the maximum serialized growth of every unresolved record so
-later confirmation/rejection fits. A synthetic saturation test with nine-digit
+Admission budgets the largest serialized state of every record that can still
+transition, including rejected-to-confirmed upgrades and timestamp growth, so
+later reconciliation fits. Saturated rejected history is upgraded and reopened
+in regression coverage. A synthetic saturation test with nine-digit
 account/channel IDs, UUID-sized event/outcome IDs and 50,000-point stakes retains
 757 confirmed records (261,955 bytes) before rejecting the next reservation.
 This characterizes that fixture, not a universal record limit or a live workload.

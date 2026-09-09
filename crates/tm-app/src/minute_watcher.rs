@@ -281,20 +281,19 @@ impl WatchdogState {
         }
     }
 
-    fn first_credit_alert_due(
-        &mut self,
-        progress: crate::status::WatchProgress,
-        now: StdInstant,
-    ) -> bool {
-        if progress != crate::status::WatchProgress::FirstCreditOverdue
+    fn first_credit_alert(&mut self, overdue: &[String], now: StdInstant) -> Option<String> {
+        if overdue.is_empty()
             || self.last_first_credit_alert.is_some_and(|last| {
                 now.saturating_duration_since(last).as_secs() < WATCHDOG_STALL_SECONDS
             })
         {
-            return false;
+            return None;
         }
         self.last_first_credit_alert = Some(now);
-        true
+        Some(format!(
+            "No first channel-point credit observed for {}; check watch status and stream eligibility",
+            overdue.join(", ")
+        ))
     }
 }
 
@@ -509,6 +508,7 @@ async fn select_watch_logins(
             })
             .collect::<Vec<_>>(),
     );
+    let mut overdue = Vec::new();
     for (slot, login) in watch_logins.iter().enumerate() {
         if let Some(streamer) = snapshot
             .streamers
@@ -537,24 +537,27 @@ async fn select_watch_logins(
                 StdInstant::now(),
             );
             context.health.watch_slot_progress(slot, progress, age);
-            if state
-                .watchdog
-                .first_credit_alert_due(progress, StdInstant::now())
-            {
-                let message = format!(
-                    "No first channel-point credit observed for {} after {} minutes of measurable watching; check watch status and stream eligibility",
-                    context.observability.streamer_name(streamer), age.unwrap_or_default() / 60,
-                );
-                tracing::warn!(
-                    task = "minute-watch",
-                    error_class = "first-credit-overdue",
-                    "{message}"
-                );
-                context
-                    .observability
-                    .spawn_event(DiscordEvent::WatchStatus, message);
+            if progress == crate::status::WatchProgress::FirstCreditOverdue {
+                overdue.push(format!(
+                    "{} ({} minutes)",
+                    context.observability.streamer_name(streamer),
+                    age.unwrap_or_default() / 60,
+                ));
             }
         }
+    }
+    if let Some(message) = state
+        .watchdog
+        .first_credit_alert(&overdue, StdInstant::now())
+    {
+        tracing::warn!(
+            task = "minute-watch",
+            error_class = "first-credit-overdue",
+            "{message}"
+        );
+        context
+            .observability
+            .spawn_event(DiscordEvent::WatchStatus, message);
     }
     let selected_channel_ids = watch_logins
         .iter()
@@ -1663,27 +1666,22 @@ mod tests {
 
     #[test]
     fn first_credit_alerts_are_bounded_across_slots_and_measurement_resets() {
-        use crate::status::WatchProgress;
         let mut watchdog = WatchdogState::default();
         let start = StdInstant::now();
-        for progress in [
-            WatchProgress::MeasurementUnavailable,
-            WatchProgress::AwaitingFirstCredit,
-            WatchProgress::Earning,
-            WatchProgress::Stalled,
-        ] {
-            assert!(!watchdog.first_credit_alert_due(progress, start));
-        }
-        assert!(watchdog.first_credit_alert_due(WatchProgress::FirstCreditOverdue, start));
+        let overdue = vec!["alice (30 minutes)".into(), "bob (35 minutes)".into()];
+        assert!(watchdog.first_credit_alert(&[], start).is_none());
+        let message = watchdog
+            .first_credit_alert(&overdue, start)
+            .expect("first alert");
+        assert!(message.contains("alice (30 minutes), bob (35 minutes)"));
         watchdog.records.clear();
-        assert!(!watchdog.first_credit_alert_due(
-            WatchProgress::FirstCreditOverdue,
-            start + std::time::Duration::from_secs(1_799)
-        ));
-        assert!(watchdog.first_credit_alert_due(
-            WatchProgress::FirstCreditOverdue,
-            start + std::time::Duration::from_secs(1_800)
-        ));
+        assert!(watchdog
+            .first_credit_alert(&overdue, start + std::time::Duration::from_secs(1_799))
+            .is_none());
+        assert_eq!(
+            watchdog.first_credit_alert(&overdue, start + std::time::Duration::from_secs(1_800)),
+            Some(message)
+        );
     }
 
     #[test]
