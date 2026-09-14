@@ -64,12 +64,19 @@ guarantee that Twitch will credit every partial watch interval.
 
 ## Earning status and prediction capacity
 
+Bonus claims whose connections fail before the mutation is sent can be retried
+after a later availability observation. Ambiguous outcomes remain reserved to
+avoid replaying a potentially completed claim.
+
 Watch-slot status distinguishes `measurement_unavailable`, `awaiting_first_credit`,
 `first_credit_overdue`, `earning`, and `stalled`. The accompanying
 `progress_age_seconds` is monotonic time observed with valid measurement since
 the first-credit wait began or the last confirmed point changed. Thirty minutes
 without a first credit marks it overdue for operator review, without triggering
 rotation. Lost measurement, deselection or a changed broadcast resets the wait.
+Earning requires a confirmed credit received during the current selection visit
+and broadcast. Measurement loss preserves the visit boundary; an earlier visit's
+credit cannot establish earning after reselection.
 An overdue first credit produces an operator warning, rate-limited to one per
 30 minutes across both slots, including measurement resets and channel changes.
 Each warning includes all currently overdue slots and their observed wait times.

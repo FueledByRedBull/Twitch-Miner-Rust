@@ -405,9 +405,18 @@ pub(crate) async fn handle_claim_bonus_effect(
         runtime.release_claim_bonus(channel_id, claim_id).await?;
         return Ok(());
     }
-    twitch
+    if let Err(error) = twitch
         .claim_bonus(channel_id, claim_id, Some(persistent_user_id))
-        .await?;
+        .await
+    {
+        // The production client rejects redirects, so a connect failure
+        // precedes sending the mutation. Let a later
+        // availability observation retry; ambiguous outcomes stay reserved.
+        if matches!(&error, tm_twitch::TwitchClientError::Http(error) if error.is_connect()) {
+            runtime.release_claim_bonus(channel_id, claim_id).await?;
+        }
+        return Err(error.into());
+    }
     health.record_claim();
     reconcile_claimed_bonus_streak(runtime, twitch, channel_id).await;
     if observability.show_claimed_bonus {

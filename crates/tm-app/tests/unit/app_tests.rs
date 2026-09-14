@@ -174,6 +174,107 @@ mod tests {
         .to_string()
     }
 
+    #[tokio::test]
+    async fn bonus_claim_retries_unsent_connection_failure_but_keeps_unknown_outcome_reserved() {
+        for connect_failure in [true, false] {
+            let (mut endpoints, requests, server) =
+                spawn_json_response_server(if connect_failure {
+                    Vec::new()
+                } else {
+                    vec![String::from("{}")]
+                });
+            if connect_failure {
+                let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+                endpoints.gql_url = format!("http://{}/gql", closed.local_addr().unwrap());
+                drop(closed);
+            }
+            let twitch = TwitchClient::with_client_and_endpoints(
+                reqwest::Client::new(),
+                "token",
+                "ua",
+                endpoints,
+            );
+            let mut state =
+                tm_runtime::RuntimeState::from_targets(&ConfigFile::default(), &[], ts(0));
+            state.streamers = vec![Streamer {
+                username: "alice".into(),
+                channel_id: "701".into(),
+                ..Streamer::default()
+            }];
+            let runtime = tm_runtime::spawn_runtime_state(state);
+            let event = tm_domain::MinerEvent::ClaimAvailable {
+                channel_id: "701".into(),
+                claim_id: "claim-1".into(),
+            };
+            assert_eq!(
+                runtime
+                    .apply_event(event.clone(), ts(1))
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let error = handle_claim_bonus_effect(
+                &runtime,
+                &twitch,
+                "user-1",
+                "701",
+                "claim-1",
+                &test_observability(),
+                &HealthTracker::default(),
+            )
+            .await
+            .unwrap_err();
+            if connect_failure {
+                assert!(
+                    matches!(error.downcast_ref::<tm_twitch::TwitchClientError>(), Some(tm_twitch::TwitchClientError::Http(error)) if error.is_connect())
+                );
+            }
+            server.join().unwrap();
+            assert_eq!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.starts_with("POST "))
+                    .count(),
+                usize::from(!connect_failure)
+            );
+            assert_eq!(
+                runtime
+                    .apply_event(event.clone(), ts(2))
+                    .await
+                    .unwrap()
+                    .len(),
+                usize::from(connect_failure)
+            );
+            if connect_failure {
+                let (endpoints, _, server) = spawn_json_response_server(vec![fixture_json(
+                    "twitch.claim_bonus_success.json",
+                )]);
+                let twitch = TwitchClient::with_client_and_endpoints(
+                    reqwest::Client::new(),
+                    "token",
+                    "ua",
+                    endpoints,
+                );
+                handle_claim_bonus_effect(
+                    &runtime,
+                    &twitch,
+                    "user-1",
+                    "701",
+                    "claim-1",
+                    &test_observability(),
+                    &HealthTracker::default(),
+                )
+                .await
+                .unwrap();
+                server.join().unwrap();
+                assert!(runtime.apply_event(event, ts(3)).await.unwrap().is_empty());
+            }
+        }
+    }
+
     async fn run_bonus_claim(
         streamer: Streamer,
         milestone_response: Option<String>,

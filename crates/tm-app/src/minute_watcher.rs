@@ -92,6 +92,7 @@ pub(crate) enum WatchAttemptOutcome {
 #[derive(Debug, Default)]
 struct WatchdogState {
     records: HashMap<String, WatchdogRecord>,
+    selected_visits: HashMap<String, (String, OffsetDateTime)>,
     last_first_credit_alert: Option<StdInstant>,
 }
 
@@ -105,6 +106,38 @@ struct WatchdogRecord {
 }
 
 impl WatchdogState {
+    fn select_visits(
+        &mut self,
+        streamers: &[Streamer],
+        selected: &HashSet<String>,
+        now: OffsetDateTime,
+    ) {
+        // Measurement interruptions reset timers, not the current selection's
+        // identity. Only selection or broadcast changes start a new visit.
+        self.selected_visits.retain(|id, _| selected.contains(id));
+        self.records.retain(|id, _| selected.contains(id));
+        for streamer in streamers
+            .iter()
+            .filter(|s| selected.contains(&s.channel_id))
+        {
+            let broadcast = streamer.stream.as_ref().map(|s| s.broadcast_id.as_str());
+            let Some(broadcast) = broadcast.filter(|id| !id.trim().is_empty()) else {
+                self.selected_visits.remove(&streamer.channel_id);
+                self.records.remove(&streamer.channel_id);
+                continue;
+            };
+            if self
+                .selected_visits
+                .get(&streamer.channel_id)
+                .is_none_or(|(id, _)| id != broadcast)
+            {
+                self.selected_visits
+                    .insert(streamer.channel_id.clone(), (broadcast.to_owned(), now));
+                self.records.remove(&streamer.channel_id);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stalled_logins(
         &mut self,
@@ -177,7 +210,13 @@ impl WatchdogState {
             }
             let points_at = streamer
                 .last_server_confirmed_points_at
-                .filter(|points_at| *points_at >= stream_up_at);
+                .filter(|points_at| {
+                    *points_at >= stream_up_at
+                        && *points_at <= now
+                        && self.selected_visits.get(&streamer.channel_id).is_some_and(
+                            |(id, started)| id == &stream.broadcast_id && *points_at >= *started,
+                        )
+                });
             let context_at = streamer.last_context_observed_at.filter(|observed_at| {
                 let age = (now - *observed_at).whole_seconds();
                 (0..=WATCHDOG_CONTEXT_FRESH_SECONDS).contains(&age)
@@ -201,11 +240,11 @@ impl WatchdogState {
                 record.recovery_attempted = false;
             }
 
-            // A confirmed point event proves progress for this broadcast. A
+            // A confirmed point event proves progress for this visit. A
             // context observation only proves that measurement is alive; it
             // must not reset a no-progress timer by itself.
-            // Channels with no confirmed point event for the current broadcast
-            // stay unmeasured. The available drop payload has no per-channel
+            // Channels with no confirmed point event for the current visit
+            // await first credit. The available drop payload has no per-channel
             // progress identity that could safely establish that baseline.
             if context_at.is_none() {
                 record.awaiting_since = None;
@@ -484,6 +523,19 @@ async fn select_watch_logins(
         &streak_candidates,
         now,
     );
+    let selected_channel_ids = watch_logins
+        .iter()
+        .filter_map(|login| {
+            snapshot
+                .streamers
+                .iter()
+                .find(|streamer| &streamer.username == login)
+        })
+        .map(|streamer| streamer.channel_id.clone())
+        .collect::<HashSet<_>>();
+    state
+        .watchdog
+        .select_visits(&snapshot.streamers, &selected_channel_ids, now);
     context.health.set_watch_selection(
         &watch_logins
             .iter()
@@ -559,16 +611,6 @@ async fn select_watch_logins(
             .observability
             .spawn_event(DiscordEvent::WatchStatus, message);
     }
-    let selected_channel_ids = watch_logins
-        .iter()
-        .filter_map(|login| {
-            snapshot
-                .streamers
-                .iter()
-                .find(|streamer| &streamer.username == login)
-                .map(|streamer| streamer.channel_id.clone())
-        })
-        .collect::<HashSet<_>>();
     for released in released_watch_channel_ids(&state.selected_channel_ids, &selected_channel_ids) {
         if let Err(error) = context.runtime.reset_watch_progress(released).await {
             tracing::warn!(%error, "watch slot release could not reset streak progress");
@@ -1606,6 +1648,7 @@ mod tests {
         selected: &HashSet<String>,
         monotonic_now: Instant,
     ) -> Vec<(String, String)> {
+        watchdog.select_visits(std::slice::from_ref(streamer), selected, timestamp(100));
         watchdog.stalled_logins(
             std::slice::from_ref(streamer),
             selected,
@@ -1614,6 +1657,114 @@ mod tests {
             true,
             monotonic_now,
         )
+    }
+
+    #[test]
+    fn reselection_requires_current_visit_credit_and_still_alerts_without_rotating() {
+        use crate::status::WatchProgress;
+        let selected = HashSet::from([String::from("channel-alice")]);
+        let mut watchdog = WatchdogState::default();
+        let mut streamer = measured_streamer(
+            true,
+            "broadcast-1",
+            Some(timestamp(120)),
+            Some(timestamp(130)),
+        );
+        let start = Instant::now();
+        watchdog.select_visits(std::slice::from_ref(&streamer), &selected, timestamp(100));
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", start).0,
+            WatchProgress::Earning
+        );
+        watchdog.select_visits(
+            std::slice::from_ref(&streamer),
+            &HashSet::new(),
+            timestamp(150),
+        );
+        watchdog.select_visits(std::slice::from_ref(&streamer), &selected, timestamp(180));
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", start),
+            (WatchProgress::AwaitingFirstCredit, Some(0))
+        );
+        let overdue = start + Duration::from_secs(WATCHDOG_STALL_SECONDS);
+        assert!(observe(&mut watchdog, &streamer, &selected, overdue).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", overdue).0,
+            WatchProgress::FirstCreditOverdue
+        );
+        assert!(watchdog
+            .first_credit_alert(&["alice".into()], overdue)
+            .is_some());
+        streamer.last_server_confirmed_points_at = Some(timestamp(190));
+        assert!(observe(&mut watchdog, &streamer, &selected, overdue).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-1", overdue),
+            (WatchProgress::Earning, Some(0))
+        );
+    }
+
+    #[test]
+    fn measurement_interruptions_preserve_visit_and_broadcast_changes_replace_it() {
+        use crate::status::WatchProgress;
+        let selected = HashSet::from([String::from("channel-alice")]);
+        let mut watchdog = WatchdogState::default();
+        let mut streamer = measured_streamer(
+            true,
+            "broadcast-1",
+            Some(timestamp(190)),
+            Some(timestamp(195)),
+        );
+        let start = Instant::now();
+        watchdog.select_visits(std::slice::from_ref(&streamer), &selected, timestamp(180));
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        for unavailable in [true, false] {
+            if !unavailable {
+                streamer.stream.as_mut().unwrap().last_update = None;
+            }
+            assert!(watchdog
+                .stalled_logins(
+                    std::slice::from_ref(&streamer),
+                    &selected,
+                    &HashMap::new(),
+                    timestamp(200),
+                    !unavailable,
+                    start
+                )
+                .is_empty());
+            assert_eq!(
+                watchdog.progress("channel-alice", "broadcast-1", start).0,
+                WatchProgress::MeasurementUnavailable
+            );
+            streamer.stream.as_mut().unwrap().last_update = Some(timestamp(195));
+            watchdog.select_visits(std::slice::from_ref(&streamer), &selected, timestamp(200));
+            assert_eq!(watchdog.selected_visits["channel-alice"].1, timestamp(180));
+            assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+            assert_eq!(
+                watchdog.progress("channel-alice", "broadcast-1", start).0,
+                WatchProgress::Earning
+            );
+        }
+        streamer.stream.as_mut().unwrap().broadcast_id = "broadcast-2".into();
+        watchdog.select_visits(std::slice::from_ref(&streamer), &selected, timestamp(200));
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-2", start).0,
+            WatchProgress::AwaitingFirstCredit
+        );
+        streamer.last_server_confirmed_points_at = Some(timestamp(201));
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-2", start).0,
+            WatchProgress::AwaitingFirstCredit
+        );
+        streamer.last_server_confirmed_points_at = Some(timestamp(200));
+        assert!(observe(&mut watchdog, &streamer, &selected, start).is_empty());
+        assert_eq!(
+            watchdog.progress("channel-alice", "broadcast-2", start).0,
+            WatchProgress::Earning
+        );
     }
 
     #[test]

@@ -2,6 +2,9 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Requires current-visit credit before reporting earning after channel reselection.
+- Allows a later bonus-availability observation to retry a claim whose connection
+  failed before sending, while retaining protection for ambiguous outcomes.
 - Retains journal headroom for rejected-to-confirmed upgrades and includes all
   overdue watch slots in each rate-limited first-credit warning.
 - Reserves journal space for later prediction confirmations and exposes journal
