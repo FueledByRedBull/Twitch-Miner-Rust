@@ -517,10 +517,22 @@ async fn select_watch_logins(
             );
         }
     }
-    let watch_logins = state.watch_rotation.select_with_campaigns(
+    let credit_times = snapshot
+        .streamers
+        .iter()
+        .filter_map(|streamer| {
+            let record = state.watchdog.records.get(&streamer.channel_id)?;
+            (record.stalled_since.is_some() && !record.recovery_attempted)
+                .then_some(record.last_points_at)
+                .flatten()
+                .map(|last| (streamer.username.clone(), last))
+        })
+        .collect();
+    let watch_logins = state.watch_rotation.select_with_progress(
         &eligible,
         &snapshot.campaign_watch_logins(now),
         &streak_candidates,
+        &credit_times,
         now,
     );
     let selected_channel_ids = watch_logins

@@ -112,12 +112,20 @@ impl RuntimeState {
             return Vec::new();
         }
 
-        self.watch_target_indices(now)
-            .into_iter()
-            .filter_map(|idx| self.streamers.get(idx))
-            .filter(|streamer| streamer.can_watch_drop_campaign())
-            .map(|streamer| streamer.username.clone())
-            .collect()
+        // Streak watch time resets on release. Using its transient rank for
+        // the campaign pin makes it switch away and immediately back again.
+        pick_streamers_to_watch(
+            &self.streamers,
+            &[WatchPriority::Drops],
+            &self.game_priority,
+            &self.game_exclusions,
+            now,
+        )
+        .into_iter()
+        .filter_map(|idx| self.streamers.get(idx))
+        .filter(|streamer| streamer.can_watch_drop_campaign())
+        .map(|streamer| streamer.username.clone())
+        .collect()
     }
 
     #[must_use]

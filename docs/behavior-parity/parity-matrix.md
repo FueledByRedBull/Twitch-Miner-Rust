@@ -55,10 +55,20 @@ channel first delays the retained channel by one stagger at handover; faster
 request dispatch does not establish faster server credit or higher earnings.
 
 Fair rotations and streak promotions share a 15-minute promotion cooldown.
+The campaign pin ranks Drops by configured game priority and channel order,
+independently of temporary streak rank. Releasing a channel resets its watched
+minutes; that reset must not send the campaign pin immediately back to it.
 A streak candidate arriving just after a fair rotation waits until the next
 turn instead of displacing a channel that has only just started watching.
 Startup promotions, campaign preemption, unavailable-channel replacement and
-watchdog recovery retain their existing behavior. The 30-minute fairness ceiling
+watchdog recovery remain immediate. A watchdog replacement starts a fresh turn
+so an overdue fair rotation cannot immediately reselect the stalled channel.
+When current-visit reward measurement is healthy and each outgoing channel's
+last WATCH or WATCH_STREAK credit is 210–299 seconds old, fair rotation may wait
+for the next credit from each channel, capped at 120 seconds. Missing measurement,
+campaign changes and eligible streak promotions bypass this wait. This is a
+bounded cadence heuristic, not a prediction of Twitch's next award.
+The 30-minute fairness ceiling
 still limits streak deferrals. This bounds voluntary switching; it does not
 guarantee that Twitch will credit every partial watch interval.
 

@@ -19,6 +19,45 @@ fn ts(unix: i64) -> OffsetDateTime {
 }
 
 #[test]
+fn campaign_order_does_not_bounce_when_streak_watch_time_resets() {
+    let mut state = RuntimeState::from_targets(
+        &ConfigFile::default(),
+        &["alpha".into(), "bravo".into()],
+        ts(0),
+    );
+    for streamer in &mut state.streamers {
+        streamer.channel_id.clone_from(&streamer.username);
+        streamer.is_online = true;
+        streamer.settings.farm_drops = true;
+        streamer.settings.single_watcher_during_drops = false;
+        streamer.settings.watch_streak = true;
+        streamer.stream = Some(Stream {
+            broadcast_id: streamer.username.clone(),
+            game: Some(tm_domain::Game::from_name("Game")),
+            drop_campaign_eligible: Some(true),
+            watch_streak_missing: true,
+            ..Stream::default()
+        });
+    }
+    assert_eq!(state.campaign_watch_logins(ts(0)), vec!["alpha", "bravo"]);
+    state.streamers[0].stream.as_mut().unwrap().minute_watched = 15.0;
+    assert_eq!(state.watch_target_logins(ts(900))[0], "bravo");
+    assert_eq!(state.campaign_watch_logins(ts(900)), vec!["alpha", "bravo"]);
+    assert!(state.reset_watch_progress("alpha"));
+    assert_eq!(state.campaign_watch_logins(ts(920)), vec!["alpha", "bravo"]);
+    state.streamers[1].stream.as_mut().unwrap().game = Some(tm_domain::Game::from_name("Priority"));
+    state.game_priority = vec!["priority".into()];
+    assert_eq!(state.campaign_watch_logins(ts(940)), vec!["bravo", "alpha"]);
+    state.streamers[1].is_online = false;
+    assert_eq!(state.campaign_watch_logins(ts(960)), vec!["alpha"]);
+    state.game_exclusions = vec!["game".into()];
+    assert!(state.campaign_watch_logins(ts(980)).is_empty());
+    state.game_exclusions.clear();
+    state.watch_priorities = vec![WatchPriority::Order];
+    assert!(state.campaign_watch_logins(ts(1_000)).is_empty());
+}
+
+#[test]
 fn pubsub_gain_supports_prediction_stake_deduction() {
     let mut streamer = Streamer {
         username: "tester".into(),

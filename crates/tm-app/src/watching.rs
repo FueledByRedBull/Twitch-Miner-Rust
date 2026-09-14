@@ -31,6 +31,7 @@ pub(crate) struct WatchRotation {
     last_fair_rotation: Option<RuntimeTime>,
     selection_reasons: HashMap<String, &'static str>,
     watchdog_rotation_pending: bool,
+    fair_hold: Option<(RuntimeTime, Vec<(String, RuntimeTime)>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,18 +41,34 @@ pub(crate) struct StreakCandidate {
 }
 
 impl WatchRotation {
+    #[cfg(test)]
+    fn select_with_campaigns(
+        &mut self,
+        eligible: &[String],
+        campaigns: &[String],
+        streaks: &[StreakCandidate],
+        now: RuntimeTime,
+    ) -> Vec<String> {
+        self.select_with_progress(eligible, campaigns, streaks, &HashMap::new(), now)
+    }
+
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn select_with_campaigns(
+    pub(crate) fn select_with_progress(
         &mut self,
         ordered_eligible: &[String],
         campaign_logins: &[String],
         streak_candidates: &[StreakCandidate],
+        credit_times: &HashMap<String, RuntimeTime>,
         now: RuntimeTime,
     ) -> Vec<String> {
         let pinned_campaign = campaign_logins
             .iter()
             .find(|login| ordered_eligible.iter().any(|eligible| eligible == *login))
             .cloned();
+        let campaign_changed = self.pinned_campaign != pinned_campaign;
+        if campaign_changed {
+            self.fair_hold = None;
+        }
         self.pinned_campaign = pinned_campaign;
         // One promotion per broadcast. A record is released only when the
         // channel reports a different broadcast, never when it drops out of the
@@ -99,6 +116,7 @@ impl WatchRotation {
             self.last_voluntary_switch = None;
             self.selection_reasons.clear();
             self.watchdog_rotation_pending = false;
+            self.fair_hold = None;
             if let Some(pinned) = &self.pinned_campaign {
                 self.selection_reasons
                     .insert(pinned.clone(), "campaign-priority");
@@ -111,6 +129,13 @@ impl WatchRotation {
         }
         if self.last_fair_rotation.is_none() {
             self.last_fair_rotation = Some(now);
+        }
+        if self.watchdog_rotation_pending {
+            // The watchdog already moved the queue. Give its replacement a
+            // turn instead of rotating again and reselecting the stalled slot.
+            self.spare_since = Some(now);
+            self.last_voluntary_switch = Some(now);
+            self.fair_hold = None;
         }
 
         let rotating_slots = MAX_CONCURRENT_WATCHERS - usize::from(self.pinned_campaign.is_some());
@@ -141,23 +166,48 @@ impl WatchRotation {
                     .insert(candidate.login, candidate.broadcast_id);
                 self.last_voluntary_switch = Some(now);
                 self.spare_since = Some(now);
+                self.fair_hold = None;
             }
         } else if self.queue.len() > rotating_slots
             && self
                 .spare_since
                 .is_some_and(|started| (now - started).whole_seconds() >= WATCH_ROTATION_SECONDS)
         {
-            for _ in 0..rotating_slots {
-                if let Some(login) = self.queue.pop_front() {
-                    self.queue.push_back(login);
+            let outgoing = self
+                .queue
+                .iter()
+                .take(rotating_slots)
+                .filter(|login| {
+                    !self
+                        .queue
+                        .iter()
+                        .cycle()
+                        .skip(rotating_slots)
+                        .take(rotating_slots)
+                        .any(|next| next == *login)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !self.hold_for_credit(
+                &outgoing,
+                credit_times,
+                now,
+                fair_rotation_overdue || campaign_changed,
+            ) {
+                for _ in 0..rotating_slots {
+                    if let Some(login) = self.queue.pop_front() {
+                        self.queue.push_back(login);
+                    }
                 }
+                self.spare_since = Some(now);
+                self.last_fair_rotation = Some(now);
+                // Give the fair-selected channels their turn before a promotion
+                // can replace them and interrupt newly started credit progress.
+                self.last_voluntary_switch = Some(now);
+                fair_rotated = true;
             }
-            self.spare_since = Some(now);
-            self.last_fair_rotation = Some(now);
-            // Give the fair-selected channels their turn before a promotion
-            // can replace them and interrupt newly started credit progress.
-            self.last_voluntary_switch = Some(now);
-            fair_rotated = true;
+        } else {
+            self.fair_hold = None;
         }
 
         let selected = self
@@ -199,6 +249,53 @@ impl WatchRotation {
                 .insert(candidate.login.clone(), candidate.broadcast_id.clone());
         }
         selected
+    }
+
+    fn hold_for_credit(
+        &mut self,
+        outgoing: &[String],
+        credits: &HashMap<String, RuntimeTime>,
+        now: RuntimeTime,
+        bypass: bool,
+    ) -> bool {
+        if bypass || outgoing.iter().any(|login| !credits.contains_key(login)) {
+            self.fair_hold = None;
+            return false;
+        }
+        if self.fair_hold.as_ref().is_some_and(|(_, prior)| {
+            prior.len() != outgoing.len()
+                || prior.iter().any(|(login, _)| !outgoing.contains(login))
+        }) {
+            self.fair_hold = None;
+            return false;
+        }
+        // A recent observed watch reward can justify a short wait, never an
+        // assumption that the server will award the next one on schedule.
+        if self.fair_hold.is_none()
+            && outgoing.iter().all(|login| {
+                credits
+                    .get(login)
+                    .is_some_and(|last| (210..300).contains(&(now - *last).whole_seconds()))
+            })
+        {
+            self.fair_hold = Some((
+                now,
+                outgoing
+                    .iter()
+                    .filter_map(|login| credits.get(login).map(|last| (login.clone(), *last)))
+                    .collect(),
+            ));
+        }
+        let hold = self.fair_hold.as_ref().is_some_and(|(started, prior)| {
+            (0..120).contains(&(now - *started).whole_seconds())
+                && !prior
+                    .iter()
+                    .all(|(login, last)| credits.get(login).is_some_and(|current| current > last))
+        });
+        if !hold {
+            self.fair_hold = None;
+        }
+        hold
     }
 
     pub(crate) fn selection_reason(&self, login: &str) -> &'static str {
@@ -254,6 +351,125 @@ mod tests {
             login: login.to_owned(),
             broadcast_id: broadcast_id.to_owned(),
         }
+    }
+
+    #[test]
+    fn fair_rotation_waits_only_for_nearby_credit_with_a_fixed_deadline() {
+        use std::collections::HashMap;
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let campaigns = logins(&["alpha"]);
+        for (release, credit) in [(960, Some(950)), (1_020, None)] {
+            let mut rotation = WatchRotation::default();
+            let mut credits = HashMap::from([(String::from("bravo"), ts(660))]);
+            let streaks = [streak("bravo", "broadcast-b")];
+            rotation.select_with_progress(&eligible, &campaigns, &streaks, &credits, ts(0));
+            for now in [900, 920] {
+                assert_eq!(
+                    rotation.select_with_progress(
+                        &eligible,
+                        &campaigns,
+                        &streaks,
+                        &credits,
+                        ts(now)
+                    ),
+                    logins(&["alpha", "bravo"])
+                );
+            }
+            if let Some(credit) = credit {
+                credits.insert(String::from("bravo"), ts(credit));
+            }
+            assert_eq!(
+                rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(release)),
+                logins(&["alpha", "charlie"])
+            );
+            assert_eq!(rotation.selection_reason("charlie"), "fair-rotation");
+            assert!(rotation.fair_hold.is_none());
+        }
+        for credit in [None, Some(100), Some(900), Some(901)] {
+            let mut rotation = WatchRotation::default();
+            let credits = credit
+                .map(|at| (String::from("bravo"), ts(at)))
+                .into_iter()
+                .collect();
+            rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(0));
+            assert_eq!(
+                rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(900)),
+                logins(&["alpha", "charlie"])
+            );
+        }
+    }
+
+    #[test]
+    fn credit_wait_never_delays_forced_changes_or_fairness_ceiling() {
+        use std::collections::HashMap;
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let campaigns = logins(&["alpha"]);
+        for case in 0..6 {
+            let mut rotation = WatchRotation::default();
+            let mut credits = HashMap::from([(String::from("bravo"), ts(660))]);
+            rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(0));
+            rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(900));
+            let mut eligible = eligible.clone();
+            let mut campaigns = campaigns.clone();
+            let mut streaks = Vec::new();
+            match case {
+                0 => credits.clear(), // stale metadata, transport or request failure
+                1 => eligible.retain(|login| login != "bravo"),
+                2 => {
+                    assert!(rotation.defer_stalled("bravo"));
+                }
+                3 => campaigns = logins(&["charlie"]),
+                4 => streaks.push(streak("delta", "broadcast-d")),
+                _ => {}
+            }
+            let now = if case == 5 { 1_800 } else { 920 };
+            let selected =
+                rotation.select_with_progress(&eligible, &campaigns, &streaks, &credits, ts(now));
+            assert_ne!(selected, logins(&["alpha", "bravo"]), "case {case}");
+            assert!(rotation.fair_hold.is_none(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn two_rotating_slots_wait_for_both_credits() {
+        use std::collections::HashMap;
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let mut rotation = WatchRotation::default();
+        let mut credits = HashMap::from([
+            (String::from("alpha"), ts(660)),
+            (String::from("bravo"), ts(670)),
+        ]);
+        rotation.select_with_progress(&eligible, &[], &[], &credits, ts(0));
+        assert_eq!(
+            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(900)),
+            logins(&["alpha", "bravo"])
+        );
+        credits.insert(String::from("alpha"), ts(950));
+        assert_eq!(
+            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(960)),
+            logins(&["alpha", "bravo"])
+        );
+        credits.insert(String::from("bravo"), ts(970));
+        assert_eq!(
+            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(980)),
+            logins(&["charlie", "delta"])
+        );
+    }
+
+    #[test]
+    fn credit_wait_ignores_the_channel_retained_by_a_three_channel_rotation() {
+        let eligible = logins(&["alpha", "bravo", "charlie"]);
+        let mut rotation = WatchRotation::default();
+        let credits = std::collections::HashMap::from([(String::from("bravo"), ts(660))]);
+        rotation.select_with_progress(&eligible, &[], &[], &credits, ts(0));
+        assert_eq!(
+            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(900)),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(1_020)),
+            logins(&["charlie", "alpha"])
+        );
     }
 
     #[test]
@@ -480,6 +696,25 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+    }
+
+    #[test]
+    fn watchdog_replacement_gets_a_turn_even_when_fair_rotation_is_due() {
+        for campaigns in [Vec::new(), logins(&["alpha"])] {
+            let eligible = logins(&["alpha", "bravo", "charlie"]);
+            let mut rotation = WatchRotation::default();
+            rotation.select_with_campaigns(&eligible, &campaigns, &[], ts(0));
+            assert!(rotation.defer_stalled("bravo"));
+            for seconds in [900, 920, 1_799] {
+                let selected =
+                    rotation.select_with_campaigns(&eligible, &campaigns, &[], ts(seconds));
+                assert!(selected.contains(&String::from("charlie")));
+                assert!(!selected.contains(&String::from("bravo")));
+            }
+            assert!(rotation
+                .select_with_campaigns(&eligible, &campaigns, &[], ts(1_800))
+                .contains(&String::from("bravo")));
+        }
     }
 
     #[test]

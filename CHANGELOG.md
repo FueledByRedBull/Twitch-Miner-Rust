@@ -2,6 +2,9 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Stabilizes the Drops campaign pin independently of transient streak ranking,
+  prevents watchdog recovery from being undone by a second rotation, and gives
+  nearby observed watch rewards a bounded grace period before fair rotation.
 - Updates Rustls to 0.23.45 for RUSTSEC-2026-0285, plus Tokio-Rustls 0.26.5,
   dirs 7.0.0 and the pinned CI installer action 2.87.8.
 - Requires current-visit credit before reporting earning after channel reselection.
