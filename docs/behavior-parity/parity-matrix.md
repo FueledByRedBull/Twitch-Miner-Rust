@@ -61,8 +61,9 @@ minutes; that reset must not send the campaign pin immediately back to it.
 A streak candidate arriving just after a fair rotation waits until the next
 turn instead of displacing a channel that has only just started watching.
 Startup promotions, campaign preemption, unavailable-channel replacement and
-watchdog recovery remain immediate. A watchdog replacement starts a fresh turn
-so an overdue fair rotation cannot immediately reselect the stalled channel.
+watchdog recovery remain immediate. Watchdog and unavailable-channel replacements
+start a fresh turn so the outgoing channel's rotation deadline cannot immediately
+displace the replacement. Campaign changes retain the existing fairness clock.
 When current-visit reward measurement is healthy and each outgoing channel's
 last WATCH or WATCH_STREAK credit is 210–299 seconds old, fair rotation may wait
 for the next credit from each channel, capped at 120 seconds. Missing measurement,

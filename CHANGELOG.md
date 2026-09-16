@@ -2,6 +2,10 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Gives replacements for unavailable watch channels a full turn before voluntary
+  rotation or streak promotion.
+- Reconnects promptly after a PubSub server request while retaining backoff for
+  repeated short-lived connections.
 - Stabilizes the Drops campaign pin independently of transient streak ranking,
   prevents watchdog recovery from being undone by a second rotation, and gives
   nearby observed watch rewards a bounded grace period before fair rotation.

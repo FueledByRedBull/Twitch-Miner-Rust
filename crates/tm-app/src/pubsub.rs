@@ -720,10 +720,13 @@ pub(crate) fn pubsub_reconnect_delay(
 ) -> Option<Duration> {
     match result {
         Ok(Err(tm_pubsub::PubSubError::ReconnectRequested)) => {
+            let delay =
+                exponential_backoff_with_jitter(5, failure_attempt, connection_index, topic_count);
+            let seconds = delay.as_secs();
             tracing::warn!(
-                "PubSub[{connection_index}] reconnect requested; waiting 60 seconds ({topic_count} topic(s))"
+                "PubSub[{connection_index}] reconnect requested; waiting {seconds} seconds ({topic_count} topic(s))"
             );
-            Some(Duration::from_secs(60))
+            Some(delay)
         }
         Ok(Ok(())) => Some(exponential_backoff_with_jitter(
             5,

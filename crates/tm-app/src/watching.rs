@@ -61,6 +61,8 @@ impl WatchRotation {
         credit_times: &HashMap<String, RuntimeTime>,
         now: RuntimeTime,
     ) -> Vec<String> {
+        let previous_spare_slots =
+            MAX_CONCURRENT_WATCHERS - usize::from(self.pinned_campaign.is_some());
         let pinned_campaign = campaign_logins
             .iter()
             .find(|login| ordered_eligible.iter().any(|eligible| eligible == *login))
@@ -102,6 +104,11 @@ impl WatchRotation {
                 .cloned()
                 .collect();
         }
+        let selected_removed = self
+            .queue
+            .iter()
+            .take(previous_spare_slots)
+            .any(|login| !ordered_eligible.contains(login));
         self.queue
             .retain(|login| spare_candidates.iter().any(|candidate| candidate == login));
         for login in spare_candidates {
@@ -124,6 +131,13 @@ impl WatchRotation {
             return self.pinned_campaign.iter().cloned().collect();
         }
 
+        if selected_removed {
+            // An eligibility-driven replacement needs its own turn, just like
+            // a watchdog replacement; the outgoing channel's deadline is stale.
+            self.spare_since = Some(now);
+            self.last_voluntary_switch = Some(now);
+            self.fair_hold = None;
+        }
         if self.spare_since.is_none() {
             self.spare_since = Some(now);
         }
@@ -528,6 +542,47 @@ mod tests {
     }
 
     #[test]
+    fn eligibility_replacement_gets_a_full_turn_before_rotation_or_promotion() {
+        for pinned in [false, true] {
+            let mut rotation = WatchRotation::default();
+            let old = logins(&["alpha", "bravo", "charlie", "delta", "echo"]);
+            let new = logins(&["alpha", "charlie", "delta", "echo"]);
+            let campaigns = if pinned {
+                logins(&["alpha"])
+            } else {
+                Vec::new()
+            };
+            rotation.select_with_campaigns(&old, &campaigns, &[], ts(0));
+            let selected = rotation.select_with_campaigns(&new, &campaigns, &[], ts(890));
+            assert_eq!(selected, logins(&["alpha", "charlie"]));
+            for now in [900, 1789] {
+                assert_eq!(
+                    rotation.select_with_campaigns(
+                        &new,
+                        &campaigns,
+                        &[streak("echo", "e")],
+                        ts(now)
+                    ),
+                    selected
+                );
+            }
+            assert_ne!(
+                rotation.select_with_campaigns(&new, &campaigns, &[], ts(1790)),
+                selected
+            );
+        }
+        let mut rotation = WatchRotation::default();
+        let old = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let new = logins(&["alpha", "bravo", "charlie"]);
+        rotation.select_with_campaigns(&old, &[], &[], ts(0));
+        rotation.select_with_campaigns(&new, &[], &[], ts(890));
+        assert_eq!(
+            rotation.select_with_campaigns(&new, &[], &[], ts(900)),
+            logins(&["charlie", "alpha"])
+        );
+    }
+
+    #[test]
     fn removes_ineligible_channels_and_refills_without_waiting() {
         let mut rotation = WatchRotation::default();
         assert_eq!(
@@ -549,7 +604,7 @@ mod tests {
                 &logins(&["bravo", "charlie", "delta"]),
                 &[],
                 &[],
-                ts(899),
+                ts(929),
             ),
             logins(&["bravo", "charlie"])
         );
@@ -558,7 +613,7 @@ mod tests {
                 &logins(&["bravo", "charlie", "delta"]),
                 &[],
                 &[],
-                ts(900),
+                ts(930),
             ),
             logins(&["delta", "bravo"])
         );

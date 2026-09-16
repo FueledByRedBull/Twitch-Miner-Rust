@@ -1374,7 +1374,7 @@ mod tests {
 
         assert_eq!(
             pubsub_reconnect_delay(&reconnect_requested, 0, 1, 1),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_secs(11))
         );
         assert_eq!(
             pubsub_reconnect_delay(&generic_failure, 0, 1, 1),
@@ -1407,6 +1407,29 @@ mod tests {
                     assert!(delay >= previous);
                     assert!(delay <= Duration::from_secs(300));
                     previous = delay;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn requested_reconnects_resume_promptly_but_back_off_when_repeated() {
+        let requested = Ok(Err(tm_pubsub::PubSubError::ReconnectRequested));
+        let closed = Ok(Ok(()));
+        for connection in 0..=10 {
+            for topics in [1, 3, 50] {
+                let initial = pubsub_reconnect_delay(&requested, connection, topics, 0).unwrap();
+                assert!((5..=11).contains(&initial.as_secs()));
+                for attempt in 1..=100 {
+                    let delay = pubsub_reconnect_delay(&requested, connection, topics, attempt);
+                    assert_eq!(
+                        delay,
+                        pubsub_reconnect_delay(&closed, connection, topics, attempt)
+                    );
+                    assert!(delay.unwrap() <= Duration::from_secs(300));
+                    if attempt >= 5 {
+                        assert!(delay.unwrap() > initial);
+                    }
                 }
             }
         }
