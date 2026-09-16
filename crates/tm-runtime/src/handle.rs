@@ -24,7 +24,6 @@ pub struct RuntimeHandle {
     summary: RuntimeSummary,
     state_revision_tx: watch::Sender<u64>,
     state_revision: watch::Receiver<u64>,
-    revision: Arc<AtomicU64>,
     closed: Arc<AtomicBool>,
     metrics: Arc<RuntimeMetrics>,
 }
@@ -114,7 +113,6 @@ pub fn spawn_runtime_state(mut state: RuntimeState) -> RuntimeHandle {
         summary,
         state_revision_tx,
         state_revision,
-        revision: Arc::new(AtomicU64::new(0)),
         closed: Arc::new(AtomicBool::new(false)),
         metrics,
     }
@@ -131,14 +129,8 @@ impl RuntimeHandle {
     }
 
     fn notify_state_change(&self) {
-        let revision = self
-            .revision
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(1))
-            })
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        let _ = self.state_revision_tx.send(revision);
+        self.state_revision_tx
+            .send_modify(|revision| *revision = revision.saturating_add(1));
     }
 
     #[must_use]

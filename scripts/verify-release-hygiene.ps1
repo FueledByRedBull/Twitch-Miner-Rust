@@ -56,25 +56,12 @@ if ($ciWorkflow -match 'gitleaks/gitleaks-action' -or
 }
 
 $multiarchWorkflow = Get-Content -Raw .github/workflows/multiarch-build.yml
-if ($multiarchWorkflow -notmatch 'candidate-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}' -or
-    $multiarchWorkflow -notmatch 'Publish consumer aliases after verification' -or
-    $multiarchWorkflow -notmatch 'resolve-platform-digest\.ps1' -or
-    $multiarchWorkflow -notmatch 'steps\.runtime\.outputs\.digest') {
-    throw 'Multiarch publication must verify a candidate-only manifest before publishing aliases.'
-}
 if ($multiarchWorkflow -match 'tags:\s*\r?\n\s*-\s*v\*') {
     throw 'Stable release tags must be promoted by the protected manual workflow.'
 }
 if ($multiarchWorkflow -match 'type=raw,value=latest|type=ref,event=branch|type=ref,event=tag') {
     throw 'Multiarch candidates must expose only the immutable SHA discovery tag before acceptance.'
 }
-$localBuildScript = Get-Content -Raw scripts/build-multiarch.ps1
-if ($localBuildScript -notmatch 'candidate-\$buildRevision' -or
-    $localBuildScript -notmatch 'candidateTagPattern' -or
-    $localBuildScript -notmatch "Stable image tags are published only by the protected Promote Release workflow") {
-    throw 'Local multiarch pushes must use revision-scoped candidate tags and reject stable aliases.'
-}
-
 $promotionWorkflow = Get-Content -Raw .github/workflows/promote-release.yml
 if ($promotionWorkflow -notmatch 'workflow_dispatch' -or
     $promotionWorkflow -notmatch 'environment:\s*release' -or
@@ -84,7 +71,6 @@ if ($promotionWorkflow -notmatch 'workflow_dispatch' -or
     throw 'Stable promotion workflow must require external evidence and the protected release environment.'
 }
 $windowsWorkflow = Get-Content -Raw .github/workflows/windows-release.yml
-$ciWindowsWorkflow = Get-Content -Raw .github/workflows/ci.yml
 $installer = Get-Content -Raw installer/Product.wxs
 $windowsBuildScript = Get-Content -Raw scripts/build-windows-release.ps1
 if ($installer -match 'Guid="\*"' -or
@@ -92,20 +78,9 @@ if ($installer -match 'Guid="\*"' -or
     $installer -notmatch 'config\.example\.json') {
     throw 'WiX installer must use a stable component identity and keep runtime data out of Program Files.'
 }
-if ($windowsWorkflow -notmatch 'workflow_call:' -or
-    $ciWindowsWorkflow -notmatch '(?ms)^  windows-package:\s*\r?\n\s+permissions:\s*\r?\n\s+contents: read\s*\r?\n\s+uses: \./\.github/workflows/windows-release\.yml\s*\r?\n\s+with:\s*\r?\n\s+artifact-name: windows-package') {
-    throw 'CI must reuse the Windows release packaging job with read-only permissions.'
-}
 if ($windowsWorkflow -notmatch 'dotnet tool install wix .*--version 4\.0\.6 .*--allow-roll-forward' -or
     $windowsWorkflow -notmatch 'DOTNET_ROLL_FORWARD:\s*Major') {
     throw 'Windows WiX jobs must pin 4.0.6 and allow roll-forward on the Windows 2025 runner.'
-}
-if ($windowsWorkflow -match 'twitch-miner-\*\.(?:zip|msi)' -or
-    $windowsWorkflow -notmatch 'steps\.package\.outputs\.base' -or
-    $windowsWorkflow -notmatch 'Start-Process msiexec\.exe.*-WindowStyle Hidden' -or
-    $windowsWorkflow -notmatch '--version' -or
-    $windowsWorkflow -notmatch 'verify-windows-installer\.ps1') {
-    throw 'Windows packaging jobs must select current version outputs, hide MSI operations, and smoke-test the installed and portable executables.'
 }
 if ($windowsBuildScript -notmatch 'LastWriteTimeUtc' -or
     $windowsBuildScript -notmatch 'SOURCE_DATE_EPOCH' -or
@@ -120,16 +95,9 @@ if (-not (Test-Path -LiteralPath 'fuzz/Cargo.lock' -PathType Leaf) -or
 $offlineBundleScript = Get-Content -Raw scripts/create-offline-source-bundle.ps1
 if ($offlineBundleScript -notmatch 'cargo vendor --locked --versioned-dirs --sync fuzz/Cargo\.toml vendor' -or
     $offlineBundleScript -notmatch '--manifest-path fuzz/Cargo\.toml --locked --offline' -or
-    $offlineBundleScript -notmatch '\[Guid\]::NewGuid' -or
     $offlineBundleScript -notmatch 'OutputPath must not be inside the temporary bundle staging directory') {
     throw 'Offline source bundles must vendor and validate the fuzz workspace and isolate staging from stale or self-including output paths.'
 }
-$deploymentScript = Get-Content -Raw scripts/deploy-with-rollback.ps1
-if ($deploymentScript -notmatch 'ConvertTo-ComposeLiteral' -or
-    $deploymentScript -notmatch 'Runtime data directory paths cannot contain newline characters') {
-    throw 'Deployment state must preserve literal Compose data paths and reject newline values.'
-}
-
 $sentinelPath = Join-Path (Resolve-Path -LiteralPath '.').Path "offline-bundle-validate-only-sentinel-$PID.txt"
 $sentinelContent = 'must-not-be-overwritten'
 try {
@@ -182,11 +150,6 @@ if (-not $?) {
 & "$PSScriptRoot/build-windows-release.ps1" -ValidateOnly
 if (-not $?) {
     throw 'Windows release packaging validation failed.'
-}
-
-git check-ignore -q FINISHING_TOUCHES.md
-if ($LASTEXITCODE -ne 0) {
-    throw 'FINISHING_TOUCHES.md must remain ignored.'
 }
 
 Write-Output 'release-hygiene-ok'

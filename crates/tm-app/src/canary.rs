@@ -168,7 +168,7 @@ async fn run_canary_read_checks(
         "watch-streak-reward-list",
         context
             .twitch
-            .fetch_watch_streak_achievement(&context.target_channel_id)
+            .fetch_watch_streak_milestone(&context.target_channel_id)
             .await,
     )?;
     let _ = canary_step(

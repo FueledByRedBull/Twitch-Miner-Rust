@@ -210,7 +210,7 @@ async fn claim_available_drops_with_health(
     coordinator: &DropClaimCoordinator,
 ) -> Result<()> {
     let drops = match twitch
-        .fetch_claimable_drops()
+        .fetch_inventory_typed()
         .await
         .with_context(|| format!("load {mode} drops inventory"))
     {
@@ -275,7 +275,7 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
             .with_context(|| format!("claim drop {}", drop.drop_instance_id));
         if let Err(error) = result {
             coordinator.mark_unknown(&drop.drop_instance_id);
-            if let Ok(reconciled) = twitch.fetch_claimable_drops().await {
+            if let Ok(reconciled) = twitch.fetch_inventory_typed().await {
                 if let Some(current) = reconciled.iter().find(|current| {
                     current.drop_instance_id == drop.drop_instance_id && current.is_claimed
                 }) {

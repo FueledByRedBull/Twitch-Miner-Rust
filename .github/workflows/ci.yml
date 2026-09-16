@@ -58,7 +58,9 @@ jobs:
           ./scripts/tests/verify-docs.tests.ps1
       - name: Validate release hygiene
         shell: pwsh
-        run: ./scripts/verify-release-hygiene.ps1
+        run: |
+          ./scripts/verify-release-hygiene.ps1
+          ./scripts/tests/verify-promotion.tests.ps1
       - name: Validate architecture boundaries
         shell: pwsh
         run: ./scripts/verify-architecture.ps1

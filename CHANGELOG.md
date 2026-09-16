@@ -2,6 +2,8 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Verifies release images once before promotion, then checks both stable aliases
+  against the accepted digest; simplifies internal helpers and container guidance.
 - Gives replacements for unavailable watch channels a full turn before voluntary
   rotation or streak promotion.
 - Reconnects promptly after a PubSub server request while retaining backoff for

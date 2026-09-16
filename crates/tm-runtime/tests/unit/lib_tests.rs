@@ -1014,6 +1014,17 @@ async fn spawned_runtime_notifies_state_change_subscribers() {
 
     changes.changed().await.unwrap();
     assert_eq!(*changes.borrow(), 1);
+
+    let mut late_subscriber = runtime.subscribe_state_changes();
+    runtime
+        .clone()
+        .set_presence("100", false, ts(21))
+        .await
+        .unwrap();
+    late_subscriber.changed().await.unwrap();
+    changes.changed().await.unwrap();
+    assert_eq!(*late_subscriber.borrow(), 2);
+    assert_eq!(*changes.borrow(), 2);
 }
 
 #[test]
