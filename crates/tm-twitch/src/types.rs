@@ -581,6 +581,10 @@ pub(crate) struct InventoryState {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct InventoryCampaign {
+    #[serde(rename = "startAt", default)]
+    pub(crate) start_at: Option<String>,
+    #[serde(rename = "endAt", default)]
+    pub(crate) end_at: Option<String>,
     #[serde(default)]
     pub(crate) id: Option<String>,
     #[serde(default)]
@@ -593,6 +597,14 @@ pub(crate) struct InventoryCampaign {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct InventoryTimeDrop {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(rename = "startAt", default)]
+    pub(crate) start_at: Option<String>,
+    #[serde(rename = "endAt", default)]
+    pub(crate) end_at: Option<String>,
+    #[serde(rename = "preconditionDrops", default)]
+    pub(crate) precondition_drops: Option<Vec<DropPrecondition>>,
     #[serde(default)]
     pub(crate) name: Option<String>,
     pub(crate) benefit: Option<InventoryBenefit>,
@@ -607,12 +619,19 @@ pub(crate) struct InventoryTimeDrop {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropPrecondition {
+    pub(crate) id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct InventoryBenefit {
     pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct InventoryDropSelf {
+    #[serde(rename = "hasPreconditionsMet", default)]
+    pub(crate) has_preconditions_met: Option<bool>,
     #[serde(rename = "dropInstanceID")]
     pub(crate) drop_instance_id: Option<String>,
     #[serde(rename = "currentMinutesWatched", default)]
@@ -737,8 +756,14 @@ pub struct FollowersPage {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InventoryDrop {
+    pub id: String,
+    pub campaign_id: String,
+    pub starts_at: Option<time::OffsetDateTime>,
+    pub ends_at: Option<time::OffsetDateTime>,
+    pub prerequisites_met: Option<bool>,
+    pub subscription_required: bool,
     pub drop_instance_id: String,
     pub reward_name: String,
     pub campaign_name: String,

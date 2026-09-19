@@ -326,6 +326,32 @@ impl RuntimeHandle {
         Ok(changed)
     }
 
+    pub async fn set_drop_watch_target_if_current(
+        &self,
+        channel_id: &str,
+        broadcast_id: &str,
+        game_id: Option<&str>,
+        eligible: bool,
+        target: Option<tm_domain::DropWatchTarget>,
+    ) -> Result<bool> {
+        let mut state = self.lock_open("SetDropWatchTargetIfCurrent").await?;
+        let Some(stream) = state
+            .streamers
+            .iter_mut()
+            .find(|streamer| streamer.channel_id == channel_id)
+            .and_then(|streamer| streamer.stream.as_mut())
+        else {
+            return Ok(false);
+        };
+        if stream.broadcast_id != broadcast_id || stream.game_id.as_deref() != game_id {
+            return Ok(false);
+        }
+        stream.drop_campaign_eligible = Some(eligible);
+        stream.drop_watch_target = target;
+        self.notify_state_change();
+        Ok(true)
+    }
+
     pub async fn update_streamer_login(
         &self,
         channel_id: impl Into<String>,

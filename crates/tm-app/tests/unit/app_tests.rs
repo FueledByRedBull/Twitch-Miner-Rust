@@ -29,10 +29,9 @@ mod tests {
     };
     use crate::minute_watcher::{
         available_watch_logins, build_minute_watched_event, handle_minute_watched_info_error,
-        has_unfinished_campaign, record_watch_attempt, refresh_watch_selection_metadata,
-        released_watch_channel_ids, resolve_spade_url, send_minute_watched_for_streamer,
-        send_minute_watched_with_spade_cache, watch_metadata_defect, WatchAttemptOutcome,
-        WatchFailureState,
+        record_watch_attempt, refresh_watch_selection_metadata, released_watch_channel_ids,
+        resolve_spade_url, send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
+        watch_metadata_defect, WatchAttemptOutcome, WatchFailureState,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -950,6 +949,7 @@ mod tests {
             current_minutes_watched: 60,
             required_minutes_watched: 60,
             is_claimed: false,
+            ..InventoryDrop::default()
         };
         assert!(drop_is_claimable(&claimable));
 
@@ -1271,6 +1271,7 @@ mod tests {
             current_minutes_watched: 61,
             required_minutes_watched: 60,
             is_claimed: false,
+            ..InventoryDrop::default()
         };
 
         assert_eq!(
@@ -1298,6 +1299,7 @@ mod tests {
             current_minutes_watched: 15,
             required_minutes_watched: 60,
             is_claimed: false,
+            ..InventoryDrop::default()
         };
 
         let message = observability.drop_progress_message(&drop);
@@ -2335,21 +2337,19 @@ mod tests {
             String::from("campaign-subscription-only"),
         ]);
 
-        assert!(!has_unfinished_campaign(
-            &[String::from("campaign-complete")],
-            &excluded
-        ));
-        assert!(!has_unfinished_campaign(
-            &[String::from("campaign-subscription-only")],
-            &excluded
-        ));
-        assert!(has_unfinished_campaign(
-            &[
-                String::from("campaign-complete"),
-                String::from("campaign-new")
-            ],
-            &excluded
-        ));
+        assert!(!crate::drops::channel_drop_target(&[], &[], &excluded, ts(0)).0);
+        assert!(
+            !crate::drops::channel_drop_target(
+                &[],
+                &["campaign-1".into()],
+                &std::collections::HashSet::from(["campaign-1".into()]),
+                ts(0)
+            )
+            .0
+        );
+        assert!(
+            crate::drops::channel_drop_target(&[], &["new-campaign".into()], &excluded, ts(0)).0
+        );
     }
 
     #[tokio::test]
@@ -2649,6 +2649,7 @@ mod tests {
                 current_minutes_watched: 60,
                 required_minutes_watched: 60,
                 is_claimed: false,
+                ..InventoryDrop::default()
             }],
             &test_observability(),
             Some(&health),
@@ -2688,6 +2689,7 @@ mod tests {
             current_minutes_watched: 60,
             required_minutes_watched: 60,
             is_claimed: false,
+            ..InventoryDrop::default()
         }];
         claim_inventory_drops_with_coordinator(
             &twitch,

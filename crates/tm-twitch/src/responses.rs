@@ -582,42 +582,75 @@ pub(crate) fn inventory_snapshot_from_typed(
                 snapshot.subscription_only_campaign_ids.push(id.to_owned());
             }
         }
-        let campaign_name = campaign.name.or(campaign.display_name).unwrap_or_default();
-        for drop in campaign.drops {
-            let Some(self_data) = drop.self_data else {
-                continue;
-            };
-            let Some(drop_instance_id) = self_data.drop_instance_id else {
-                continue;
-            };
-            let required_minutes_watched = drop
-                .required_minutes_watched
-                .or(drop.required_progress)
-                .ok_or(TwitchClientError::MissingField(
-                    "data.currentUser.inventory.timeBasedDrops.requiredMinutesWatched",
-                ))?;
-            let is_claimed = self_data.is_claimed.ok_or(TwitchClientError::MissingField(
-                "data.currentUser.inventory.timeBasedDrops.self.isClaimed",
-            ))?;
-            snapshot.drops.push(InventoryDrop {
-                drop_instance_id,
-                reward_name: drop
-                    .name
-                    .or_else(|| drop.benefit.and_then(|benefit| benefit.name))
-                    .unwrap_or_default(),
-                campaign_name: campaign_name.clone(),
-                current_minutes_watched: self_data
-                    .current_minutes_watched
-                    .or(self_data.current_progress)
-                    .unwrap_or_default(),
-                required_minutes_watched,
-                is_claimed,
-            });
-        }
+        snapshot.drops.extend(inventory_campaign_drops(campaign)?);
     }
     snapshot.completed_campaign_ids.sort_unstable();
     snapshot.completed_campaign_ids.dedup();
     snapshot.subscription_only_campaign_ids.sort_unstable();
     snapshot.subscription_only_campaign_ids.dedup();
     Ok(snapshot)
+}
+
+fn inventory_campaign_drops(
+    campaign: crate::types::InventoryCampaign,
+) -> Result<Vec<InventoryDrop>, TwitchClientError> {
+    let mut drops = Vec::new();
+    let claimed_ids: std::collections::HashSet<_> = campaign
+        .drops
+        .iter()
+        .filter(|drop| drop.self_data.as_ref().and_then(|p| p.is_claimed) == Some(true))
+        .filter_map(|drop| drop.id.clone())
+        .collect();
+    let campaign_name = campaign.name.or(campaign.display_name).unwrap_or_default();
+    for drop in campaign.drops {
+        let Some(self_data) = drop.self_data else {
+            continue;
+        };
+        let drop_instance_id = self_data.drop_instance_id.unwrap_or_default();
+        let id = drop.id.unwrap_or_default();
+        if id.trim().is_empty() && drop_instance_id.trim().is_empty() {
+            continue;
+        }
+        let required_minutes_watched = drop
+            .required_minutes_watched
+            .or(drop.required_progress)
+            .ok_or(TwitchClientError::MissingField(
+                "data.currentUser.inventory.timeBasedDrops.requiredMinutesWatched",
+            ))?;
+        let is_claimed = self_data.is_claimed.ok_or(TwitchClientError::MissingField(
+            "data.currentUser.inventory.timeBasedDrops.self.isClaimed",
+        ))?;
+        let parse_date = |value: Option<&str>| {
+            value.and_then(|value| {
+                time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+        };
+        let prerequisites_met = self_data.has_preconditions_met.or_else(|| {
+            drop.precondition_drops
+                .as_ref()
+                .map(|requirements| requirements.iter().all(|p| claimed_ids.contains(&p.id)))
+        });
+        drops.push(InventoryDrop {
+            id,
+            campaign_id: campaign.id.clone().unwrap_or_default(),
+            starts_at: parse_date(drop.start_at.as_deref().or(campaign.start_at.as_deref())),
+            ends_at: parse_date(drop.end_at.as_deref().or(campaign.end_at.as_deref())),
+            prerequisites_met,
+            subscription_required: drop.required_subs.is_some_and(|n| n > 0),
+            drop_instance_id,
+            reward_name: drop
+                .name
+                .or_else(|| drop.benefit.and_then(|benefit| benefit.name))
+                .unwrap_or_default(),
+            campaign_name: campaign_name.clone(),
+            current_minutes_watched: self_data
+                .current_minutes_watched
+                .or(self_data.current_progress)
+                .unwrap_or_default(),
+            required_minutes_watched,
+            is_claimed,
+        });
+    }
+    Ok(drops)
 }

@@ -306,7 +306,9 @@ impl HealthTracker {
             .iter_mut()
             .find(|existing| existing.drop_key == snapshot.drop_key)
         {
+            let claimed = existing.is_claimed;
             *existing = snapshot;
+            existing.is_claimed |= claimed;
         } else {
             if counters.drop_progress.len() >= MAX_DROP_PROGRESS_ENTRIES {
                 counters.drop_progress.remove(0);
@@ -749,7 +751,12 @@ fn stable_drop_key(drop: &InventoryDrop) -> String {
             &drop.campaign_name,
             &drop.reward_name,
             &drop.required_minutes_watched.to_string(),
-            &drop.drop_instance_id,
+            if drop.id.is_empty() {
+                &drop.drop_instance_id
+            } else {
+                &drop.id
+            },
+            &drop.campaign_id,
         ],
     )
 }
@@ -1069,6 +1076,7 @@ mod tests {
                 current_minutes_watched: i64::try_from(index).unwrap_or(i64::MAX),
                 required_minutes_watched: 60,
                 is_claimed: false,
+                ..InventoryDrop::default()
             });
         }
 
@@ -1077,6 +1085,30 @@ mod tests {
         assert_eq!(progress[0].current_minutes_watched, 1);
         assert_ne!(progress[0].drop_key, "drop-1");
         assert!(progress.iter().all(|entry| entry.observed_at_unix > 0));
+    }
+
+    #[test]
+    fn drop_identity_survives_claim_id_and_stale_inventory() {
+        let health = HealthTracker::default();
+        let mut drop = InventoryDrop {
+            id: "reward-id".into(),
+            campaign_id: "campaign-id".into(),
+            current_minutes_watched: 10,
+            required_minutes_watched: 30,
+            ..Default::default()
+        };
+        health.record_drop_progress(&drop);
+        drop.current_minutes_watched = 30;
+        drop.drop_instance_id = "private-claim-id".into();
+        drop.is_claimed = true;
+        health.record_drop_progress(&drop);
+        drop.is_claimed = false;
+        health.record_drop_progress(&drop);
+        let entries = health.counters_snapshot().drop_progress;
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_claimed);
+        assert!(entries[0].last_progress_increase_unix.is_some());
+        assert!(!entries[0].drop_key.contains("private-claim-id"));
     }
 
     #[test]
@@ -1089,6 +1121,7 @@ mod tests {
             current_minutes_watched: 10,
             required_minutes_watched: 60,
             is_claimed: false,
+            ..InventoryDrop::default()
         };
         health.record_drop_progress(&drop);
         assert!(health.counters_snapshot().drop_progress[0]

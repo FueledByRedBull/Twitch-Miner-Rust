@@ -2441,3 +2441,90 @@ async fn runtime_handle_returns_typed_closed_error_after_shutdown() {
         }
     ));
 }
+
+#[tokio::test]
+async fn drop_deadlines_rank_channels_without_overriding_game_preferences() {
+    let mut state = RuntimeState::from_targets(
+        &ConfigFile::default(),
+        &["alpha".into(), "bravo".into()],
+        ts(0),
+    );
+    for streamer in &mut state.streamers {
+        streamer.channel_id.clone_from(&streamer.username);
+        streamer.is_online = true;
+        streamer.settings.farm_drops = true;
+        streamer.settings.single_watcher_during_drops = false;
+        streamer.stream = Some(Stream {
+            broadcast_id: "broadcast".into(),
+            game: Some(tm_domain::Game::from_name("Game")),
+            game_id: Some("game".into()),
+            drop_campaign_eligible: Some(true),
+            ..Default::default()
+        });
+    }
+    let runtime = spawn_runtime_state(state);
+    let target = tm_domain::DropWatchTarget {
+        ends_at: ts(3600),
+        remaining_minutes: 10,
+        observed_at: ts(0),
+    };
+    assert!(!runtime
+        .set_drop_watch_target_if_current(
+            "bravo",
+            "old-broadcast",
+            Some("game"),
+            true,
+            Some(target)
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        runtime
+            .state_snapshot()
+            .await
+            .unwrap()
+            .campaign_watch_logins(ts(0)),
+        vec!["alpha", "bravo"]
+    );
+    assert!(runtime
+        .set_drop_watch_target_if_current("bravo", "broadcast", Some("game"), true, Some(target))
+        .await
+        .unwrap());
+    let mut snapshot = runtime.state_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.campaign_watch_logins(ts(0)),
+        vec!["bravo", "alpha"]
+    );
+    for streamer in &mut snapshot.streamers {
+        streamer.settings.single_watcher_during_drops = true;
+    }
+    assert_eq!(snapshot.campaign_watch_logins(ts(0)), vec!["bravo"]);
+    for streamer in &mut snapshot.streamers {
+        streamer.settings.single_watcher_during_drops = false;
+    }
+    // Unrefreshed measurements cannot keep a deadline priority indefinitely.
+    assert_eq!(
+        snapshot.campaign_watch_logins(ts(601)),
+        vec!["alpha", "bravo"]
+    );
+    snapshot.streamers[0].stream.as_mut().unwrap().game =
+        Some(tm_domain::Game::from_name("Favorite"));
+    snapshot.game_priority = vec!["favorite".into()];
+    assert_eq!(
+        snapshot.campaign_watch_logins(ts(0)),
+        vec!["alpha", "bravo"]
+    );
+    snapshot.game_priority.clear();
+    snapshot.streamers[0]
+        .stream
+        .as_mut()
+        .unwrap()
+        .drop_watch_target = Some(tm_domain::DropWatchTarget {
+        remaining_minutes: 5,
+        ..target
+    });
+    assert_eq!(
+        snapshot.campaign_watch_logins(ts(0)),
+        vec!["alpha", "bravo"]
+    );
+}

@@ -322,3 +322,16 @@ filling watcher capacity. The older raw JSON methods remain
 compatibility facades; runtime and
 canary code use the explicit typed variants. Neither path logs or exposes the
 retained payload.
+
+### Reward-level inventory selection
+
+`Inventory` retains `timeBasedDrops.id`, campaign ID, `startAt`/`endAt`,
+`requiredMinutesWatched`, `requiredSubs`, and the viewer's partial progress even
+when `self.dropInstanceID` is null. Claim requests still require a nonempty
+instance ID, complete progress, and an unclaimed reward. Prerequisites use
+`self.hasPreconditionsMet` when supplied, otherwise explicit `preconditionDrops`
+IDs must all be claimed in the same inventory. Missing prerequisite information
+or invalid/missing dates cannot establish deadline priority. The channel's
+`viewerDropCampaigns` response remains the eligibility boundary. No new operation
+or request cadence is added. The synthetic `twitch.inventory_progress.json`
+fixture covers partial progress, locked prerequisites and subscription rewards.

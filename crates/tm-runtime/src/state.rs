@@ -768,6 +768,7 @@ impl RuntimeState {
         }
         if broadcast_changed || game_changed {
             stream.drop_campaign_eligible = None;
+            stream.drop_watch_target = None;
         }
         stream.update(
             &update.id,
@@ -810,10 +811,9 @@ impl RuntimeState {
         let Some(streamer) = self.streamer_mut_by_channel_id(channel_id) else {
             return;
         };
-        streamer
-            .stream
-            .get_or_insert_with(Stream::default)
-            .drop_campaign_eligible = Some(eligible);
+        let stream = streamer.stream.get_or_insert_with(Stream::default);
+        stream.drop_campaign_eligible = Some(eligible);
+        stream.drop_watch_target = None;
     }
 
     pub fn set_drop_campaign_eligibility_if_current(
@@ -835,6 +835,7 @@ impl RuntimeState {
             return false;
         }
         stream.drop_campaign_eligible = Some(eligible);
+        stream.drop_watch_target = None;
         true
     }
 

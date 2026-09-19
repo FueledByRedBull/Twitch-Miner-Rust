@@ -2,6 +2,11 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Retains partial Drops progress before claim IDs exist, immediately records successful
+  claims, and ranks eligible configured channels by feasible reward deadlines and
+  remaining watch time after game preferences. Missing planning metadata retains
+  the existing channel policy; the read-only canary reports metadata coverage.
+
 - Verifies release images once before promotion, then checks both stable aliases
   against the accepted digest; simplifies internal helpers and container guidance.
 - Gives replacements for unavailable watch channels a full turn before voluntary

@@ -236,10 +236,18 @@ pub fn pick_streamers_to_watch(
         .copied()
         .filter(|candidate| streamers[candidate.idx].can_watch_drop_campaign())
         .collect::<Vec<_>>();
-    drop_candidates.sort_by(|left, right| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| left.position.cmp(&right.position))
+    drop_candidates.sort_by_key(|candidate| {
+        let target = streamers[candidate.idx]
+            .stream
+            .as_ref()
+            .and_then(|stream| stream.drop_watch_target)
+            .filter(|target| target.feasible_at(now));
+        (
+            candidate.rank,
+            target.is_none(),
+            target.map(|target| (target.ends_at, target.remaining_minutes)),
+            candidate.position,
+        )
     });
     if priorities.contains(&WatchPriority::Drops) {
         if let Some(candidate) = drop_candidates.first() {
@@ -287,6 +295,8 @@ pub fn pick_streamers_to_watch(
         };
 
         ordered.sort_by(|left, right| match priority {
+            // Drop candidates already have the complete reward deadline ordering.
+            WatchPriority::Drops => Ordering::Equal,
             WatchPriority::Order => left.position.cmp(&right.position),
             WatchPriority::Subscribed => streamers[right.idx]
                 .total_multiplier()
@@ -328,7 +338,7 @@ pub fn pick_streamers_to_watch(
             )
             .then_with(|| left.rank.cmp(&right.rank))
             .then_with(|| left.position.cmp(&right.position)),
-            _ => left
+            WatchPriority::Streak => left
                 .rank
                 .cmp(&right.rank)
                 .then_with(|| left.position.cmp(&right.position)),
