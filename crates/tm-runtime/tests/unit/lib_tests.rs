@@ -1,11 +1,12 @@
 use super::*;
 use std::collections::HashMap;
+use std::time::Duration;
 use tm_config::ConfigFile;
 use tm_domain::{
     parse_watch_priorities, should_prioritize_streak, CommunityGoal, CommunityGoalKind,
     HistoryEntry, IrcMode, MinerEvent, OffsetDateTime, PlaybackType, PredictionChannelKind,
-    PredictionDecision, PredictionEvent, PredictionOutcome, Stream, Streamer, StreamerSettings,
-    WatchPriority,
+    PredictionDecision, PredictionEvent, PredictionOutcome, PredictionUserKind, Stream, Streamer,
+    StreamerSettings, WatchPriority,
 };
 use tm_pubsub::parse_message;
 
@@ -15,6 +16,45 @@ fn assert_f64_eq(actual: f64, expected: f64) {
 
 fn ts(unix: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(unix).unwrap()
+}
+
+#[test]
+fn campaign_order_does_not_bounce_when_streak_watch_time_resets() {
+    let mut state = RuntimeState::from_targets(
+        &ConfigFile::default(),
+        &["alpha".into(), "bravo".into()],
+        ts(0),
+    );
+    for streamer in &mut state.streamers {
+        streamer.channel_id.clone_from(&streamer.username);
+        streamer.is_online = true;
+        streamer.settings.farm_drops = true;
+        streamer.settings.single_watcher_during_drops = false;
+        streamer.settings.watch_streak = true;
+        streamer.stream = Some(Stream {
+            broadcast_id: streamer.username.clone(),
+            game: Some(tm_domain::Game::from_name("Game")),
+            drop_campaign_eligible: Some(true),
+            watch_streak_missing: true,
+            ..Stream::default()
+        });
+    }
+    assert_eq!(state.campaign_watch_logins(ts(0)), vec!["alpha", "bravo"]);
+    state.streamers[0].stream.as_mut().unwrap().minute_watched = 15.0;
+    assert_eq!(state.watch_target_logins(ts(900))[0], "bravo");
+    assert_eq!(state.campaign_watch_logins(ts(900)), vec!["alpha", "bravo"]);
+    assert!(state.reset_watch_progress("alpha"));
+    assert_eq!(state.campaign_watch_logins(ts(920)), vec!["alpha", "bravo"]);
+    state.streamers[1].stream.as_mut().unwrap().game = Some(tm_domain::Game::from_name("Priority"));
+    state.game_priority = vec!["priority".into()];
+    assert_eq!(state.campaign_watch_logins(ts(940)), vec!["bravo", "alpha"]);
+    state.streamers[1].is_online = false;
+    assert_eq!(state.campaign_watch_logins(ts(960)), vec!["alpha"]);
+    state.game_exclusions = vec!["game".into()];
+    assert!(state.campaign_watch_logins(ts(980)).is_empty());
+    state.game_exclusions.clear();
+    state.watch_priorities = vec![WatchPriority::Order];
+    assert!(state.campaign_watch_logins(ts(1_000)).is_empty());
 }
 
 #[test]
@@ -147,6 +187,7 @@ fn watch_streak_event_records_resolution_time_for_warm_restart() {
         earned: 50,
         reason: String::from("WATCH_STREAK"),
         balance: 50,
+        source_id: None,
     };
 
     assert!(state.apply_event_with_outcome(&event, ts(42)).changed);
@@ -285,6 +326,7 @@ fn playback_presence_drives_watch_and_chat_targets() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     state.apply_event(
@@ -335,6 +377,7 @@ fn viewcount_playback_does_not_promote_presence() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     state.apply_event(
@@ -366,6 +409,7 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
                 watch_streak: true,
                 ..StreamerSettings::default()
             },
+            last_server_confirmed_points_at: Some(ts(90)),
             stream: Some(Stream {
                 broadcast_id: "old-broadcast".into(),
                 title: "Old".into(),
@@ -381,6 +425,7 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     let updated = state
@@ -393,6 +438,7 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
                 game_id: Some("game-1".into()),
                 tags: vec!["tag-1".into()],
                 viewers_count: 42,
+                expected_generation: 0,
             },
             ts(120),
         )
@@ -404,6 +450,9 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
     assert_eq!(stream.broadcast_id, "new-broadcast");
     assert_f64_eq(stream.minute_watched, 0.0);
     assert!(stream.last_minute_update.is_none());
+    assert!(state.streamers[0]
+        .last_server_confirmed_points_at()
+        .is_none());
     assert!(stream.watch_streak_missing);
     assert_eq!(stream.stream_up_at, Some(ts(120)));
     assert!(should_prioritize_streak(&state.streamers[0], ts(120)));
@@ -437,6 +486,7 @@ fn short_restart_chains_preserve_resolved_streak_state() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     for (offline_at, online_at, broadcast_id) in [(100, 110, "segment-b"), (200, 210, "segment-c")]
@@ -447,6 +497,7 @@ fn short_restart_chains_preserve_resolved_streak_state() {
             state.streamers[0].last_stream_ended_at,
             Some(ts(offline_at))
         );
+        let expected_generation = state.streamers[0].stream_update_generation;
         let _ = state.apply_stream_update(
             &StreamUpdate {
                 channel_id: "123".into(),
@@ -456,6 +507,7 @@ fn short_restart_chains_preserve_resolved_streak_state() {
                 game_id: None,
                 viewers_count: 0,
                 tags: Vec::new(),
+                expected_generation,
             },
             ts(online_at + 1),
         );
@@ -502,6 +554,7 @@ fn runtime_login_refresh_preserves_initial_balance_and_releases_suspension() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     assert!(state.update_streamer_login("123", " New-Login "));
@@ -539,6 +592,7 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
     let update = StreamUpdate {
         channel_id: "123".into(),
@@ -548,6 +602,7 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
         game_id: Some("game-1".into()),
         tags: Vec::new(),
         viewers_count: 42,
+        expected_generation: 0,
     };
 
     let _ = state.apply_stream_update(&update, ts(120));
@@ -562,6 +617,7 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
 
     let mut changed = update;
     changed.game_name = "Different Game".into();
+    changed.expected_generation = state.streamers[0].stream_update_generation;
     let _ = state.apply_stream_update(&changed, ts(240));
     assert_eq!(
         state.streamers[0]
@@ -572,6 +628,18 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
         None
     );
 
+    assert!(!state.set_drop_campaign_eligibility_if_current(
+        "123",
+        "broadcast",
+        Some("stale-game"),
+        false,
+    ));
+    assert!(state.set_drop_campaign_eligibility_if_current(
+        "123",
+        "broadcast",
+        Some("game-1"),
+        false,
+    ));
     state.set_drop_campaign_eligibility("123", false);
     assert_eq!(
         state.streamers[0]
@@ -604,12 +672,16 @@ fn context_update_emits_goal_contribution_effect_for_active_goals() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
-    let effects = state.apply_context_update(&ContextUpdate {
+    let (effects, balance_delta) = state.apply_context_update(&ContextUpdate {
         channel_id: "123".into(),
         channel_points_enabled: Some(true),
         balance: 500,
+        expected_request_generation: 0,
+        expected_balance_revision: 0,
+        observed_at: ts(1),
         active_multipliers: Vec::new(),
         community_goals: vec![CommunityGoal {
             id: "goal-1".into(),
@@ -628,6 +700,7 @@ fn context_update_emits_goal_contribution_effect_for_active_goals() {
             channel_id: "123".into(),
         }]
     );
+    assert_eq!(balance_delta, 500);
     assert_eq!(state.streamers[0].channel_points, 500);
     assert!(state.streamers[0].community_goals.contains_key("goal-1"));
 }
@@ -657,6 +730,7 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     let raid_effects = state.apply_event(
@@ -887,6 +961,7 @@ fn runtime_session_summary_uses_captured_initial_points() {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     };
 
     state.capture_initial_points();
@@ -916,6 +991,7 @@ async fn spawned_runtime_is_single_writer_for_pubsub_and_shutdown() {
                 earned: 100,
                 reason: "WATCH".into(),
                 balance: 100,
+                source_id: None,
             },
             ts(20),
         )
@@ -954,6 +1030,7 @@ fn duplicate_points_event_does_not_double_balance_or_history() {
         earned: 50,
         reason: String::from("WATCH"),
         balance: 1_050,
+        source_id: None,
     };
 
     let first = state.apply_event_with_outcome(&event, ts(1));
@@ -975,6 +1052,315 @@ fn duplicate_points_event_does_not_double_balance_or_history() {
 }
 
 #[test]
+fn stale_context_preserves_newer_points_and_source_deduplication() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points = 100;
+    state.streamers[0].channel_points_enabled = Some(true);
+
+    let delayed_context = ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(true),
+        balance: 100,
+        expected_request_generation: 0,
+        expected_balance_revision: 0,
+        observed_at: ts(1),
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    };
+    let point = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: 10,
+        reason: String::from("WATCH"),
+        balance: 110,
+        source_id: Some(String::from("point-a")),
+    };
+
+    assert!(state.apply_event_with_outcome(&point, ts(1)).changed);
+    assert_eq!(
+        state.streamers[0].last_server_confirmed_points_at(),
+        Some(ts(1))
+    );
+    let (_, balance_delta) = state.apply_context_update(&delayed_context);
+    assert_eq!(balance_delta, 0);
+    assert_eq!(state.streamers[0].channel_points, 110);
+    assert_eq!(state.streamers[0].last_context_observed_at(), Some(ts(1)));
+    assert!(!state.apply_event_with_outcome(&point, ts(2)).changed);
+
+    let fresh_context = ContextUpdate {
+        balance: 90,
+        expected_balance_revision: 1,
+        ..delayed_context
+    };
+    let (_, balance_delta) = state.apply_context_update(&fresh_context);
+    assert_eq!(balance_delta, -20);
+    assert_eq!(state.streamers[0].channel_points, 90);
+    assert!(!state.apply_event_with_outcome(&point, ts(3)).changed);
+}
+
+#[test]
+fn context_request_revision_rejects_out_of_order_metadata_and_aba_balance() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points = 100;
+    state.streamers[0].channel_points_enabled = Some(true);
+
+    let first = state.begin_context_update("100").unwrap();
+    let second = state.begin_context_update("100").unwrap();
+    let second_update = ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(true),
+        balance: 100,
+        expected_request_generation: second.request_generation,
+        expected_balance_revision: second.balance_revision,
+        observed_at: ts(2),
+        active_multipliers: vec![tm_domain::ActiveMultiplier { factor: 2.0 }],
+        community_goals: Vec::new(),
+    };
+    let first_update = ContextUpdate {
+        expected_request_generation: first.request_generation,
+        expected_balance_revision: first.balance_revision,
+        observed_at: ts(2),
+        active_multipliers: vec![tm_domain::ActiveMultiplier { factor: 9.0 }],
+        ..second_update.clone()
+    };
+
+    assert_eq!(state.apply_context_update(&second_update).1, 0);
+    assert_f64_eq(state.streamers[0].active_multipliers[0].factor, 2.0);
+    assert_eq!(state.streamers[0].last_context_observed_at(), Some(ts(2)));
+    assert_eq!(state.apply_context_update(&first_update).1, 0);
+    assert_f64_eq(state.streamers[0].active_multipliers[0].factor, 2.0);
+    assert_eq!(state.streamers[0].last_context_observed_at(), Some(ts(2)));
+
+    let aba_request = state.begin_context_update("100").unwrap();
+    let gain = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: 10,
+        reason: String::from("WATCH"),
+        balance: 110,
+        source_id: Some(String::from("gain-a")),
+    };
+    let spend = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: -10,
+        reason: String::from("PREDICTION"),
+        balance: 100,
+        source_id: Some(String::from("spend-a")),
+    };
+    assert!(state.apply_event_with_outcome(&gain, ts(1)).changed);
+    assert!(state.apply_event_with_outcome(&spend, ts(2)).changed);
+    assert_eq!(state.streamers[0].channel_points, 100);
+
+    let stale_aba = ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(true),
+        balance: 50,
+        expected_request_generation: aba_request.request_generation,
+        expected_balance_revision: aba_request.balance_revision,
+        observed_at: ts(3),
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    };
+    assert_eq!(state.apply_context_update(&stale_aba).1, 0);
+    assert_eq!(state.streamers[0].channel_points, 100);
+}
+
+#[test]
+fn non_adjacent_fallback_point_replay_is_deduplicated() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points = 100;
+    state.streamers[0].channel_points_enabled = Some(true);
+    let first = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: 10,
+        reason: String::from("WATCH"),
+        balance: 110,
+        source_id: None,
+    };
+    let second = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: 10,
+        reason: String::from("WATCH"),
+        balance: 120,
+        source_id: None,
+    };
+
+    assert!(state.apply_event_with_outcome(&first, ts(1)).changed);
+    assert!(state.apply_event_with_outcome(&second, ts(2)).changed);
+    assert!(!state.apply_event_with_outcome(&first, ts(3)).changed);
+    assert_eq!(state.streamers[0].channel_points, 120);
+    assert_eq!(state.streamers[0].history["WATCH"].count, 2);
+}
+
+#[test]
+fn stale_stream_metadata_and_watch_completion_are_ignored() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points_enabled = Some(true);
+
+    let update = |id: &str, expected_generation| StreamUpdate {
+        channel_id: String::from("100"),
+        id: String::from(id),
+        title: String::new(),
+        game_name: String::new(),
+        game_id: None,
+        viewers_count: 0,
+        tags: Vec::new(),
+        expected_generation,
+    };
+    assert!(state
+        .apply_stream_update(&update("broadcast-a", 0), ts(10))
+        .is_some());
+    assert!(state.streamers[0].presence_known);
+    assert!(state.streamers[0].is_online);
+    assert!(state
+        .apply_stream_update(&update("broadcast-b", 1), ts(20))
+        .is_some());
+    assert!(state
+        .apply_stream_update(&update("broadcast-a", 1), ts(30))
+        .is_none());
+
+    let before = state.streamers[0].stream.as_ref().unwrap().minute_watched;
+    state.mark_minute_watched("100", "broadcast-a", ts(40));
+    assert_f64_eq(
+        state.streamers[0].stream.as_ref().unwrap().minute_watched,
+        before,
+    );
+    state.mark_minute_watched("100", "broadcast-b", ts(35));
+    state.mark_minute_watched("100", "broadcast-b", ts(40));
+    assert!(state.streamers[0].stream.as_ref().unwrap().minute_watched > before);
+}
+
+#[test]
+fn offline_presence_invalidates_in_flight_stream_metadata() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].is_online = true;
+    state.streamers[0].presence_known = true;
+    let generation = state.begin_stream_update("100").unwrap();
+    assert!(state
+        .apply_event(
+            &MinerEvent::Playback {
+                channel_id: String::from("100"),
+                kind: PlaybackType::StreamDown,
+            },
+            ts(10),
+        )
+        .is_empty());
+    let late_metadata = StreamUpdate {
+        channel_id: String::from("100"),
+        id: String::from("late-broadcast"),
+        title: String::new(),
+        game_name: String::new(),
+        game_id: None,
+        viewers_count: 0,
+        tags: Vec::new(),
+        expected_generation: generation,
+    };
+    assert!(state.apply_stream_update(&late_metadata, ts(20)).is_none());
+    assert!(!state.streamers[0].is_online);
+}
+
+#[test]
+fn login_rename_invalidates_context_and_stream_requests() {
+    let config = ConfigFile {
+        streamers: vec![String::from("old-login")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_config(&config, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+
+    let old_context = state.begin_context_update("100").unwrap();
+    let old_stream = state.begin_stream_update("100").unwrap();
+    assert!(state.update_streamer_login("100", "new-login"));
+    assert_eq!(state.streamers[0].context_request_generation, 2);
+    assert_eq!(state.streamers[0].stream_update_generation, 2);
+
+    let stale_context = ContextUpdate {
+        channel_id: String::from("100"),
+        channel_points_enabled: Some(true),
+        balance: 50,
+        expected_request_generation: old_context.request_generation,
+        expected_balance_revision: old_context.balance_revision,
+        observed_at: ts(1),
+        active_multipliers: Vec::new(),
+        community_goals: Vec::new(),
+    };
+    assert_eq!(state.apply_context_update(&stale_context).1, 0);
+
+    let stale_stream = StreamUpdate {
+        channel_id: String::from("100"),
+        id: String::from("old-broadcast"),
+        title: String::new(),
+        game_name: String::new(),
+        game_id: None,
+        viewers_count: 0,
+        tags: Vec::new(),
+        expected_generation: old_stream,
+    };
+    assert!(state.apply_stream_update(&stale_stream, ts(1)).is_none());
+    assert_eq!(state.streamers[0].username, "new-login");
+}
+
+#[test]
+fn stream_request_generation_is_reserved_before_fetch_and_orders_results() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+
+    let first_generation = state.begin_stream_update("100").unwrap();
+    let second_generation = state.begin_stream_update("100").unwrap();
+    let update = |id: &str, expected_generation| StreamUpdate {
+        channel_id: String::from("100"),
+        id: String::from(id),
+        title: String::new(),
+        game_name: String::new(),
+        game_id: None,
+        viewers_count: 0,
+        tags: Vec::new(),
+        expected_generation,
+    };
+
+    assert!(state
+        .apply_stream_update(&update("broadcast-b", second_generation), ts(20))
+        .is_some());
+    assert!(state
+        .apply_stream_update(&update("broadcast-a", first_generation), ts(30))
+        .is_none());
+    assert_eq!(
+        state.streamers[0]
+            .stream
+            .as_ref()
+            .map(|stream| stream.broadcast_id.as_str()),
+        Some("broadcast-b")
+    );
+}
+
+#[test]
 fn disabled_channel_ignores_point_events_and_goal_effects() {
     let config = ConfigFile {
         streamers: vec![String::from("disabled")],
@@ -992,6 +1378,7 @@ fn disabled_channel_ignores_point_events_and_goal_effects() {
         earned: 50,
         reason: String::from("WATCH"),
         balance: 50,
+        source_id: None,
     };
     assert!(!state.apply_event_with_outcome(&points, ts(1)).changed);
     assert_eq!(state.streamers[0].channel_points, 0);
@@ -1000,6 +1387,9 @@ fn disabled_channel_ignores_point_events_and_goal_effects() {
             channel_id: String::from("100"),
             channel_points_enabled: Some(false),
             balance: 0,
+            expected_request_generation: 0,
+            expected_balance_revision: 0,
+            observed_at: ts(1),
             active_multipliers: Vec::new(),
             community_goals: vec![CommunityGoal {
                 id: String::from("goal"),
@@ -1011,6 +1401,7 @@ fn disabled_channel_ignores_point_events_and_goal_effects() {
                 status: String::from("STARTED"),
             }],
         })
+        .0
         .is_empty());
 }
 
@@ -1057,6 +1448,9 @@ fn skipped_point_effects_can_be_retried_after_channel_reenable() {
         channel_id: String::from("100"),
         channel_points_enabled: Some(false),
         balance: 0,
+        expected_request_generation: 0,
+        expected_balance_revision: 0,
+        observed_at: ts(1),
         active_multipliers: Vec::new(),
         community_goals: Vec::new(),
     });
@@ -1066,12 +1460,446 @@ fn skipped_point_effects_can_be_retried_after_channel_reenable() {
         channel_id: String::from("100"),
         channel_points_enabled: Some(true),
         balance: 100,
+        expected_request_generation: 0,
+        expected_balance_revision: 1,
+        observed_at: ts(2),
         active_multipliers: Vec::new(),
         community_goals: Vec::new(),
     });
 
     assert_eq!(state.apply_event(&claim, ts(2)).len(), 1);
     assert_eq!(state.apply_event(&prediction, ts(2)).len(), 1);
+}
+
+#[test]
+fn unknown_prediction_placement_waits_for_confirmation_without_replay() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].settings.make_predictions = true;
+    let active = PredictionEvent {
+        streamer: state.streamers[0].clone(),
+        event_id: String::from("prediction-unknown-placement"),
+        title: String::from("Fixture prediction"),
+        status: String::from("ACTIVE"),
+        created_at: ts(1),
+        window_seconds: 30.0,
+        outcomes: vec![
+            PredictionOutcome {
+                id: "a".into(),
+                title: String::from("Yes"),
+                total_points: 100,
+                ..PredictionOutcome::default()
+            },
+            PredictionOutcome {
+                id: "b".into(),
+                title: String::from("No"),
+                total_points: 100,
+                ..PredictionOutcome::default()
+            },
+        ],
+        decision: PredictionDecision::default(),
+        bet_placed: false,
+        bet_confirmed: false,
+        result_type: String::new(),
+        result_string: String::new(),
+    };
+    let event_id = active.event_id.clone();
+    state.predictions.insert(event_id.clone(), active);
+    state.processed_prediction_ids.push_back(event_id.clone());
+    let decision = PredictionDecision {
+        choice: Some(0),
+        outcome_id: "a".into(),
+        amount: 100,
+    };
+
+    state.mark_prediction_placement_unknown(&event_id, &decision);
+    assert_eq!(state.streamers[0].channel_points, 0);
+    assert!(state.predictions[&event_id].bet_placed);
+    assert!(!state.predictions[&event_id].bet_confirmed);
+    assert!(
+        !state
+            .apply_event_with_outcome(
+                &MinerEvent::PredictionChannel {
+                    kind: PredictionChannelKind::EventCreated,
+                    event: Box::new(state.predictions[&event_id].clone()),
+                    winning_outcome_id: None,
+                },
+                ts(2),
+            )
+            .changed
+    );
+
+    let mut resolved = state.predictions[&event_id].clone();
+    resolved.status = String::from("RESOLVED");
+    let resolved_event = MinerEvent::PredictionChannel {
+        kind: PredictionChannelKind::EventUpdated,
+        event: Box::new(resolved.clone()),
+        winning_outcome_id: Some(String::from("a")),
+    };
+    assert!(state
+        .apply_event_with_outcome(&resolved_event, ts(3))
+        .effects
+        .is_empty());
+    assert!(state.predictions.contains_key(&event_id));
+
+    let confirmation = MinerEvent::PredictionUser {
+        event_id: event_id.clone(),
+        kind: PredictionUserKind::PredictionMade,
+        result: None,
+    };
+    let confirmation_application = state.apply_event_with_outcome(&confirmation, ts(4));
+    assert!(confirmation_application.changed);
+    assert_eq!(confirmation_application.effects.len(), 1);
+    assert!(!state.predictions.contains_key(&event_id));
+    assert_eq!(state.completed_predictions.len(), 1);
+    assert!(
+        !state
+            .apply_event_with_outcome(&resolved_event, ts(5))
+            .changed
+    );
+}
+
+#[test]
+fn active_prediction_retention_evicts_only_unplaced_events() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_config(&config, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points_enabled = Some(true);
+    state.streamers[0].settings.make_predictions = true;
+
+    let make_event =
+        |state: &RuntimeState, event_id: &str, created_at| MinerEvent::PredictionChannel {
+            kind: PredictionChannelKind::EventCreated,
+            event: Box::new(PredictionEvent {
+                streamer: state.streamers[0].clone(),
+                event_id: event_id.to_string(),
+                title: event_id.to_string(),
+                status: String::from("ACTIVE"),
+                created_at,
+                window_seconds: 30.0,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            }),
+            winning_outcome_id: None,
+        };
+
+    for index in 0..8 {
+        let event = make_event(&state, &format!("prediction-{index}"), ts(index));
+        assert!(state.apply_event_with_outcome(&event, ts(index)).changed);
+    }
+    assert_eq!(state.predictions.len(), 8);
+    let ninth = make_event(&state, "prediction-8", ts(8));
+    assert!(state.apply_event_with_outcome(&ninth, ts(8)).changed);
+    assert_eq!(state.predictions.len(), 8);
+    assert!(!state.predictions.contains_key("prediction-0"));
+    assert!(state.predictions.contains_key("prediction-8"));
+
+    let mut protected = RuntimeState::from_config(&config, ts(0));
+    protected.streamers[0].channel_id = String::from("100");
+    protected.streamers[0].channel_points_enabled = Some(true);
+    protected.streamers[0].settings.make_predictions = true;
+    for index in 0..8 {
+        let event = make_event(&protected, &format!("protected-{index}"), ts(index));
+        assert!(
+            protected
+                .apply_event_with_outcome(&event, ts(index))
+                .changed
+        );
+    }
+    let decision = PredictionDecision {
+        choice: Some(0),
+        outcome_id: "outcome".into(),
+        amount: 10,
+    };
+    for index in 0..8 {
+        assert!(protected.reserve_prediction_placement(&format!("protected-{index}"), &decision));
+    }
+    let blocked = make_event(&protected, "protected-new", ts(8));
+    assert!(!protected.apply_event_with_outcome(&blocked, ts(8)).changed);
+    assert_eq!(protected.predictions.len(), 8);
+    assert!(protected
+        .predictions
+        .keys()
+        .all(|id| id.starts_with("protected-")));
+}
+
+#[test]
+fn prediction_point_marker_survives_ordinary_key_eviction_for_completed_event() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_config(&config, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].channel_points_enabled = Some(true);
+    state.streamers[0].settings.make_predictions = true;
+    let event_id = String::from("prediction-retained-marker");
+    let event = PredictionEvent {
+        streamer: state.streamers[0].clone(),
+        event_id: event_id.clone(),
+        title: String::from("Prediction"),
+        status: String::from("ACTIVE"),
+        created_at: ts(1),
+        window_seconds: 30.0,
+        outcomes: vec![PredictionOutcome {
+            id: "outcome".into(),
+            title: String::from("Outcome"),
+            total_points: 100,
+            ..PredictionOutcome::default()
+        }],
+        decision: PredictionDecision::default(),
+        bet_placed: false,
+        bet_confirmed: false,
+        result_type: String::new(),
+        result_string: String::new(),
+    };
+    state.predictions.insert(event_id.clone(), event);
+    let decision = PredictionDecision {
+        choice: Some(0),
+        outcome_id: "outcome".into(),
+        amount: 25,
+    };
+    state.record_prediction_placed(&event_id, &decision, false);
+    state.stop_tracking_prediction(&event_id, "LOSE");
+    assert_eq!(state.completed_predictions.len(), 1);
+
+    for index in 0..128 {
+        let point = MinerEvent::PointsEarned {
+            channel_id: String::from("100"),
+            earned: 1,
+            reason: format!("OTHER-{index}"),
+            balance: 0,
+            source_id: Some(format!("ordinary-{index}")),
+        };
+        assert!(
+            state
+                .apply_event_with_outcome(&point, ts(index + 2))
+                .changed
+        );
+    }
+    let prediction_point = MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: -25,
+        reason: String::from("PREDICTION"),
+        balance: 0,
+        source_id: Some(String::from("prediction-source")),
+    };
+    assert!(
+        state
+            .apply_event_with_outcome(&prediction_point, ts(200))
+            .changed
+    );
+    let balance_after_first = state.streamers[0].channel_points;
+    assert!(
+        !state
+            .apply_event_with_outcome(&prediction_point, ts(201))
+            .changed
+    );
+    assert_eq!(state.streamers[0].channel_points, balance_after_first);
+}
+
+#[test]
+fn prediction_placement_reservation_is_atomic_and_stake_deduction_is_idempotent() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    let event_id = String::from("prediction-reservation");
+    state.predictions.insert(
+        event_id.clone(),
+        PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: event_id.clone(),
+            title: String::from("Fixture prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: Vec::new(),
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        },
+    );
+    let decision = PredictionDecision {
+        choice: Some(0),
+        outcome_id: "outcome".into(),
+        amount: 25,
+    };
+
+    assert!(state.reserve_prediction_placement(&event_id, &decision));
+    assert!(!state.reserve_prediction_placement(&event_id, &decision));
+    // A user-channel confirmation can arrive while the HTTP mutation is in
+    // flight; the subsequent response must still account for exactly one
+    // stake.
+    assert!(
+        state
+            .apply_event_with_outcome(
+                &MinerEvent::PredictionUser {
+                    event_id: event_id.clone(),
+                    kind: PredictionUserKind::PredictionMade,
+                    result: None,
+                },
+                ts(2),
+            )
+            .changed
+    );
+    state.record_prediction_placed(&event_id, &decision, true);
+    state.mark_prediction_placement_unknown(&event_id, &decision);
+    state.record_prediction_placed(&event_id, &decision, true);
+    state.stop_tracking_prediction(&event_id, "REJECTED");
+    assert_eq!(state.streamers[0].channel_points, 0);
+    assert_eq!(state.streamers[0].history["PREDICTION"].count, 1);
+    assert_eq!(state.streamers[0].history["PREDICTION"].amount, -25);
+    assert!(state.predictions[&event_id].bet_confirmed);
+}
+
+#[test]
+fn prediction_point_gain_and_mutation_response_deduct_stake_once_in_either_order() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let decision = PredictionDecision {
+        choice: Some(0),
+        outcome_id: "outcome".into(),
+        amount: 25,
+    };
+    let make_state = || {
+        let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+        state.streamers[0].channel_id = String::from("100");
+        let event_id = String::from("prediction-point-race");
+        state.predictions.insert(
+            event_id.clone(),
+            PredictionEvent {
+                streamer: state.streamers[0].clone(),
+                event_id: event_id.clone(),
+                title: String::from("Fixture prediction"),
+                status: String::from("ACTIVE"),
+                created_at: ts(1),
+                window_seconds: 30.0,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            },
+        );
+        assert!(state.reserve_prediction_placement(&event_id, &decision));
+        (state, event_id)
+    };
+    let point_gain = |event_id: &str| MinerEvent::PointsEarned {
+        channel_id: String::from("100"),
+        earned: -25,
+        reason: String::from("PREDICTION"),
+        balance: 0,
+        source_id: Some(format!("prediction-gain-{event_id}")),
+    };
+
+    let (mut point_first, event_id) = make_state();
+    assert!(
+        point_first
+            .apply_event_with_outcome(&point_gain(&event_id), ts(2))
+            .changed
+    );
+    // An amount and channel are insufficient to identify a prediction: only
+    // its mutation response or personal prediction event confirms placement.
+    assert!(!point_first.predictions[&event_id].bet_confirmed);
+    point_first.record_prediction_placed(&event_id, &decision, true);
+    assert_eq!(point_first.streamers[0].channel_points, 0);
+    assert_eq!(point_first.streamers[0].history["PREDICTION"].count, 1);
+    assert!(point_first.predictions[&event_id].bet_confirmed);
+
+    let (mut response_first, event_id) = make_state();
+    response_first.record_prediction_placed(&event_id, &decision, true);
+    assert!(
+        !response_first
+            .apply_event_with_outcome(&point_gain(&event_id), ts(2))
+            .changed
+    );
+    assert_eq!(response_first.streamers[0].channel_points, 0);
+    assert_eq!(response_first.streamers[0].history["PREDICTION"].count, 1);
+}
+
+#[test]
+fn failed_reservation_can_be_released_without_marking_a_bet() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    let event_id = String::from("prediction-release-reservation");
+    state.predictions.insert(
+        event_id.clone(),
+        PredictionEvent {
+            streamer: state.streamers[0].clone(),
+            event_id: event_id.clone(),
+            title: String::from("Fixture prediction"),
+            status: String::from("ACTIVE"),
+            created_at: ts(1),
+            window_seconds: 30.0,
+            outcomes: Vec::new(),
+            decision: PredictionDecision::default(),
+            bet_placed: false,
+            bet_confirmed: false,
+            result_type: String::new(),
+            result_string: String::new(),
+        },
+    );
+    let decision = PredictionDecision {
+        choice: Some(0),
+        outcome_id: "outcome".into(),
+        amount: 25,
+    };
+    assert!(state.reserve_prediction_placement(&event_id, &decision));
+    assert!(state.release_prediction_placement_reservation(&event_id));
+    assert!(!state.predictions[&event_id].bet_placed);
+    assert!(!state.release_prediction_placement_reservation(&event_id));
+}
+
+#[test]
+fn definite_prediction_rejection_is_retained_without_stake_deduction() {
+    let config = ConfigFile {
+        streamers: vec![String::from("tester")],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(0));
+    state.streamers[0].channel_id = String::from("100");
+    let event = PredictionEvent {
+        streamer: state.streamers[0].clone(),
+        event_id: String::from("prediction-rejected"),
+        title: String::from("Fixture prediction"),
+        status: String::from("ACTIVE"),
+        created_at: ts(1),
+        window_seconds: 30.0,
+        outcomes: Vec::new(),
+        decision: PredictionDecision::default(),
+        bet_placed: false,
+        bet_confirmed: false,
+        result_type: String::new(),
+        result_string: String::new(),
+    };
+    state.predictions.insert(event.event_id.clone(), event);
+    state.stop_tracking_prediction("prediction-rejected", "REJECTED");
+    assert!(state.predictions.is_empty());
+    assert_eq!(state.completed_predictions[0].result_type, "REJECTED");
+    assert_eq!(state.streamers[0].channel_points, 0);
 }
 
 #[test]
@@ -1090,6 +1918,7 @@ fn points_replay_dedupe_property_tracks_post_application_balance() {
                 earned,
                 reason: String::from("WATCH"),
                 balance: starting_balance.saturating_add(earned),
+                source_id: None,
             };
 
             assert!(state.apply_event_with_outcome(&event, ts(1)).changed);
@@ -1352,6 +2181,9 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
         channel_id: String::from("100"),
         channel_points_enabled: Some(false),
         balance: 0,
+        expected_request_generation: 0,
+        expected_balance_revision: 0,
+        observed_at: ts(1),
         active_multipliers: Vec::new(),
         community_goals: Vec::new(),
     });
@@ -1360,6 +2192,9 @@ fn late_viewer_result_refines_channel_settlement_without_duplicate_effect() {
         channel_id: String::from("100"),
         channel_points_enabled: Some(true),
         balance: 100,
+        expected_request_generation: 0,
+        expected_balance_revision: 1,
+        observed_at: ts(2),
         active_multipliers: Vec::new(),
         community_goals: Vec::new(),
     });
@@ -1413,10 +2248,25 @@ async fn checked_presence_update_reports_only_real_transitions() {
         .set_presence_if_changed("100", true, ts(21))
         .await
         .unwrap());
+    let old_generation = runtime.begin_stream_update("100").await.unwrap().unwrap();
     assert!(runtime
         .set_presence_if_changed("100", false, ts(22))
         .await
         .unwrap());
+    assert!(!runtime
+        .set_presence_if_current("100", true, old_generation, ts(23))
+        .await
+        .unwrap());
+    let fresh = runtime.begin_stream_update("100").await.unwrap().unwrap();
+    assert!(runtime
+        .set_presence_if_current("100", true, fresh, ts(24))
+        .await
+        .unwrap());
+    assert!(!runtime
+        .set_presence_if_current("100", false, old_generation, ts(25))
+        .await
+        .unwrap());
+    assert!(runtime.state_snapshot().await.unwrap().streamers[0].is_online);
 }
 
 #[tokio::test]
@@ -1464,28 +2314,28 @@ fn confirmed_watch_progress_rejects_stale_and_nonpositive_intervals() {
         ..Stream::default()
     });
 
-    state.mark_minute_watched("100", ts(120));
+    state.mark_minute_watched("100", "", ts(120));
     assert_f64_eq(
         state.streamers[0].stream.as_ref().unwrap().minute_watched,
         2.0 + 20.0 / 60.0,
     );
 
     // One failed nominal tick still proves a short continuous interval.
-    state.mark_minute_watched("100", ts(160));
+    state.mark_minute_watched("100", "", ts(160));
     assert_f64_eq(
         state.streamers[0].stream.as_ref().unwrap().minute_watched,
         3.0,
     );
 
     // The scheduler/request envelope allows at most 400 seconds.
-    state.mark_minute_watched("100", ts(560));
+    state.mark_minute_watched("100", "", ts(560));
     let confirmed = 3.0 + 400.0 / 60.0;
     assert_f64_eq(
         state.streamers[0].stream.as_ref().unwrap().minute_watched,
         confirmed,
     );
 
-    state.mark_minute_watched("100", ts(961));
+    state.mark_minute_watched("100", "", ts(961));
     assert_f64_eq(
         state.streamers[0].stream.as_ref().unwrap().minute_watched,
         confirmed,
@@ -1499,7 +2349,7 @@ fn confirmed_watch_progress_rejects_stale_and_nonpositive_intervals() {
         Some(ts(961))
     );
 
-    state.mark_minute_watched("100", ts(900));
+    state.mark_minute_watched("100", "", ts(900));
     let stream = state.streamers[0].stream.as_ref().unwrap();
     assert_f64_eq(stream.minute_watched, confirmed);
     assert_eq!(stream.last_minute_update, Some(ts(900)));
@@ -1520,7 +2370,7 @@ fn confirmed_watch_progress_stops_after_channel_points_are_disabled() {
         ..Stream::default()
     });
 
-    state.mark_minute_watched("100", ts(120));
+    state.mark_minute_watched("100", "", ts(120));
 
     let stream = state.streamers[0].stream.as_ref().unwrap();
     assert_f64_eq(stream.minute_watched, 2.0);
@@ -1547,6 +2397,19 @@ async fn runtime_metrics_capture_event_processing_and_compatibility_fields() {
     let metrics = runtime.metrics();
     assert_eq!(metrics.processed_events, 1);
     assert_eq!(metrics.max_queue_depth, 0);
+    runtime
+        .metrics_handle()
+        .record_effect_queue_latency(Duration::from_micros(17));
+    let metrics = runtime.metrics();
+    assert_eq!(metrics.effects_started, 1);
+    assert_eq!(metrics.total_effect_queue_latency_micros, 17);
+
+    let old_snapshot: RuntimeMetricsSnapshot = serde_json::from_str(
+        r#"{"processed_events":1,"total_command_wait_micros":2,"max_queue_depth":0,"transport_events":3,"total_transport_latency_micros":4}"#,
+    )
+    .unwrap();
+    assert_eq!(old_snapshot.effects_started, 0);
+    assert_eq!(old_snapshot.total_effect_queue_latency_micros, 0);
 }
 
 #[tokio::test]

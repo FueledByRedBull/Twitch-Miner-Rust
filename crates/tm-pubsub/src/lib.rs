@@ -10,6 +10,7 @@ pub const WEBSOCKET_URL: &str = "wss://pubsub-edge.twitch.tv/v1";
 mod client;
 mod errors;
 mod eventsub;
+mod hermes;
 mod parse;
 mod prediction;
 mod topics;
@@ -22,6 +23,11 @@ pub use eventsub::{
     EventSubConnectionEvent, EventSubError, EventSubMessage, EventSubSetupReport,
     EventSubStreamerCapability, EventSubTimeoutStage, EVENTSUB_SUBSCRIPTIONS_URL,
     EVENTSUB_WEBSOCKET_URL,
+};
+pub use hermes::{
+    HermesObservation, HermesObserver, HermesObserverError, HERMES_MAX_FRAME_BYTES,
+    HERMES_MAX_REPLAY_FRAMES, HERMES_MAX_SUBSCRIPTIONS, HERMES_MAX_SUBSCRIPTION_ID_BYTES,
+    HERMES_MAX_TOPIC_BYTES,
 };
 pub use parse::{
     bad_auth_cookie_file, channel_id_from_payload, parse_message, parse_transport_message,

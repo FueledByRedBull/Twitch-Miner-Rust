@@ -161,7 +161,14 @@ pub(crate) async fn refresh_snapshot_streamers(
             let username = streamer.username.clone();
             let result = match refresh_streamer_context(&runtime, twitch.as_ref(), &streamer).await
             {
-                Ok(effects) => {
+                Ok((effects, balance_delta)) => {
+                    if balance_delta > 0 {
+                        tracing::info!(
+                            streamer = %observability.streamer_name(&streamer),
+                            balance_delta,
+                            "channel-points balance increase observed during context refresh"
+                        );
+                    }
                     let context = RuntimeEffectContext::new(
                         runtime,
                         twitch,
@@ -217,11 +224,18 @@ pub(crate) async fn refresh_streamer_context(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
     streamer: &Streamer,
-) -> Result<Vec<tm_runtime::RuntimeEffect>> {
+) -> Result<(Vec<tm_runtime::RuntimeEffect>, i64)> {
+    let Some(request) = runtime
+        .begin_context_update(streamer.channel_id.clone())
+        .await?
+    else {
+        return Ok((Vec::new(), 0));
+    };
     let context = fetch_streamer_context(twitch, streamer).await?;
     let points_enabled = context.channel_points_enabled;
     let claim_id = context.claim_id.clone();
-    let mut effects = apply_runtime_context(runtime, streamer, context).await?;
+    let (mut effects, balance_delta) =
+        apply_runtime_context(runtime, streamer, context, request).await?;
     if points_enabled != Some(false) {
         if let Some(claim_id) = claim_id {
             effects.extend(
@@ -237,7 +251,7 @@ pub(crate) async fn refresh_streamer_context(
             );
         }
     }
-    Ok(effects)
+    Ok((effects, balance_delta))
 }
 
 pub(crate) async fn fetch_streamer_context(
@@ -254,16 +268,21 @@ pub(crate) async fn apply_runtime_context(
     runtime: &tm_runtime::RuntimeHandle,
     streamer: &Streamer,
     context: tm_twitch::ChannelPointsContext,
-) -> Result<Vec<tm_runtime::RuntimeEffect>> {
-    Ok(runtime
+    request: tm_runtime::ContextRequestToken,
+) -> Result<(Vec<tm_runtime::RuntimeEffect>, i64)> {
+    runtime
         .apply_context_update(tm_runtime::ContextUpdate {
             channel_id: streamer.channel_id.clone(),
             channel_points_enabled: context.channel_points_enabled,
             balance: context.balance,
+            expected_request_generation: request.request_generation,
+            expected_balance_revision: request.balance_revision,
+            observed_at: time_now(),
             active_multipliers: context.active_multipliers,
             community_goals: context.community_goals,
         })
-        .await?)
+        .await
+        .map_err(Into::into)
 }
 
 pub(crate) async fn load_goal_contributions(

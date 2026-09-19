@@ -177,9 +177,10 @@ No response payload, token, or cookie is logged.
 
 Playback priming deliberately remains uncached. The scheduler gives each
 selected channel a nominal 20-second interval; with the normal two slots it
-serializes the sends 10 seconds apart. Because the interval sleep begins after
-each request finishes, a channel is revisited after both selected requests plus
-the two nominal sleeps (about 20 seconds when requests are short).
+serializes attempts at nominal 10-second intervals. Snapshot and request time
+consume that interval, and only the remaining time is slept. An overrun starts
+the next attempt without replaying missed ticks; it does not queue catch-up
+requests. Watch-selection work can still add time between passes.
 Every tick performs one `PlaybackAccessToken` GQL request, one master-playlist
 GET, one selected media-playlist GET, and one newest-complete-segment HEAD before
 the spade POST. Local request-count savings did not establish credited
@@ -216,10 +217,19 @@ path. The same `capacity-overflow` class can also mean that an optional raid or
 prediction subscription was skipped while that streamer's presence subscription
 remains active. It is the designed allocation outcome, not a total-streamer
 failure: a saturated plan reports ten planned and ten active subscriptions with
-zero failed subscriptions and a non-zero overflow count. Normal runtime does not
-perform the post-create subscription listing, so `verified=false` means the
-report is unverified—not that setup is partial or unhealthy. The exclusive
-deployment canary enables listing and requires a fully verified report. The
+zero failed subscriptions and a non-zero overflow count. Normal runtime skips
+the immediate post-create listing; `verified=false` means the current report
+has not been verified, not necessarily that setup is unhealthy. After setup,
+three capacity rechecks run with 60-second spacing, each bounded to four minutes,
+while the WebSocket continues receiving events. Paginated listings refresh cost
+and current-session ownership; freed capacity restores the existing presence-first
+plan, replacing only known lower-priority subscriptions on that session when
+necessary. Other sessions and unknown subscriptions are never deleted. Recheck
+failures retain working subscriptions and polling, and do not restart the socket.
+Changed sets are listed again for verification. After these bounded rechecks,
+cost fields remain the last observed snapshot, not a live global-cost gauge.
+The exclusive deployment canary enables immediate listing and requires a fully
+verified report. The
 `--status` document reports the split under `eventsub` as
 `planned_subscriptions`, `active_subscriptions`, `failed_subscriptions`,
 `total_cost`, `max_total_cost`, and `overflow_streamers`, and each per-streamer
@@ -256,6 +266,10 @@ community-goal changes. It is unofficial/deprecated, so LISTEN acknowledgement,
 message time, reconnect count, and fixed failure class are exposed separately
 from EventSub status. User topics alone receive the auth token, connections are
 limited to 50 topics, and failures cannot stop EventSub, polling, IRC, or drops.
+Server-requested reconnects use the clean-close retry policy: a five-second base
+plus bounded jitter, with backoff for repeated short-lived connections. A
+connection lasting at least five minutes resets the retry count. Subscriptions
+must be acknowledged again before their capability is reported ready.
 Both paths normalize into `tm-domain::MinerEvent`; mutation IDs, point-event state, and
 prediction event IDs are boundedly deduplicated before effects are scheduled. GQL remains the typed
 mutation/reconciliation path. Twitch currently supports

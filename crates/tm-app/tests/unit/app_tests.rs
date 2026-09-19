@@ -23,12 +23,16 @@ mod tests {
         collect_context_refresh_results, record_context_refresh_health, refresh_snapshot_streamers,
         ContextRefreshSummary,
     };
-    use crate::drops::{claim_available_drops, drop_is_claimable};
+    use crate::drops::{
+        claim_available_drops, claim_inventory_drops, claim_inventory_drops_with_coordinator,
+        drop_is_claimable, DropClaimCoordinator,
+    };
     use crate::minute_watcher::{
-        build_minute_watched_event, handle_minute_watched_info_error, has_unfinished_campaign,
-        refresh_watch_selection_metadata, released_watch_channel_ids, resolve_spade_url,
-        send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
-        watch_metadata_defect,
+        available_watch_logins, build_minute_watched_event, handle_minute_watched_info_error,
+        has_unfinished_campaign, record_watch_attempt, refresh_watch_selection_metadata,
+        released_watch_channel_ids, resolve_spade_url, send_minute_watched_for_streamer,
+        send_minute_watched_with_spade_cache, watch_metadata_defect, WatchAttemptOutcome,
+        WatchFailureState,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -168,6 +172,107 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn bonus_claim_retries_unsent_connection_failure_but_keeps_unknown_outcome_reserved() {
+        for connect_failure in [true, false] {
+            let (mut endpoints, requests, server) =
+                spawn_json_response_server(if connect_failure {
+                    Vec::new()
+                } else {
+                    vec![String::from("{}")]
+                });
+            if connect_failure {
+                let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+                endpoints.gql_url = format!("http://{}/gql", closed.local_addr().unwrap());
+                drop(closed);
+            }
+            let twitch = TwitchClient::with_client_and_endpoints(
+                reqwest::Client::new(),
+                "token",
+                "ua",
+                endpoints,
+            );
+            let mut state =
+                tm_runtime::RuntimeState::from_targets(&ConfigFile::default(), &[], ts(0));
+            state.streamers = vec![Streamer {
+                username: "alice".into(),
+                channel_id: "701".into(),
+                ..Streamer::default()
+            }];
+            let runtime = tm_runtime::spawn_runtime_state(state);
+            let event = tm_domain::MinerEvent::ClaimAvailable {
+                channel_id: "701".into(),
+                claim_id: "claim-1".into(),
+            };
+            assert_eq!(
+                runtime
+                    .apply_event(event.clone(), ts(1))
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let error = handle_claim_bonus_effect(
+                &runtime,
+                &twitch,
+                "user-1",
+                "701",
+                "claim-1",
+                &test_observability(),
+                &HealthTracker::default(),
+            )
+            .await
+            .unwrap_err();
+            if connect_failure {
+                assert!(
+                    matches!(error.downcast_ref::<tm_twitch::TwitchClientError>(), Some(tm_twitch::TwitchClientError::Http(error)) if error.is_connect())
+                );
+            }
+            server.join().unwrap();
+            assert_eq!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.starts_with("POST "))
+                    .count(),
+                usize::from(!connect_failure)
+            );
+            assert_eq!(
+                runtime
+                    .apply_event(event.clone(), ts(2))
+                    .await
+                    .unwrap()
+                    .len(),
+                usize::from(connect_failure)
+            );
+            if connect_failure {
+                let (endpoints, _, server) = spawn_json_response_server(vec![fixture_json(
+                    "twitch.claim_bonus_success.json",
+                )]);
+                let twitch = TwitchClient::with_client_and_endpoints(
+                    reqwest::Client::new(),
+                    "token",
+                    "ua",
+                    endpoints,
+                );
+                handle_claim_bonus_effect(
+                    &runtime,
+                    &twitch,
+                    "user-1",
+                    "701",
+                    "claim-1",
+                    &test_observability(),
+                    &HealthTracker::default(),
+                )
+                .await
+                .unwrap();
+                server.join().unwrap();
+                assert!(runtime.apply_event(event, ts(3)).await.unwrap().is_empty());
+            }
+        }
     }
 
     async fn run_bonus_claim(
@@ -920,11 +1025,11 @@ mod tests {
 
     #[test]
     fn observability_presence_messages_include_privacy_safe_streak_context() {
-        let visible = AppObservability::new(
-            None,
-            DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
-            AppObservabilitySettings::default(),
-        );
+        let config = ConfigFile {
+            timezone: Some(String::from("Europe/Athens")),
+            ..ConfigFile::default()
+        };
+        let visible = crate::observability::build_observability(&config).unwrap();
         let private = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
@@ -955,9 +1060,9 @@ mod tests {
         for expected in [
             "streak missing false",
             "streak length 7",
-            &format!("expires at {expires_at}"),
-            &format!("observed online at {observed_online_at}"),
-            &format!("streak resolved at {resolved_at}"),
+            "expires at 1970-01-01 02:06:40 +02:00",
+            "observed online at 1970-01-01 02:01:40 +02:00",
+            "streak resolved at 1970-01-01 02:03:20 +02:00",
         ] {
             assert!(online.contains(expected));
             assert!(offline.contains(expected));
@@ -968,6 +1073,7 @@ mod tests {
         for hidden in [expires_at, observed_online_at, resolved_at] {
             assert!(!anonymized.contains(&hidden.to_string()));
         }
+        assert!(!anonymized.contains(" at "));
     }
 
     #[test]
@@ -1094,6 +1200,7 @@ mod tests {
                 emoji: true,
                 show_claimed_bonus: true,
                 show_game: true,
+                timezone: Some(chrono_tz::Europe::Athens),
             },
         );
         let streamer = Streamer {
@@ -1209,6 +1316,57 @@ mod tests {
     }
 
     #[test]
+    fn channel_local_watch_failures_back_off_without_hiding_recovery() {
+        let eligible = vec![String::from("a"), String::from("b")];
+        let mut failures = HashMap::<String, WatchFailureState>::new();
+
+        for _ in 0..2 {
+            record_watch_attempt(
+                &mut failures,
+                "a",
+                WatchAttemptOutcome::RequestFailure,
+                ts(0),
+            );
+        }
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(0)),
+            eligible
+        );
+        record_watch_attempt(
+            &mut failures,
+            "a",
+            WatchAttemptOutcome::RequestFailure,
+            ts(0),
+        );
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(899)),
+            ["b"]
+        );
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(900)),
+            eligible
+        );
+
+        record_watch_attempt(&mut failures, "a", WatchAttemptOutcome::Timeout, ts(1_000));
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(1_001)),
+            ["b"]
+        );
+        record_watch_attempt(&mut failures, "a", WatchAttemptOutcome::Success, ts(1_001));
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(1_001)),
+            eligible
+        );
+
+        record_watch_attempt(&mut failures, "a", WatchAttemptOutcome::Timeout, ts(2_000));
+        assert_eq!(
+            available_watch_logins(vec![String::from("b")], &mut failures, ts(2_001)),
+            ["b"]
+        );
+        assert!(failures.is_empty());
+    }
+
+    #[test]
     fn pubsub_reconnect_delay_distinguishes_requested_and_generic_retries() {
         let reconnect_requested = Ok(Err(tm_pubsub::PubSubError::ReconnectRequested));
         let generic_failure = Ok(Err(tm_pubsub::PubSubError::PongTimeout));
@@ -1216,7 +1374,7 @@ mod tests {
 
         assert_eq!(
             pubsub_reconnect_delay(&reconnect_requested, 0, 1, 1),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_secs(11))
         );
         assert_eq!(
             pubsub_reconnect_delay(&generic_failure, 0, 1, 1),
@@ -1249,6 +1407,29 @@ mod tests {
                     assert!(delay >= previous);
                     assert!(delay <= Duration::from_secs(300));
                     previous = delay;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn requested_reconnects_resume_promptly_but_back_off_when_repeated() {
+        let requested = Ok(Err(tm_pubsub::PubSubError::ReconnectRequested));
+        let closed = Ok(Ok(()));
+        for connection in 0..=10 {
+            for topics in [1, 3, 50] {
+                let initial = pubsub_reconnect_delay(&requested, connection, topics, 0).unwrap();
+                assert!((5..=11).contains(&initial.as_secs()));
+                for attempt in 1..=100 {
+                    let delay = pubsub_reconnect_delay(&requested, connection, topics, attempt);
+                    assert_eq!(
+                        delay,
+                        pubsub_reconnect_delay(&closed, connection, topics, attempt)
+                    );
+                    assert!(delay.unwrap() <= Duration::from_secs(300));
+                    if attempt >= 5 {
+                        assert!(delay.unwrap() > initial);
+                    }
                 }
             }
         }
@@ -2118,6 +2299,7 @@ mod tests {
             predictions: std::collections::HashMap::new(),
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
+            pending_prediction_winners: std::collections::HashMap::new(),
         };
         let runtime = tm_runtime::spawn_runtime_state(state);
         let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
@@ -2202,6 +2384,27 @@ mod tests {
                 }
             })
             .to_string(),
+            serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "name": "Campaign",
+                                "timeBasedDrops": [{
+                                    "name": "Reward",
+                                    "requiredMinutesWatched": 60,
+                                    "self": {
+                                        "dropInstanceID": "drop-1",
+                                        "currentMinutesWatched": 60,
+                                        "isClaimed": false
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
         ]);
         let twitch = TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
@@ -2224,10 +2427,91 @@ mod tests {
                 .contains("unexpected drop claim status INELIGIBLE")),
             "{error:?}"
         );
-        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(requests.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
+    async fn claim_failure_is_accepted_when_inventory_reconciliation_confirms_claim() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![
+            serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "name": "Campaign",
+                                "timeBasedDrops": [{
+                                    "name": "Reward",
+                                    "requiredMinutesWatched": 60,
+                                    "self": {
+                                        "dropInstanceID": "drop-reconciled",
+                                        "currentMinutesWatched": 60,
+                                        "isClaimed": false
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "data": {
+                    "claimDropRewards": {
+                        "status": "INELIGIBLE"
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "name": "Campaign",
+                                "timeBasedDrops": [{
+                                    "name": "Reward",
+                                    "requiredMinutesWatched": 60,
+                                    "self": {
+                                        "dropInstanceID": "drop-reconciled",
+                                        "currentMinutesWatched": 60,
+                                        "isClaimed": true
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        ]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+
+        claim_available_drops(&twitch, "periodic", &test_observability())
+            .await
+            .unwrap();
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains(r#""dropInstanceID":"drop-reconciled"#))
+                .count(),
+            1
+        );
+        assert_eq!(requests.len(), 4);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn claim_available_drops_continues_after_one_claim_fails() {
         let (endpoints, requests, server) = spawn_json_response_server(vec![
             serde_json::json!({
@@ -2272,8 +2556,37 @@ mod tests {
             .to_string(),
             serde_json::json!({
                 "data": {
+                    "currentUser": {
+                        "inventory": {
+                            "dropCampaignsInProgress": [{
+                                "name": "Campaign",
+                                "timeBasedDrops": [{
+                                    "name": "Broken reward",
+                                    "requiredMinutesWatched": 60,
+                                    "self": {
+                                        "dropInstanceID": "drop-broken",
+                                        "currentMinutesWatched": 60,
+                                        "isClaimed": false
+                                    }
+                                }, {
+                                    "name": "Good reward",
+                                    "requiredMinutesWatched": 60,
+                                    "self": {
+                                        "dropInstanceID": "drop-good",
+                                        "currentMinutesWatched": 60,
+                                        "isClaimed": false
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "data": {
                     "claimDropRewards": {
-                        "status": "CLAIMED"
+                        "status": "ELIGIBLE_FOR_ALL"
                     }
                 }
             })
@@ -2307,6 +2620,106 @@ mod tests {
         assert!(requests
             .iter()
             .any(|request| request.contains(r#""dropInstanceID":"drop-good""#)));
+    }
+
+    #[tokio::test]
+    async fn prompt_drop_claim_uses_the_existing_inventory_snapshot() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![serde_json::json!({
+            "data": {"claimDropRewards": {"status": "ELIGIBLE_FOR_ALL"}}
+        })
+        .to_string()]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let health = HealthTracker::default();
+        health.register("drop", Duration::from_secs(60));
+        claim_inventory_drops(
+            &twitch,
+            "prompt",
+            &[InventoryDrop {
+                drop_instance_id: String::from("drop-prompt"),
+                reward_name: String::from("Reward"),
+                campaign_name: String::from("Campaign"),
+                current_minutes_watched: 60,
+                required_minutes_watched: 60,
+                is_claimed: false,
+            }],
+            &test_observability(),
+            Some(&health),
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains(r#""dropInstanceID":"drop-prompt""#)));
+        assert_eq!(health.task_consecutive_failures("drop"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn completed_claim_is_not_replayed_from_a_stale_inventory_snapshot() {
+        let (endpoints, requests, server) = spawn_json_response_server(vec![serde_json::json!({
+            "data": {"claimDropRewards": {"status": "ELIGIBLE_FOR_ALL"}}
+        })
+        .to_string()]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let coordinator = DropClaimCoordinator::default();
+        let drops = [InventoryDrop {
+            drop_instance_id: String::from("drop-stale"),
+            reward_name: String::from("Reward"),
+            campaign_name: String::from("Campaign"),
+            current_minutes_watched: 60,
+            required_minutes_watched: 60,
+            is_claimed: false,
+        }];
+        claim_inventory_drops_with_coordinator(
+            &twitch,
+            "prompt",
+            &drops,
+            &test_observability(),
+            None,
+            &coordinator,
+        )
+        .await
+        .unwrap();
+        claim_inventory_drops_with_coordinator(
+            &twitch,
+            "prompt",
+            &drops,
+            &test_observability(),
+            None,
+            &coordinator,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains(r#""dropInstanceID":"drop-stale"#))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2506,6 +2919,11 @@ mod tests {
             ..tm_domain::Stream::default()
         });
         assert_eq!(watch_metadata_defect(&streamer, now), None);
+        streamer.stream.as_mut().unwrap().last_update = Some(now + Duration::from_secs(60));
+        assert_eq!(
+            watch_metadata_defect(&streamer, now),
+            Some("stale stream metadata")
+        );
     }
 
     #[tokio::test]
@@ -2973,7 +3391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spade_cache_uses_single_inflight_fetch_per_streamer() {
+    async fn spade_cache_allows_duplicate_refreshes_without_stranding_cache() {
         let spade_urls = tokio::sync::Mutex::new(HashMap::new());
         let fetches = Arc::new(AtomicUsize::new(0));
 
@@ -3004,7 +3422,44 @@ mod tests {
 
         assert_eq!(first.unwrap(), "https://spade.example");
         assert_eq!(second.unwrap(), "https://spade.example");
-        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+
+        let cached = resolve_spade_url(&spade_urls, "alice", false, |_login| async {
+            panic!("a completed cache entry should be reused");
+            #[allow(unreachable_code)]
+            Ok::<_, std::io::Error>(String::new())
+        })
+        .await
+        .unwrap();
+        assert_eq!(cached, "https://spade.example");
+    }
+
+    #[tokio::test]
+    async fn cancelled_spade_refresh_leaves_no_inflight_sentinel() {
+        let spade_urls = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task_started = Arc::clone(&started);
+        let task_cache = Arc::clone(&spade_urls);
+        let task = tokio::spawn(async move {
+            resolve_spade_url(&task_cache, "alice", false, move |_login| {
+                let task_started = Arc::clone(&task_started);
+                async move {
+                    task_started.notify_one();
+                    std::future::pending::<std::result::Result<String, std::io::Error>>().await
+                }
+            })
+            .await
+        });
+        started.notified().await;
+        task.abort();
+        assert!(task.await.is_err());
+
+        let recovered = resolve_spade_url(&spade_urls, "alice", false, |_login| async {
+            Ok::<_, std::io::Error>(String::from("https://recovered.example"))
+        })
+        .await
+        .unwrap();
+        assert_eq!(recovered, "https://recovered.example");
     }
 
     #[tokio::test]

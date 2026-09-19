@@ -7,15 +7,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
+use tm_twitch::InventoryDrop;
 
 use crate::build_info;
 
 pub(crate) const STATUS_FILE_NAME: &str = "runtime-status.json";
-const STATUS_SCHEMA_VERSION: u8 = 5;
+const STATUS_SCHEMA_VERSION: u8 = 6;
 const MAX_HEARTBEAT_AGE_SECONDS: u64 = 120;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const MAX_COUNTER_VALUE: u64 = 1_000_000_000;
 const MAX_DROP_PROGRESS_ENTRIES: usize = 16;
+const MAX_WATCH_SLOTS: usize = 2;
+const MAX_WATCH_SLOT_AGE_SECONDS: u64 = 10 * 60;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct TaskStatus {
@@ -38,9 +41,12 @@ struct RuntimeStatus {
     target: String,
     tasks: Vec<TaskStatus>,
     counters: StatusCounters,
+    watch_slots: Vec<WatchSlotStatus>,
     runtime_metrics: RuntimeMetricsSnapshot,
     eventsub: Option<tm_pubsub::EventSubSetupReport>,
     pubsub: Option<tm_pubsub::PubSubSetupReport>,
+    #[serde(default)]
+    prediction_journal: Option<crate::prediction_journal::JournalCapacity>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -56,9 +62,45 @@ struct StatusCounters {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct DropProgressSnapshot {
+    drop_key: String,
+    reward_name: String,
+    campaign_name: String,
     current_minutes_watched: i64,
     required_minutes_watched: i64,
     is_claimed: bool,
+    observed_at_unix: u64,
+    last_progress_increase_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WatchProgress {
+    #[default]
+    MeasurementUnavailable,
+    AwaitingFirstCredit,
+    FirstCreditOverdue,
+    Earning,
+    Stalled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WatchSlotStatus {
+    #[serde(default)]
+    progress: WatchProgress,
+    #[serde(default)]
+    progress_age_seconds: Option<u64>,
+    slot: usize,
+    channel_index: Option<usize>,
+    channel_key: Option<String>,
+    broadcast_key: Option<String>,
+    last_server_confirmed_points_unix: Option<u64>,
+    last_context_observed_unix: Option<u64>,
+    selected: bool,
+    selection_reason: Option<String>,
+    last_activity_unix: u64,
+    last_accepted_watch_unix: Option<u64>,
+    consecutive_failures: u32,
+    last_error_class: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -67,9 +109,21 @@ pub(crate) struct HealthTracker {
     counters: Arc<Mutex<StatusCounters>>,
     eventsub: Arc<Mutex<Option<tm_pubsub::EventSubSetupReport>>>,
     pubsub: Arc<Mutex<Option<tm_pubsub::PubSubSetupReport>>>,
+    watch_slots: Arc<Mutex<Vec<WatchSlotStatus>>>,
+    prediction_journal: Arc<Mutex<Option<crate::prediction_journal::PredictionPlacementJournal>>>,
 }
 
 impl HealthTracker {
+    pub(crate) fn set_journal(
+        &self,
+        journal: crate::prediction_journal::PredictionPlacementJournal,
+    ) {
+        *self
+            .prediction_journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
+    }
+
     pub(crate) fn register(&self, name: &'static str, stale_after: std::time::Duration) {
         let now = unix_now_infallible();
         self.lock_tasks().insert(
@@ -221,31 +275,181 @@ impl HealthTracker {
         }
     }
 
-    pub(crate) fn record_drop_progress(
-        &self,
-        current_minutes_watched: i64,
-        required_minutes_watched: i64,
-        is_claimed: bool,
-    ) {
+    pub(crate) fn record_drop_progress(&self, drop: &InventoryDrop) {
         let mut counters = self
             .counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if counters.drop_progress.len() < MAX_DROP_PROGRESS_ENTRIES {
-            counters.drop_progress.push(DropProgressSnapshot {
-                current_minutes_watched: current_minutes_watched.max(0),
-                required_minutes_watched: required_minutes_watched.max(0),
-                is_claimed,
+        let now = unix_now_infallible();
+        let drop_key = stable_drop_key(drop);
+        let previous_progress_increase = counters
+            .drop_progress
+            .iter()
+            .find(|existing| existing.drop_key == drop_key)
+            .and_then(|existing| {
+                (drop.current_minutes_watched > existing.current_minutes_watched)
+                    .then_some(now)
+                    .or(existing.last_progress_increase_unix)
             });
+        let snapshot = DropProgressSnapshot {
+            drop_key,
+            reward_name: drop.reward_name.clone(),
+            campaign_name: drop.campaign_name.clone(),
+            current_minutes_watched: drop.current_minutes_watched.max(0),
+            required_minutes_watched: drop.required_minutes_watched.max(0),
+            is_claimed: drop.is_claimed,
+            observed_at_unix: now,
+            last_progress_increase_unix: previous_progress_increase,
+        };
+        if let Some(existing) = counters
+            .drop_progress
+            .iter_mut()
+            .find(|existing| existing.drop_key == snapshot.drop_key)
+        {
+            *existing = snapshot;
+        } else {
+            if counters.drop_progress.len() >= MAX_DROP_PROGRESS_ENTRIES {
+                counters.drop_progress.remove(0);
+            }
+            counters.drop_progress.push(snapshot);
         }
     }
 
-    pub(crate) fn clear_drop_progress(&self) {
-        self.counters
+    pub(crate) fn set_watch_selection(
+        &self,
+        selected: &[(usize, usize, &str, &str, &'static str)],
+    ) {
+        let mut slots = self
+            .watch_slots
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drop_progress
-            .clear();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = slots.clone();
+        for slot in slots.iter_mut() {
+            slot.selected = false;
+            slot.selection_reason = None;
+            slot.progress = WatchProgress::MeasurementUnavailable;
+            slot.progress_age_seconds = None;
+        }
+        for (slot, channel_index, channel_id, broadcast_id, reason) in selected {
+            let Some(status) = watch_slot_mut(&mut slots, *slot) else {
+                continue;
+            };
+            let channel_key = anonymized_key("channel", [*channel_id]);
+            let broadcast_key = anonymized_key("broadcast", [*broadcast_id]);
+            let channel_changed = status.channel_key.as_deref() != Some(channel_key.as_str());
+            if channel_changed {
+                if let Some(previous) = previous.iter().find(|previous| {
+                    previous.channel_key.as_deref() == Some(channel_key.as_str())
+                        && previous.broadcast_key.as_deref() == Some(broadcast_key.as_str())
+                }) {
+                    status.last_activity_unix = previous.last_activity_unix;
+                    status.last_accepted_watch_unix = previous.last_accepted_watch_unix;
+                    status.consecutive_failures = previous.consecutive_failures;
+                    status
+                        .last_error_class
+                        .clone_from(&previous.last_error_class);
+                    status.last_server_confirmed_points_unix =
+                        previous.last_server_confirmed_points_unix;
+                    status.last_context_observed_unix = previous.last_context_observed_unix;
+                } else {
+                    let now = unix_now_infallible();
+                    status.last_activity_unix = now;
+                    status.last_accepted_watch_unix = None;
+                    status.last_server_confirmed_points_unix = None;
+                    status.last_context_observed_unix = None;
+                    status.consecutive_failures = 0;
+                    status.last_error_class = None;
+                }
+            } else if status.broadcast_key.as_deref() != Some(broadcast_key.as_str()) {
+                status.last_activity_unix = unix_now_infallible();
+                status.last_accepted_watch_unix = None;
+                status.last_server_confirmed_points_unix = None;
+                status.last_context_observed_unix = None;
+                status.consecutive_failures = 0;
+                status.last_error_class = None;
+            }
+            status.channel_index = Some(*channel_index);
+            status.channel_key = Some(channel_key);
+            status.broadcast_key = Some(broadcast_key);
+            status.selected = true;
+            status.selection_reason = Some((*reason).to_string());
+        }
+    }
+
+    pub(crate) fn watch_slot_measurement(
+        &self,
+        slot: usize,
+        last_server_confirmed_points_at: Option<tm_domain::OffsetDateTime>,
+        last_context_observed_at: Option<tm_domain::OffsetDateTime>,
+    ) {
+        let mut slots = self
+            .watch_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = watch_slot_mut(&mut slots, slot) {
+            if let Some(timestamp) = last_server_confirmed_points_at {
+                status.last_server_confirmed_points_unix =
+                    u64::try_from(timestamp.unix_timestamp()).ok();
+            }
+            if let Some(timestamp) = last_context_observed_at {
+                status.last_context_observed_unix = u64::try_from(timestamp.unix_timestamp()).ok();
+            }
+        }
+    }
+
+    pub(crate) fn watch_slot_progress(
+        &self,
+        slot: usize,
+        progress: WatchProgress,
+        age: Option<u64>,
+    ) {
+        let mut slots = self
+            .watch_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = watch_slot_mut(&mut slots, slot) {
+            status.progress = progress;
+            status.progress_age_seconds = age;
+        }
+    }
+
+    pub(crate) fn watch_slot_activity(&self, slot: usize) {
+        let mut slots = self
+            .watch_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = watch_slot_mut(&mut slots, slot) {
+            status.last_activity_unix = unix_now_infallible();
+        }
+    }
+
+    pub(crate) fn watch_slot_success(&self, slot: usize) {
+        let mut slots = self
+            .watch_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = watch_slot_mut(&mut slots, slot) {
+            let now = unix_now_infallible();
+            status.last_activity_unix = now;
+            status.last_accepted_watch_unix = Some(now);
+            status.consecutive_failures = 0;
+            status.last_error_class = None;
+        }
+    }
+
+    pub(crate) fn watch_slot_failure(&self, slot: usize, error_class: &'static str) {
+        let mut slots = self
+            .watch_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = watch_slot_mut(&mut slots, slot) {
+            status.last_activity_unix = unix_now_infallible();
+            status.consecutive_failures = status
+                .consecutive_failures
+                .saturating_add(1)
+                .min(MAX_CONSECUTIVE_FAILURES);
+            status.last_error_class = Some(error_class.to_string());
+        }
     }
 
     fn increment(&self, selector: impl FnOnce(&mut StatusCounters) -> &mut u64) {
@@ -289,6 +493,13 @@ impl HealthTracker {
 
     pub(crate) fn pubsub_snapshot(&self) -> Option<tm_pubsub::PubSubSetupReport> {
         self.pubsub
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn watch_slots_snapshot(&self) -> Vec<WatchSlotStatus> {
+        self.watch_slots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -347,9 +558,18 @@ impl StatusReporter {
             target: String::from(build_info::TARGET),
             tasks: self.health.snapshot(),
             counters: self.health.counters_snapshot(),
+            watch_slots: self.health.watch_slots_snapshot(),
             runtime_metrics: self.metrics.snapshot(),
             eventsub: self.health.eventsub_snapshot(),
             pubsub: self.health.pubsub_snapshot(),
+            prediction_journal: self
+                .health
+                .prediction_journal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(crate::prediction_journal::PredictionPlacementJournal::capacity)
+                .transpose()?,
         };
         atomic_json_write(&self.path, &status)?;
         Ok((status, now))
@@ -465,6 +685,22 @@ fn validate_common_status(status: &RuntimeStatus, now: u64, supervision: bool) -
             ));
         }
     }
+    for slot in &status.watch_slots {
+        if !slot.selected {
+            continue;
+        }
+        let age = now.saturating_sub(slot.last_activity_unix);
+        if age > MAX_WATCH_SLOT_AGE_SECONDS {
+            return Err(anyhow!("watch slot {} is stale ({age}s old)", slot.slot));
+        }
+        if !supervision && slot.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            return Err(anyhow!(
+                "watch slot {} has {} consecutive failures",
+                slot.slot,
+                slot.consecutive_failures
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -476,6 +712,61 @@ fn count_files(path: &Path) -> usize {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .count()
+}
+
+fn watch_slot_mut(slots: &mut Vec<WatchSlotStatus>, slot: usize) -> Option<&mut WatchSlotStatus> {
+    if slot >= MAX_WATCH_SLOTS {
+        return None;
+    }
+    while slots.len() <= slot {
+        let index = slots.len();
+        slots.push(WatchSlotStatus {
+            progress: WatchProgress::MeasurementUnavailable,
+            progress_age_seconds: None,
+            slot: index,
+            channel_index: None,
+            channel_key: None,
+            broadcast_key: None,
+            last_server_confirmed_points_unix: None,
+            last_context_observed_unix: None,
+            selected: false,
+            selection_reason: None,
+            last_activity_unix: unix_now_infallible(),
+            last_accepted_watch_unix: None,
+            consecutive_failures: 0,
+            last_error_class: None,
+        });
+    }
+    slots.get_mut(slot)
+}
+
+fn stable_drop_key(drop: &InventoryDrop) -> String {
+    // The raw drop instance is required for the claim mutation but is viewer
+    // scoped. Keep status output useful without publishing that identifier.
+    anonymized_key(
+        "drop",
+        [
+            &drop.campaign_name,
+            &drop.reward_name,
+            &drop.required_minutes_watched.to_string(),
+            &drop.drop_instance_id,
+        ],
+    )
+}
+
+fn anonymized_key<const N: usize>(prefix: &str, parts: [&str; N]) -> String {
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            hash ^= u64::from(b':');
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        for byte in part.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+    }
+    format!("{prefix}-{hash:016x}")
 }
 
 fn atomic_json_write(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -542,9 +833,11 @@ mod tests {
     use super::{
         atomic_json_write, check_health, validate_status, validate_status_for_supervision,
         write_support_bundle, HealthTracker, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus,
-        StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
+        StatusCounters, StatusReporter, TaskStatus, MAX_DROP_PROGRESS_ENTRIES, STATUS_FILE_NAME,
+        STATUS_SCHEMA_VERSION,
     };
     use tm_observability::{init_tracing, LoggerSettings, TracingInitOptions};
+    use tm_twitch::InventoryDrop;
 
     #[test]
     fn ready_status_passes_health_check() -> anyhow::Result<()> {
@@ -570,6 +863,65 @@ mod tests {
     }
 
     #[test]
+    fn journal_capacity_is_reported_without_identities_or_health_failure() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let journal =
+            crate::prediction_journal::PredictionPlacementJournal::open(directory.path())?;
+        let request = crate::prediction_journal::PredictionPlacementRequest {
+            account_id: "private-account",
+            channel_id: "private-channel",
+            event_id: "private-event",
+            choice: Some(0),
+            outcome_id: "private-outcome",
+            amount: 10,
+            reserved_at_unix_seconds: 1,
+        };
+        assert!(journal.reserve(&request)?);
+        let health = HealthTracker::default();
+        health.set_journal(journal.clone());
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        let (status, _) = reporter.publish_heartbeat()?;
+        let serialized = serde_json::to_string(&status)?;
+        assert!(!serialized.contains("private-"));
+        let capacity = status
+            .prediction_journal
+            .ok_or_else(|| anyhow::anyhow!("missing journal capacity"))?;
+        assert_eq!(capacity.unresolved_count, 1);
+        assert_eq!(capacity.retained_count, 0);
+        assert_eq!(
+            capacity.bytes as u64,
+            std::fs::metadata(directory.path().join("prediction-placements.json"))?.len()
+        );
+        let oversized = "x".repeat(256 * 1024);
+        assert!(journal
+            .reserve(&crate::prediction_journal::PredictionPlacementRequest {
+                event_id: &oversized,
+                ..request
+            })
+            .is_err());
+        reporter.heartbeat()?;
+        assert!(reporter
+            .publish_heartbeat()?
+            .0
+            .prediction_journal
+            .is_some_and(|capacity| capacity.capacity_blocked));
+        journal.confirm(request.account_id, request.channel_id, request.event_id)?;
+        reporter.heartbeat()?;
+        let (status, _) = reporter.publish_heartbeat()?;
+        assert_eq!(
+            status
+                .prediction_journal
+                .map(|capacity| capacity.retained_count),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stale_or_repeatedly_failing_tasks_fail_health() {
         let mut status = RuntimeStatus {
             schema_version: STATUS_SCHEMA_VERSION,
@@ -588,9 +940,11 @@ mod tests {
                 last_error_class: None,
             }],
             counters: StatusCounters::default(),
+            watch_slots: Vec::new(),
             runtime_metrics: RuntimeMetricsSnapshot::default(),
             eventsub: None,
             pubsub: None,
+            prediction_journal: None,
         };
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());
@@ -647,6 +1001,110 @@ mod tests {
         assert!(task.last_activity_unix > 0);
         assert_eq!(task.consecutive_failures, 1);
         assert_eq!(task.last_error_class.as_deref(), Some("welcome-timeout"));
+    }
+
+    #[test]
+    fn watch_slot_health_does_not_share_failures_between_slots() {
+        let health = HealthTracker::default();
+        health.set_watch_selection(&[
+            (0, 0, "channel-a", "broadcast-a", "watch-order"),
+            (1, 1, "channel-b", "broadcast-b", "fair-rotation"),
+        ]);
+        for _ in 0..4 {
+            health.watch_slot_failure(1, "watch-timeout");
+        }
+        health.watch_slot_success(0);
+
+        let slots = health.watch_slots_snapshot();
+        assert_eq!(slots[0].consecutive_failures, 0);
+        assert_eq!(slots[1].consecutive_failures, 4);
+        assert_eq!(slots[1].last_error_class.as_deref(), Some("watch-timeout"));
+    }
+
+    #[test]
+    fn watch_slot_health_resets_when_the_broadcast_changes() -> anyhow::Result<()> {
+        let health = HealthTracker::default();
+        health.set_watch_selection(&[(0, 0, "channel-a", "broadcast-a", "watch-order")]);
+        health.watch_slot_success(0);
+        health.watch_slot_failure(0, "watch-timeout");
+        health.watch_slot_progress(0, super::WatchProgress::FirstCreditOverdue, Some(1_800));
+        let serialized = serde_json::to_value(&health.watch_slots_snapshot()[0])?;
+        assert_eq!(serialized["progress"], "first_credit_overdue");
+        assert_eq!(serialized["progress_age_seconds"], 1_800);
+        health.set_watch_selection(&[(0, 0, "channel-a", "broadcast-b", "watch-order")]);
+
+        let slot = &health.watch_slots_snapshot()[0];
+        assert!(slot.last_accepted_watch_unix.is_none());
+        assert_eq!(slot.consecutive_failures, 0);
+        assert!(slot.broadcast_key.as_deref().is_some());
+        assert_eq!(slot.progress, super::WatchProgress::MeasurementUnavailable);
+        assert_eq!(slot.progress_age_seconds, None);
+        Ok(())
+    }
+
+    #[test]
+    fn watch_slot_health_does_not_copy_a_new_broadcast_when_a_channel_moves_slots() {
+        let health = HealthTracker::default();
+        health.set_watch_selection(&[(0, 0, "channel-a", "broadcast-a", "watch-order")]);
+        health.watch_slot_success(0);
+        health.watch_slot_failure(0, "watch-timeout");
+
+        health.set_watch_selection(&[(1, 0, "channel-a", "broadcast-b", "fair-rotation")]);
+
+        let slots = health.watch_slots_snapshot();
+        assert_eq!(slots[1].consecutive_failures, 0);
+        assert!(slots[1].last_accepted_watch_unix.is_none());
+        assert!(slots[1].last_server_confirmed_points_unix.is_none());
+        assert!(slots[1].last_context_observed_unix.is_none());
+    }
+
+    #[test]
+    fn drop_progress_is_identified_timestamped_and_bounded() {
+        let health = HealthTracker::default();
+        for index in 0..=MAX_DROP_PROGRESS_ENTRIES {
+            health.record_drop_progress(&InventoryDrop {
+                drop_instance_id: format!("drop-{index}"),
+                reward_name: String::from("reward"),
+                campaign_name: String::from("campaign"),
+                current_minutes_watched: i64::try_from(index).unwrap_or(i64::MAX),
+                required_minutes_watched: 60,
+                is_claimed: false,
+            });
+        }
+
+        let progress = health.counters_snapshot().drop_progress;
+        assert_eq!(progress.len(), MAX_DROP_PROGRESS_ENTRIES);
+        assert_eq!(progress[0].current_minutes_watched, 1);
+        assert_ne!(progress[0].drop_key, "drop-1");
+        assert!(progress.iter().all(|entry| entry.observed_at_unix > 0));
+    }
+
+    #[test]
+    fn drop_progress_keeps_confirmed_increase_timestamp() {
+        let health = HealthTracker::default();
+        let mut drop = InventoryDrop {
+            drop_instance_id: String::from("private-drop"),
+            reward_name: String::from("reward"),
+            campaign_name: String::from("campaign"),
+            current_minutes_watched: 10,
+            required_minutes_watched: 60,
+            is_claimed: false,
+        };
+        health.record_drop_progress(&drop);
+        assert!(health.counters_snapshot().drop_progress[0]
+            .last_progress_increase_unix
+            .is_none());
+        drop.current_minutes_watched = 11;
+        health.record_drop_progress(&drop);
+        let first_increase =
+            health.counters_snapshot().drop_progress[0].last_progress_increase_unix;
+        assert!(first_increase.is_some());
+        drop.current_minutes_watched = 9;
+        health.record_drop_progress(&drop);
+        assert_eq!(
+            health.counters_snapshot().drop_progress[0].last_progress_increase_unix,
+            first_increase
+        );
     }
 
     #[test]

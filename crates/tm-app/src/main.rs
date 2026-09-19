@@ -50,8 +50,10 @@ mod chat;
 mod context;
 mod drops;
 mod eventsub;
+mod identity_cache;
 mod minute_watcher;
 mod observability;
+mod prediction_journal;
 mod pubsub;
 mod runtime_effects;
 mod shutdown;
@@ -68,9 +70,13 @@ use bootstrap::{
     validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
 };
 use drops::claim_startup_drops_if_enabled;
+use identity_cache::IdentityCache;
 use observability::{build_observability, log_session_summary, log_startup};
 use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
-use startup::{bootstrap_runtime_state, build_canary_logger_settings, build_logger_settings};
+use startup::{
+    bootstrap_runtime_state_with_identity_cache, build_canary_logger_settings,
+    build_logger_settings,
+};
 use streak_cache::StreakCache;
 use tasks::{spawn_background_tasks, BackgroundTaskParams, BackgroundTasks};
 use utilities::{new_session_id, time_now};
@@ -241,6 +247,7 @@ struct PreparedMiner {
     state: tm_runtime::RuntimeState,
 }
 
+#[allow(clippy::too_many_lines)] // Keep the ordered startup and state-loading steps together.
 async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
     let LoadedConfig {
         config,
@@ -291,15 +298,35 @@ async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
         StreakCache::default()
     };
     let bootstrap_started = StdInstant::now();
-    let state = bootstrap_runtime_state(
+    let mut identity_cache = IdentityCache::load(&active_paths.work_dir, started_at)
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                task = "identity-cache",
+                error_class = "load",
+                "startup identity cache unavailable; resolving identities afresh"
+            );
+            IdentityCache::default()
+        });
+    let state = bootstrap_runtime_state_with_identity_cache(
         &config,
         &twitch,
         user_id.as_deref(),
         started_at,
         &observability,
         &mut streak_cache,
+        &mut identity_cache,
     )
     .await?;
+    if identity_cache
+        .save(&active_paths.work_dir, time_now())
+        .is_err()
+    {
+        tracing::warn!(
+            task = "identity-cache",
+            error_class = "write",
+            "startup identity cache write failed"
+        );
+    }
     if streak_cache
         .save(&active_paths.work_dir, time_now())
         .is_err()

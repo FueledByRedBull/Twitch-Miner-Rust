@@ -189,6 +189,7 @@ async fn missing_welcome_expires_at_the_welcome_deadline() {
                 connect: std::time::Duration::from_secs(1),
                 welcome: std::time::Duration::from_millis(50),
                 session_setup: std::time::Duration::from_secs(1),
+                capacity_recheck: std::time::Duration::from_secs(60),
             },
         )
         .await;
@@ -222,6 +223,10 @@ fn timeout_stages_have_stable_sanitized_failure_classes() {
 }
 
 async fn read_http_json(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+    read_http_request(stream).await.1
+}
+
+async fn read_http_request(stream: &mut tokio::net::TcpStream) -> (String, serde_json::Value) {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
     let mut expected_length = None;
@@ -243,11 +248,19 @@ async fn read_http_json(stream: &mut tokio::net::TcpStream) -> serde_json::Value
                     .unwrap_or_default()
             });
             if request.len() >= body_start + content_length {
+                let first_line = String::from_utf8_lossy(&request[..header_end])
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_string();
                 if content_length == 0 {
-                    return serde_json::Value::Null;
+                    return (first_line, serde_json::Value::Null);
                 }
-                return serde_json::from_slice(&request[body_start..body_start + content_length])
-                    .unwrap();
+                return (
+                    first_line,
+                    serde_json::from_slice(&request[body_start..body_start + content_length])
+                        .unwrap(),
+                );
             }
         }
         assert!(request.len() < 16 * 1024);
@@ -284,7 +297,11 @@ fn inherited_list_response(session_id: &str, types: &[&str]) -> String {
                 "type": subscription_type,
                 "version": "1",
                 "cost": 1,
-                "condition": {"broadcaster_user_id": "100"},
+                "condition": if *subscription_type == "channel.raid" {
+                    json!({"from_broadcaster_user_id": "100"})
+                } else {
+                    json!({"broadcaster_user_id": "100"})
+                },
                 "transport": {"method": "websocket", "session_id": session_id},
                 "created_at": "2026-07-13T10:00:00Z"
             })
@@ -341,7 +358,7 @@ async fn inherited_session_rejects_partial_subscription_transfer() {
     let mut settings = EventSubClientSettings::new("client", "token");
     settings.subscriptions_url = format!("http://{address}/eventsub");
     let error = EventSubClient::new(settings)
-        .reconcile_inherited_report("session-2", previous)
+        .reconcile_inherited_report("session-2", &[streamer()], previous)
         .await
         .unwrap_err();
 
@@ -350,6 +367,45 @@ async fn inherited_session_rejects_partial_subscription_transfer() {
         EventSubError::Protocol("inherited EventSub subscriptions did not match prior session")
     ));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn inherited_session_checks_conditions_and_unique_ids() {
+    for corruption in ["none", "condition", "duplicate-id"] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (requests, mut previous) = super::subscription_plan(&[streamer()], None);
+        previous.capabilities[0].active_subscription_types =
+            previous.capabilities[0].planned_subscription_types.clone();
+        previous.active_subscriptions = requests.len();
+        let kinds = requests
+            .iter()
+            .map(|request| request.subscription_type.as_str())
+            .collect::<Vec<_>>();
+        let mut response: serde_json::Value =
+            serde_json::from_str(&inherited_list_response("session-2", &kinds)).unwrap();
+        match corruption {
+            "condition" => response["data"][0]["condition"] = json!({"broadcaster_user_id": "999"}),
+            "duplicate-id" => response["data"][1]["id"] = response["data"][0]["id"].clone(),
+            _ => {}
+        }
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_json(&mut stream).await;
+            write_json_response(&mut stream, "200 OK", &response.to_string()).await;
+        });
+        let mut settings = EventSubClientSettings::new("client", "token");
+        settings.subscriptions_url = format!("http://{address}/eventsub");
+        let result = EventSubClient::new(settings)
+            .reconcile_inherited_report("session-2", &[streamer()], previous)
+            .await;
+        assert_eq!(
+            result.is_ok(),
+            corruption == "none",
+            "{corruption}: {result:?}"
+        );
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -408,6 +464,7 @@ async fn complete_session_setup_has_an_outer_deadline() {
                 connect: std::time::Duration::from_secs(1),
                 welcome: std::time::Duration::from_secs(1),
                 session_setup: std::time::Duration::from_millis(250),
+                capacity_recheck: std::time::Duration::from_secs(60),
             },
         )
         .await;
@@ -851,6 +908,338 @@ fn capacity_plan_uses_current_cost_and_zero_cost_authenticated_broadcaster() {
         report.capabilities[0].prediction_source,
         "eventsub-broadcaster"
     );
+}
+
+fn reduced_capacity_fixture() -> (
+    Vec<Streamer>,
+    super::EventSubSetupReport,
+    Vec<serde_json::Value>,
+) {
+    let tracked = (100..117)
+        .map(|id| Streamer {
+            channel_id: id.to_string(),
+            settings: StreamerSettings {
+                follow_raid: true,
+                ..streamer().settings
+            },
+            ..streamer()
+        })
+        .collect::<Vec<_>>();
+    let (requests, mut report) = subscription_plan_with_capacity(&tracked, None, 7, 3, 10);
+    let entries = requests.iter().enumerate().map(|(index, request)| {
+        report.capabilities[request.streamer_index].active_subscription_types.push(request.subscription_type.clone());
+        json!({
+            "id": format!("owned-{index}"), "status": "enabled", "type": request.subscription_type,
+            "cost": 1, "condition": request.condition,
+            "transport": {"method": "websocket", "session_id": "current"}
+        })
+    }).collect::<Vec<_>>();
+    report.active_subscriptions = 7;
+    report.total_cost = 10; // Old session's three units were still occupied at setup.
+    (tracked, report, entries)
+}
+
+async fn serve_capacity_rechecks(
+    listener: TcpListener,
+    mut owned: Vec<serde_json::Value>,
+    fail_delete: bool,
+    fail_create: bool,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> Vec<String> {
+    let mut calls = Vec::new();
+    loop {
+        let (mut stream, _) = tokio::select! {
+            () = async { let _ = (&mut stop).await; } => break,
+            accepted = listener.accept() => accepted.unwrap(),
+        };
+        let (line, body) = read_http_request(&mut stream).await;
+        calls.push(line.clone());
+        let (status, response) = if line.starts_with("GET ") {
+            let second_page = line.contains("after=next");
+            // Old-session cost survives the first pass, then clears without reconnecting.
+            let held_cost =
+                usize::from(calls.iter().filter(|call| call.starts_with("GET ")).count() <= 2) * 3;
+            let data = if second_page {
+                owned.clone()
+            } else {
+                vec![
+                    json!({"id":"foreign", "status":"enabled", "type":"channel.raid", "cost":0,
+                    "condition":{"from_broadcaster_user_id":"100"},
+                    "transport":{"method":"websocket", "session_id":"other"}}),
+                    json!({"id":"webhook", "status":"enabled", "type":"stream.online", "cost":0,
+                    "condition":{"broadcaster_user_id":"100"}, "transport":{"method":"webhook"}}),
+                    json!({"id":"disabled", "status":"websocket_disconnected", "type":"stream.online", "cost":1,
+                    "condition":{"broadcaster_user_id":"100"},
+                    "transport":{"method":"websocket", "session_id":"current"}}),
+                ]
+            };
+            ("200 OK", json!({"data":data, "total":owned.len()+2, "total_cost":owned.len()+held_cost,
+                "max_total_cost":10, "pagination": if second_page { json!({}) } else { json!({"cursor":"next"}) }}).to_string())
+        } else if line.starts_with("DELETE ") {
+            assert!(
+                line.contains("id=owned-6"),
+                "only the owned raid may be removed: {line}"
+            );
+            if fail_delete {
+                ("403 Forbidden", "{}".to_string())
+            } else {
+                owned.retain(|entry| entry["id"] != "owned-6");
+                ("204 No Content", String::new())
+            }
+        } else {
+            assert!(line.starts_with("POST "));
+            assert_eq!(body["transport"]["session_id"], "current");
+            assert!(!owned
+                .iter()
+                .any(|entry| entry["type"] == body["type"]
+                    && entry["condition"] == body["condition"]));
+            if fail_create
+                && body["type"] == "stream.offline"
+                && body["condition"]["broadcaster_user_id"] == "103"
+            {
+                ("403 Forbidden", "{}".to_string())
+            } else {
+                owned.push(json!({"id":format!("new-{}", calls.len()), "status":"enabled", "type":body["type"],
+                    "cost":1, "condition":body["condition"], "transport":body["transport"]}));
+                (
+                    "202 Accepted",
+                    json!({"data":[owned.last().unwrap()], "total":owned.len()+2,
+                    "total_cost":owned.len(), "max_total_cost":10})
+                    .to_string(),
+                )
+            }
+        };
+        write_json_response(&mut stream, status, &response).await;
+    }
+    calls
+}
+
+#[tokio::test]
+async fn capacity_rechecks_restore_presence_pairs_without_touching_foreign_sessions() {
+    let (tracked, mut report, owned) = reduced_capacity_fixture();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let mut settings = EventSubClientSettings::new("client", "token");
+    settings.subscriptions_url = format!("http://{}/eventsub", listener.local_addr().unwrap());
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_capacity_rechecks(
+        listener, owned, false, false, stop_rx,
+    ));
+    let client = EventSubClient::new(settings);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    client
+        .recheck_capacity(
+            "current",
+            &tracked,
+            &mut report,
+            &sender,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap();
+    stop_tx.send(()).unwrap();
+    let calls = server.await.unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|line| line.starts_with("DELETE "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|line| line.starts_with("POST "))
+            .count(),
+        4
+    );
+    // Three bounded passes plus one verification, each crossing two pages.
+    assert_eq!(
+        calls.iter().filter(|line| line.starts_with("GET ")).count(),
+        8
+    );
+    assert_eq!(report.active_subscriptions, 10);
+    assert_eq!(report.planned_subscriptions, 10);
+    assert_eq!(report.total_cost, 10);
+    assert_eq!(report.overflow_streamers, 12);
+    assert!(report.verified);
+    assert_eq!(
+        report
+            .capabilities
+            .iter()
+            .filter(|cap| cap.presence_source == "eventsub+gql-polling")
+            .count(),
+        5
+    );
+    assert_eq!(report.capabilities[0].raid_source, "pubsub-compatibility");
+    for _ in 0..3 {
+        assert!(matches!(
+            receiver.recv().await,
+            Some(EventSubConnectionEvent::Setup(_))
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(EventSubConnectionEvent::Heartbeat)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn capacity_recheck_failures_retain_working_subscriptions_and_polling() {
+    for fail_delete in [true, false] {
+        let (tracked, mut report, owned) = reduced_capacity_fixture();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mut settings = EventSubClientSettings::new("client", "token");
+        settings.subscriptions_url = format!("http://{}/eventsub", listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_capacity_rechecks(
+            listener,
+            owned,
+            fail_delete,
+            true,
+            stop_rx,
+        ));
+        let client = EventSubClient::new(settings);
+        let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+        client
+            .recheck_capacity(
+                "current",
+                &tracked,
+                &mut report,
+                &sender,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        stop_tx.send(()).unwrap();
+        let calls = server.await.unwrap();
+        assert_eq!(report.active_subscriptions, if fail_delete { 7 } else { 9 });
+        assert_eq!(report.total_cost, if fail_delete { 7 } else { 9 });
+        assert!(report.capabilities[..3]
+            .iter()
+            .all(|cap| cap.presence_source == "eventsub+gql-polling"));
+        assert_eq!(report.capabilities[3].presence_source, "gql-polling");
+        if fail_delete {
+            assert!(!calls.iter().any(|line| line.starts_with("POST ")));
+            assert!(!report.verified);
+        } else {
+            assert_eq!(report.failed_subscriptions, 1);
+            assert!(report.verified);
+        }
+    }
+}
+
+#[tokio::test]
+async fn capacity_recheck_rejects_unknown_ownership_and_invalid_metadata_before_mutating() {
+    for case in 0..4 {
+        let (tracked, mut report, mut entries) = reduced_capacity_fixture();
+        let total = match case {
+            0 => {
+                entries[6]["condition"] = json!({"from_broadcaster_user_id":"untracked"});
+                7
+            }
+            1 => {
+                entries[6]["id"] = entries[0]["id"].clone();
+                7
+            }
+            2 => 11,
+            _ => 1,
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mut settings = EventSubClientSettings::new("client", "token");
+        settings.subscriptions_url = format!("http://{}/eventsub", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (line, _) = read_http_request(&mut stream).await;
+            assert!(line.starts_with("GET "));
+            write_json_response(
+                &mut stream,
+                "200 OK",
+                &json!({"data":entries,
+                "total":7,"total_cost":total,"max_total_cost":10,"pagination":{}})
+                .to_string(),
+            )
+            .await;
+        });
+        let result = EventSubClient::new(settings)
+            .reconcile_capacity("current", &tracked, &mut report)
+            .await;
+        assert!(matches!(result, Err(EventSubError::Protocol(_))));
+        assert_eq!(report.active_subscriptions, 7);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn capacity_recheck_does_not_block_websocket_heartbeats() {
+    let websocket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let http = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let mut settings = EventSubClientSettings::new("client", "token");
+    settings.websocket_url = format!("ws://{}", websocket.local_addr().unwrap());
+    settings.subscriptions_url = format!("http://{}/eventsub", http.local_addr().unwrap());
+    let (recheck_started, started) = tokio::sync::oneshot::channel();
+    let http_server = tokio::spawn(async move {
+        let (mut stream, _) = http.accept().await.unwrap();
+        read_http_json(&mut stream).await;
+        write_json_response(&mut stream, "200 OK", &capacity_response(0, 10)).await;
+        for id in 1..=2 {
+            let (mut stream, _) = http.accept().await.unwrap();
+            let request = read_http_json(&mut stream).await;
+            write_json_response(
+                &mut stream,
+                "202 Accepted",
+                &accepted_subscription_response(&request, id),
+            )
+            .await;
+        }
+        let (mut stream, _) = http.accept().await.unwrap();
+        let (line, _) = read_http_request(&mut stream).await;
+        assert!(line.starts_with("GET "));
+        recheck_started.send(()).unwrap();
+        // Keep the HTTP request unresolved while the WebSocket delivers a heartbeat.
+        let _ = stream.read(&mut [0_u8; 1]).await;
+    });
+    let websocket_server = tokio::spawn(async move {
+        let (stream, _) = websocket.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        socket.send(Message::Text(json!({
+            "metadata":{"message_id":"welcome","message_type":"session_welcome"},
+            "payload":{"session":{"id":"current","keepalive_timeout_seconds":30,"reconnect_url":null}}
+        }).to_string().into())).await.unwrap();
+        started.await.unwrap();
+        socket.send(Message::Text(json!({
+            "metadata":{"message_id":"keepalive","message_type":"session_keepalive"},"payload":{}
+        }).to_string().into())).await.unwrap();
+        socket.close(None).await.unwrap();
+    });
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        EventSubClient::new(settings).connect_and_listen_with_deadlines(
+            &[streamer()],
+            sender,
+            EventSubDeadlines {
+                capacity_recheck: std::time::Duration::from_millis(1),
+                ..EventSubDeadlines::PRODUCTION
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert!(matches!(
+        receiver.recv().await,
+        Some(EventSubConnectionEvent::Setup(_))
+    ));
+    assert!(matches!(
+        receiver.recv().await,
+        Some(EventSubConnectionEvent::Heartbeat)
+    ));
+    assert!(matches!(
+        receiver.recv().await,
+        Some(EventSubConnectionEvent::Heartbeat)
+    ));
+    websocket_server.await.unwrap();
+    http_server.await.unwrap();
 }
 
 #[tokio::test]

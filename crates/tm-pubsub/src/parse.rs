@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
+use time::format_description::well_known::Rfc3339;
 use tm_domain::{
-    CommunityGoal, CommunityGoalKind, MinerEvent, PlaybackType, PredictionChannelKind,
-    PredictionUserKind, Streamer,
+    CommunityGoal, CommunityGoalKind, MinerEvent, OffsetDateTime, PlaybackType,
+    PredictionChannelKind, PredictionUserKind, Streamer,
 };
 
 use crate::errors::PubSubError;
@@ -119,11 +120,27 @@ fn parse_points_earned_event(
         .ok_or(PubSubError::Protocol(
             "points-earned balance is missing or invalid",
         ))?;
+    // Twitch's points-earned payload has no documented event identifier in
+    // the source shape we support. The nested `point_gain` object describes
+    // the reward, and an arbitrary `id` there could identify that object
+    // rather than this delivery. Use the server timestamp only after strict
+    // RFC3339 validation, and combine it with the event facts to avoid
+    // treating unrelated rewards in the same timestamp as duplicates.
+    let source_id = payload
+        .pointer("/data/timestamp")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|timestamp| {
+            OffsetDateTime::parse(timestamp, &Rfc3339).ok()?;
+            Some(format!("timestamp:{timestamp}:{earned}:{balance}:{reason}"))
+        });
     Ok(MinerEvent::PointsEarned {
         channel_id,
         earned,
         reason,
         balance,
+        source_id,
     })
 }
 

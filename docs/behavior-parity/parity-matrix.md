@@ -42,9 +42,80 @@ contract used by streak prioritization.
 
 Rust's transition diagnostics report `stream_up_at`, the time this miner
 observed the current broadcast online, rather than Go's Twitch-sourced
-`createdAt`. Timestamp values retain their explicit source offset. The same
+`createdAt`. Displayed timestamps use the configured timezone, including its
+daylight-saving offset, matching log headers. The same
 online/offline message is sent to Discord when that notifier is enabled; privacy
 anonymization suppresses exact streak timestamps before either destination.
+
+When watch selection changes, newly selected channels receive requests before
+retained channels. That dispatch order persists on subsequent passes while
+logical health-slot attribution remains tied to selection order. The two-slot
+limit and request interval are unchanged. Moving a new
+channel first delays the retained channel by one stagger at handover; faster
+request dispatch does not establish faster server credit or higher earnings.
+
+Fair rotations and streak promotions share a 15-minute promotion cooldown.
+The campaign pin ranks Drops by configured game priority and channel order,
+independently of temporary streak rank. Releasing a channel resets its watched
+minutes; that reset must not send the campaign pin immediately back to it.
+A streak candidate arriving just after a fair rotation waits until the next
+turn instead of displacing a channel that has only just started watching.
+Startup promotions, campaign preemption, unavailable-channel replacement and
+watchdog recovery remain immediate. Watchdog and unavailable-channel replacements
+start a fresh turn so the outgoing channel's rotation deadline cannot immediately
+displace the replacement. Campaign changes retain the existing fairness clock.
+When current-visit reward measurement is healthy and each outgoing channel's
+last WATCH or WATCH_STREAK credit is 210–299 seconds old, fair rotation may wait
+for the next credit from each channel, capped at 120 seconds. Missing measurement,
+campaign changes and eligible streak promotions bypass this wait. This is a
+bounded cadence heuristic, not a prediction of Twitch's next award.
+The 30-minute fairness ceiling
+still limits streak deferrals. This bounds voluntary switching; it does not
+guarantee that Twitch will credit every partial watch interval.
+
+## Earning status and prediction capacity
+
+Bonus claims whose connections fail before the mutation is sent can be retried
+after a later availability observation. Ambiguous outcomes remain reserved to
+avoid replaying a potentially completed claim.
+
+Watch-slot status distinguishes `measurement_unavailable`, `awaiting_first_credit`,
+`first_credit_overdue`, `earning`, and `stalled`. The accompanying
+`progress_age_seconds` is monotonic time observed with valid measurement since
+the first-credit wait began or the last confirmed point changed. Thirty minutes
+without a first credit marks it overdue for operator review, without triggering
+rotation. Lost measurement, deselection or a changed broadcast resets the wait.
+Earning requires a confirmed credit received during the current selection visit
+and broadcast. Measurement loss preserves the visit boundary; an earlier visit's
+credit cannot establish earning after reselection.
+An overdue first credit produces an operator warning, rate-limited to one per
+30 minutes across both slots, including measurement resets and channel changes.
+Each warning includes all currently overdue slots and their observed wait times.
+Configured Discord notifications can include `WATCH_STATUS`; the warning does
+not increment task failure counters or change health/restart decisions.
+
+Prediction placement capacity counts at most 128 unresolved requests separately
+from confirmed/rejected replay records. Terminal records remain protected for
+seven days, and the entire journal remains bounded to 256 KiB. Full storage
+fails closed rather than evicting unresolved requests or recent replay records.
+Reload and capacity tests cover more than 128 resolved placements.
+Admission budgets the largest serialized state of every record that can still
+transition, including rejected-to-confirmed upgrades and timestamp growth, so
+later reconciliation fits. Saturated rejected history is upgraded and reopened
+in regression coverage. A synthetic saturation test with nine-digit
+account/channel IDs, UUID-sized event/outcome IDs and 50,000-point stakes retains
+757 confirmed records (261,955 bytes) before rejecting the next reservation.
+This characterizes that fixture, not a universal record limit or a live workload.
+At seven-day retention it represents about 108 such records per day.
+
+Runtime status includes `prediction_journal` with `bytes`, `byte_limit`,
+`unresolved_count`, `unresolved_limit`, `retained_count` and `capacity_blocked`.
+The byte count includes the newline and excludes temporary files. The blocked
+flag reports a full unresolved limit or a capacity rejection in this process;
+a successful reservation, resolution or expiry clears the rejection flag.
+After restart, only the unresolved limit is known until another admission is
+attempted. A false flag does not guarantee that an arbitrarily sized request
+fits. Counts and bytes contain no account, channel or prediction identities.
 
 ## Configuration compatibility
 

@@ -103,6 +103,18 @@ generated container name. The image is `scratch`: direct `docker exec` of
 `/twitch-miner` also works when you provide the actual container name or ID,
 but there is no `sh` or `bash` to start for an interactive shell.
 
+Overdue first-credit observations produce a warning at most once per 30 minutes
+across both watch slots. To deliver these warnings through an existing Discord
+webhook, include `WATCH_STATUS` in its event list (an empty list permits all
+events). They do not cause rotation or make process health fail.
+
+The `prediction_journal` status object reports serialized bytes, the byte limit,
+unresolved and retained record counts, the unresolved limit, and a capacity
+rejection flag. See [capacity semantics](parity-matrix.md#earning-status-and-prediction-capacity).
+At capacity, new predictions are refused safely; never delete recent records or
+restore an old journal to make room. Expired resolved records are pruned during
+normal journal access, while unknown outcomes remain protected.
+
 `--status` prints only the sanitized runtime-status document. It includes each
 task's last successful work and last activity, bounded
 claim/bet/reconnect/refresh counters, the last redacted error class, runtime
@@ -149,7 +161,7 @@ If you are migrating a Linux bind mount from an older root-run image, make sure 
 
 ## Multi-Arch Builds
 
-Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one supported local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64` and `linux/arm64`, matching the GitHub Actions workflow. ARMv7 is not supported.
+Use `scripts/build-multiarch.ps1` from a machine with Docker and buildx installed. Without `-Push`, the script builds and loads one supported local-platform image for smoke testing. With `-Push`, it builds and publishes `linux/amd64` and `linux/arm64` under a revision-scoped `candidate-<full-sha>` tag by default; stable tags belong to the protected promotion workflow. ARMv7 is not supported.
 
 ```powershell
 cd Twitch-Miner-Rust
@@ -159,9 +171,11 @@ docker run --rm twitch-miner-rust:local --help
 ```
 
 On pushes to `main`, GitHub Actions builds, smoke-tests, and publishes the
-multi-architecture GHCR image. A signed `v*` tag promotes the already-tested
-manifest for that exact commit without rebuilding it. Deploy the recorded
-manifest digest, not `latest`; see [release-process.md](../release-process.md).
+multi-architecture GHCR image. After the exact-digest acceptance record passes,
+create a signed `v*` tag at that commit and dispatch the protected `Promote
+Release` workflow. It promotes the already-tested manifest without rebuilding
+it. Deploy the recorded manifest digest, not `latest`; see
+[release-process.md](../release-process.md).
 
 ## Go/Rust Parity Gate
 
@@ -184,8 +198,11 @@ Use `--status` for the separate EventSub, PubSub, and polling health entries.
 The authoritative timeout, retry, fallback, and mutation-replay rules are in the
 [protocol inventory](../protocol-inventory.md); never include cookies, request
 headers, endpoint query strings, or raw responses in a support report.
-In normal runtime, EventSub `verified=false` only means the post-create listing
-was skipped; judge health from active/failed counts and task state. A
+In normal runtime, EventSub `verified=false` means the current set has not been
+verified (initial listing was skipped, or reconciliation is incomplete). Three
+bounded post-setup capacity rechecks refresh the report without restarting the
+socket; cost remains a last-observed snapshot afterward. Judge health from
+active/failed counts, recheck warnings, and task state. A
 `capacity-overflow` capability may retain EventSub presence while optional raid or
 prediction types use compatibility fallback, and `raid_source` names EventSub
 only when a `channel.raid` subscription was actually allocated.
