@@ -22,7 +22,9 @@ const RENAME_RECOVERY_SUSPENSION_SECONDS: u64 = 5 * 60;
 // when the refresh itself has stalled.
 const MAX_WATCH_METADATA_AGE_SECONDS: i64 = 5 * 60;
 const WATCH_REQUEST_FAILURE_THRESHOLD: u8 = 3;
-const WATCH_CHANNEL_BACKOFF_SECONDS: u64 = 15 * 60;
+// Shared connection failures can exclude every channel; allow retries after a minute
+// instead of leaving all watch slots idle for an entire rotation window.
+const WATCH_CHANNEL_BACKOFF_SECONDS: u64 = 60;
 // Two rotation windows give Twitch time to deliver a point event while still
 // allowing the watcher to move on from a channel that is visibly stuck.
 const WATCHDOG_STALL_SECONDS: u64 = 2 * 15 * 60;

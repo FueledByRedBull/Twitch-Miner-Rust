@@ -1341,11 +1341,11 @@ mod tests {
             ts(0),
         );
         assert_eq!(
-            available_watch_logins(eligible.clone(), &mut failures, ts(899)),
+            available_watch_logins(eligible.clone(), &mut failures, ts(59)),
             ["b"]
         );
         assert_eq!(
-            available_watch_logins(eligible.clone(), &mut failures, ts(900)),
+            available_watch_logins(eligible.clone(), &mut failures, ts(60)),
             eligible
         );
 
@@ -1366,6 +1366,44 @@ mod tests {
             ["b"]
         );
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn shared_watch_outage_retries_all_channels_within_one_minute() {
+        let eligible = vec![String::from("a"), String::from("b"), String::from("c")];
+        let mut failures = HashMap::<String, WatchFailureState>::new();
+        for cycle in [0, 60] {
+            for login in &eligible {
+                for _ in 0..3 {
+                    record_watch_attempt(
+                        &mut failures,
+                        login,
+                        WatchAttemptOutcome::RequestFailure,
+                        ts(cycle),
+                    );
+                }
+            }
+            assert!(
+                available_watch_logins(eligible.clone(), &mut failures, ts(cycle + 59)).is_empty()
+            );
+            assert_eq!(
+                available_watch_logins(eligible.clone(), &mut failures, ts(cycle + 60)),
+                eligible
+            );
+        }
+        for login in &eligible {
+            record_watch_attempt(&mut failures, login, WatchAttemptOutcome::Success, ts(120));
+        }
+        assert!(failures.is_empty());
+        record_watch_attempt(&mut failures, "a", WatchAttemptOutcome::Timeout, ts(120));
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(179)),
+            ["b", "c"]
+        );
+        assert_eq!(
+            available_watch_logins(eligible.clone(), &mut failures, ts(180)),
+            eligible
+        );
     }
 
     #[test]

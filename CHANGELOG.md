@@ -2,6 +2,8 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Allows watch retries one minute after repeated request failures or a timeout,
+  preventing shared connection failures from leaving every slot idle for 15 minutes.
 - Retains partial Drops progress before claim IDs exist, immediately records successful
   claims, and ranks eligible configured channels by feasible reward deadlines and
   remaining watch time after game preferences. Missing planning metadata retains
