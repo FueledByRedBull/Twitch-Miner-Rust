@@ -443,17 +443,22 @@ pub(crate) fn available_drop_campaign_ids_from_typed(
     let Some(campaigns) = channel.campaigns else {
         return Ok(Vec::new());
     };
-    campaigns
-        .into_iter()
-        .map(|campaign| {
-            campaign
-                .id
-                .filter(|id| !id.trim().is_empty())
-                .ok_or(TwitchClientError::MissingField(
-                    "data.channel.viewerDropCampaigns.id",
-                ))
-        })
-        .collect()
+    let mut ids = Vec::new();
+    for campaign in campaigns {
+        let id = campaign.id.filter(|id| !id.trim().is_empty()).ok_or(
+            TwitchClientError::MissingField("data.channel.viewerDropCampaigns.id"),
+        )?;
+        // Inventory must still establish an unfinished reward when this metadata is absent.
+        if campaign.drops.is_none_or(|drops| {
+            drops.iter().any(|drop| {
+                drop.required_subs.is_none_or(|subs| subs == 0)
+                    && drop.required_minutes.is_none_or(|minutes| minutes > 0)
+            })
+        }) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 pub(crate) fn user_contributions_from_typed(

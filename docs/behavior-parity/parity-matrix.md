@@ -179,5 +179,15 @@ never applies received transport events to runtime state.
 Drop progress is retained before a claim-instance ID exists. A missing claim ID
 still prevents a claim request. Reward/campaign IDs stabilize status identity
 across claim readiness; successful claim responses update status immediately,
-and stale unclaimed inventory does not reverse that status during the session.
+and stale unclaimed inventory does not reverse that status while the reward
+remains in the reported inventory.
 Inventory timestamps describe observations, not precise reward completion times.
+
+Channel campaign IDs alone do not establish Drops priority: selection requires
+an observed unfinished watch reward in inventory. Omitted completed campaigns
+therefore cannot regain priority. Channel-provided subscription and watch-time
+requirements filter non-watch campaigns before inventory selection. Missing
+inventory defers priority until an unfinished reward is observed; it does not
+prevent ordinary channel-points watching. Status retains the current inventory
+rather than a 16-reward history, preserving progress timestamps for retained
+rewards and removing entries absent from the next successful inventory.

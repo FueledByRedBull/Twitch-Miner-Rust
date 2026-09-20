@@ -2383,3 +2383,20 @@ fn inventory_preserves_partial_rewards_without_claim_instances() {
     assert_eq!(snapshot.drops[1].prerequisites_met, Some(false));
     assert!(snapshot.drops[2].subscription_required);
 }
+
+#[test]
+fn channel_campaign_requirements_exclude_subscription_and_non_watch_rewards() {
+    let response: types::GqlResponse<types::AvailableDropsData> = serde_json::from_value(
+        serde_json::json!({"data":{"channel":{"viewerDropCampaigns":[
+            {"id":"subscription", "timeBasedDrops":[{"requiredSubs":1,"requiredMinutesWatched":0}]},
+            {"id":"empty", "timeBasedDrops":[]},
+            {"id":"zero", "timeBasedDrops":[{"requiredSubs":0,"requiredMinutesWatched":0}]},
+            {"id":"mixed", "timeBasedDrops":[{"requiredSubs":1,"requiredMinutesWatched":30},{"requiredSubs":0,"requiredMinutesWatched":90}]},
+            {"id":"unknown"}
+        ]}}})
+    ).unwrap();
+    assert_eq!(
+        available_drop_campaign_ids_from_typed(response.data.unwrap()).unwrap(),
+        vec!["mixed", "unknown"]
+    );
+}

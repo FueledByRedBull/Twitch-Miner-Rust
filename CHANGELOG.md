@@ -2,6 +2,10 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Requires an observed unfinished watch reward before assigning Drops priority,
+  filters subscription-only channel campaigns, and reports the complete current
+  Drops inventory instead of evicting progress after 16 rewards.
+
 - Allows watch retries one minute after repeated request failures or a timeout,
   preventing shared connection failures from leaving every slot idle for 15 minutes.
 - Retains partial Drops progress before claim IDs exist, immediately records successful

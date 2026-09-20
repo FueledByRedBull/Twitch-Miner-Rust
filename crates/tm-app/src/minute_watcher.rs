@@ -870,6 +870,11 @@ async fn refresh_watch_selection_metadata_inner(
         }) {
             match twitch.fetch_inventory_snapshot_typed().await {
                 Ok(snapshot) => {
+                    if !should_claim_drops {
+                        if let Some(health) = health.as_ref() {
+                            health.record_drop_inventory(&snapshot.drops);
+                        }
+                    }
                     if should_claim_drops {
                         if let Err(error) = crate::drops::claim_inventory_drops_with_coordinator(
                             twitch,

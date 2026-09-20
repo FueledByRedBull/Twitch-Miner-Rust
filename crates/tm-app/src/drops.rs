@@ -247,12 +247,12 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
     health: Option<&HealthTracker>,
     coordinator: &DropClaimCoordinator,
 ) -> Result<()> {
+    if let Some(health) = health {
+        health.record_drop_inventory(drops);
+    }
     for drop in drops {
         if drop.is_claimed {
             coordinator.confirm(&drop.drop_instance_id);
-        }
-        if let Some(health) = health {
-            health.record_drop_progress(drop);
         }
     }
     if mode == "periodic" {
@@ -343,26 +343,25 @@ pub(crate) fn channel_drop_target(
             .iter()
             .filter(|drop| &drop.campaign_id == campaign)
             .collect();
-        // Retain existing channel eligibility when Twitch omits planning metadata.
-        eligible |= rewards.is_empty()
-            || rewards.iter().any(|drop| {
-                !drop.is_claimed
-                    && !drop.subscription_required
-                    && drop.prerequisites_met != Some(false)
-                    && drop.starts_at.is_none_or(|start| start <= now)
-                    && drop.ends_at.is_none_or(|end| {
-                        end > now
-                            && (end - now).whole_seconds()
-                                >= drop
-                                    .required_minutes_watched
-                                    .saturating_sub(drop.current_minutes_watched)
-                                    .saturating_mul(60)
-                    })
-                    && drop.current_minutes_watched < drop.required_minutes_watched
-                    && (drop.starts_at.is_none()
-                        || drop.ends_at.is_none()
-                        || drop.prerequisites_met.is_none())
-            });
+        // Missing inventory is not evidence of an unfinished watch reward.
+        eligible |= rewards.iter().any(|drop| {
+            !drop.is_claimed
+                && !drop.subscription_required
+                && drop.prerequisites_met != Some(false)
+                && drop.starts_at.is_none_or(|start| start <= now)
+                && drop.ends_at.is_none_or(|end| {
+                    end > now
+                        && (end - now).whole_seconds()
+                            >= drop
+                                .required_minutes_watched
+                                .saturating_sub(drop.current_minutes_watched)
+                                .saturating_mul(60)
+                })
+                && drop.current_minutes_watched < drop.required_minutes_watched
+                && (drop.starts_at.is_none()
+                    || drop.ends_at.is_none()
+                    || drop.prerequisites_met.is_none())
+        });
         for target in rewards
             .into_iter()
             .filter_map(|drop| watch_target(drop, now))
@@ -426,6 +425,16 @@ mod tests {
             (false, None)
         );
         let campaigns = vec!["restricted".to_string()];
+        assert_eq!(
+            super::channel_drop_target(&[], &campaigns, &excluded, now),
+            (false, None)
+        );
+        let mut completed = reward.clone();
+        completed.is_claimed = true;
+        assert_eq!(
+            super::channel_drop_target(&[completed], &campaigns, &excluded, now),
+            (false, None)
+        );
         assert!(super::channel_drop_target(
             std::slice::from_ref(&reward),
             &campaigns,

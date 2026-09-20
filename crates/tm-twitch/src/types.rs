@@ -656,6 +656,16 @@ pub(crate) struct AvailableDropsChannel {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AvailableDropCampaign {
     pub(crate) id: Option<String>,
+    #[serde(rename = "timeBasedDrops")]
+    pub(crate) drops: Option<Vec<AvailableWatchReward>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AvailableWatchReward {
+    #[serde(rename = "requiredSubs")]
+    pub(crate) required_subs: Option<i64>,
+    #[serde(rename = "requiredMinutesWatched")]
+    pub(crate) required_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
