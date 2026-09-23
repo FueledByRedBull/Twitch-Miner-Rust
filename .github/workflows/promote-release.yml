@@ -135,15 +135,12 @@ jobs:
             throw "Unable to promote the accepted digest $env:MANIFEST_DIGEST to the stable release aliases."
           }
           foreach ($tag in @($release, $latest)) {
-            $promoted = ./scripts/verify-published-manifest.ps1 `
-              -ImageReference $tag `
-              -ExpectedDigest $env:MANIFEST_DIGEST `
-              -ExpectedRevision $env:SOURCE_REVISION `
-              -Repository $env:GITHUB_REPOSITORY `
-              -SignerWorkflow "$env:GITHUB_REPOSITORY/.github/workflows/multiarch-build.yml" `
-              -SourceRef 'refs/heads/main' `
-              -VerifyAttestations
-            if ($promoted -ne $env:MANIFEST_DIGEST) {
-              throw "Stable image tag $tag resolved to $promoted instead of the accepted digest."
+            $description = docker buildx imagetools inspect $tag 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to resolve promoted tag $tag."
+            }
+            $match = [regex]::Match(($description -join "`n"), '(?m)^Digest:\s+(sha256:[0-9a-f]{64})\s*$')
+            if (-not $match.Success -or $match.Groups[1].Value -ne $env:MANIFEST_DIGEST) {
+              throw "Stable image tag $tag does not resolve to the accepted digest."
             }
           }

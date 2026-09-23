@@ -22,7 +22,9 @@ const RENAME_RECOVERY_SUSPENSION_SECONDS: u64 = 5 * 60;
 // when the refresh itself has stalled.
 const MAX_WATCH_METADATA_AGE_SECONDS: i64 = 5 * 60;
 const WATCH_REQUEST_FAILURE_THRESHOLD: u8 = 3;
-const WATCH_CHANNEL_BACKOFF_SECONDS: u64 = 15 * 60;
+// Shared connection failures can exclude every channel; allow retries after a minute
+// instead of leaving all watch slots idle for an entire rotation window.
+const WATCH_CHANNEL_BACKOFF_SECONDS: u64 = 60;
 // Two rotation windows give Twitch time to deliver a point event while still
 // allowing the watcher to move on from a channel that is visibly stuck.
 const WATCHDOG_STALL_SECONDS: u64 = 2 * 15 * 60;
@@ -856,6 +858,7 @@ async fn refresh_watch_selection_metadata_inner(
     let should_claim_drops = streamers
         .iter()
         .any(|streamer| streamer.settings.claim_drops);
+    let mut inventory_drops = Vec::new();
     let excluded_campaign_ids = Arc::new(
         if streamers.iter().any(|streamer| {
             streamer.is_online
@@ -867,6 +870,11 @@ async fn refresh_watch_selection_metadata_inner(
         }) {
             match twitch.fetch_inventory_snapshot_typed().await {
                 Ok(snapshot) => {
+                    if !should_claim_drops {
+                        if let Some(health) = health.as_ref() {
+                            health.record_drop_inventory(&snapshot.drops);
+                        }
+                    }
                     if should_claim_drops {
                         if let Err(error) = crate::drops::claim_inventory_drops_with_coordinator(
                             twitch,
@@ -886,6 +894,7 @@ async fn refresh_watch_selection_metadata_inner(
                             );
                         }
                     }
+                    inventory_drops = snapshot.drops.clone();
                     excluded_drop_campaign_ids(snapshot)
                 }
                 Err(error) => {
@@ -905,6 +914,7 @@ async fn refresh_watch_selection_metadata_inner(
             HashSet::new()
         },
     );
+    let inventory_drops = Arc::new(inventory_drops);
     for streamer in streamers.iter().filter(|streamer| {
         streamer.is_online
             && !streamer.channel_id.trim().is_empty()
@@ -924,6 +934,7 @@ async fn refresh_watch_selection_metadata_inner(
         let observability = observability.clone();
         let streamer = streamer.clone();
         let excluded_campaign_ids = Arc::clone(&excluded_campaign_ids);
+        let inventory_drops = Arc::clone(&inventory_drops);
         refreshes.spawn(async move {
             let previous_game = streamer_game_name(&streamer);
             let Some(mut expected_generation) = runtime
@@ -981,6 +992,8 @@ async fn refresh_watch_selection_metadata_inner(
                 &streamer,
                 &info,
                 &excluded_campaign_ids,
+                &inventory_drops,
+                now,
             )
             .await?;
             log_stream_presence_changes(
@@ -1040,6 +1053,8 @@ async fn refresh_drop_campaign_eligibility(
     streamer: &Streamer,
     info: &tm_twitch::StreamInfo,
     excluded_campaign_ids: &HashSet<String>,
+    inventory_drops: &[tm_twitch::InventoryDrop],
+    now: OffsetDateTime,
 ) -> Result<()> {
     if !streamer.settings.farm_drops {
         return Ok(());
@@ -1071,24 +1086,22 @@ async fn refresh_drop_campaign_eligibility(
                 streamer.username
             )
         })?;
+    let (eligible, target) = crate::drops::channel_drop_target(
+        inventory_drops,
+        &campaign_ids,
+        excluded_campaign_ids,
+        now,
+    );
     runtime
-        .set_drop_campaign_eligibility_if_current(
-            streamer.channel_id.clone(),
-            info.id.clone(),
-            info.game_id.clone(),
-            has_unfinished_campaign(&campaign_ids, excluded_campaign_ids),
+        .set_drop_watch_target_if_current(
+            &streamer.channel_id,
+            &info.id,
+            info.game_id.as_deref(),
+            eligible,
+            target,
         )
         .await?;
     Ok(())
-}
-
-pub(crate) fn has_unfinished_campaign(
-    available_campaign_ids: &[String],
-    excluded_campaign_ids: &HashSet<String>,
-) -> bool {
-    available_campaign_ids
-        .iter()
-        .any(|campaign_id| !excluded_campaign_ids.contains(campaign_id))
 }
 
 pub(crate) async fn send_minute_watched_for_streamer(

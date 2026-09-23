@@ -187,31 +187,15 @@ impl WatchRotation {
                 .spare_since
                 .is_some_and(|started| (now - started).whole_seconds() >= WATCH_ROTATION_SECONDS)
         {
-            let outgoing = self
-                .queue
-                .iter()
-                .take(rotating_slots)
-                .filter(|login| {
-                    !self
-                        .queue
-                        .iter()
-                        .cycle()
-                        .skip(rotating_slots)
-                        .take(rotating_slots)
-                        .any(|next| next == *login)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let outgoing = self.queue.front().cloned().into_iter().collect::<Vec<_>>();
             if !self.hold_for_credit(
                 &outgoing,
                 credit_times,
                 now,
                 fair_rotation_overdue || campaign_changed,
             ) {
-                for _ in 0..rotating_slots {
-                    if let Some(login) = self.queue.pop_front() {
-                        self.queue.push_back(login);
-                    }
+                if let Some(login) = self.queue.pop_front() {
+                    self.queue.push_back(login);
                 }
                 self.spare_since = Some(now);
                 self.last_fair_rotation = Some(now);
@@ -445,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn two_rotating_slots_wait_for_both_credits() {
+    fn fair_rotation_waits_for_the_outgoing_slot_credit() {
         use std::collections::HashMap;
         let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
         let mut rotation = WatchRotation::default();
@@ -461,12 +445,12 @@ mod tests {
         credits.insert(String::from("alpha"), ts(950));
         assert_eq!(
             rotation.select_with_progress(&eligible, &[], &[], &credits, ts(960)),
-            logins(&["alpha", "bravo"])
+            logins(&["bravo", "charlie"])
         );
         credits.insert(String::from("bravo"), ts(970));
         assert_eq!(
             rotation.select_with_progress(&eligible, &[], &[], &credits, ts(980)),
-            logins(&["charlie", "delta"])
+            logins(&["bravo", "charlie"])
         );
     }
 
@@ -474,20 +458,21 @@ mod tests {
     fn credit_wait_ignores_the_channel_retained_by_a_three_channel_rotation() {
         let eligible = logins(&["alpha", "bravo", "charlie"]);
         let mut rotation = WatchRotation::default();
-        let credits = std::collections::HashMap::from([(String::from("bravo"), ts(660))]);
+        let mut credits = std::collections::HashMap::from([(String::from("alpha"), ts(660))]);
         rotation.select_with_progress(&eligible, &[], &[], &credits, ts(0));
         assert_eq!(
             rotation.select_with_progress(&eligible, &[], &[], &credits, ts(900)),
             logins(&["alpha", "bravo"])
         );
+        credits.insert(String::from("alpha"), ts(950));
         assert_eq!(
             rotation.select_with_progress(&eligible, &[], &[], &credits, ts(1_020)),
-            logins(&["charlie", "alpha"])
+            logins(&["bravo", "charlie"])
         );
     }
 
     #[test]
-    fn rotates_two_creditable_slots_every_fifteen_minutes() {
+    fn rotates_one_spare_slot_every_fifteen_minutes() {
         let eligible = logins(&["alpha", "bravo", "charlie", "delta", "echo"]);
         let mut rotation = WatchRotation::default();
 
@@ -501,15 +486,15 @@ mod tests {
         );
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &[], &[], ts(900)),
-            logins(&["charlie", "delta"])
+            logins(&["bravo", "charlie"])
         );
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &[], &[], ts(1_800)),
-            logins(&["echo", "alpha"])
+            logins(&["charlie", "delta"])
         );
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &[], &[], ts(2_700)),
-            logins(&["bravo", "charlie"])
+            logins(&["delta", "echo"])
         );
     }
 
@@ -578,7 +563,7 @@ mod tests {
         rotation.select_with_campaigns(&new, &[], &[], ts(890));
         assert_eq!(
             rotation.select_with_campaigns(&new, &[], &[], ts(900)),
-            logins(&["charlie", "alpha"])
+            logins(&["bravo", "charlie"])
         );
     }
 
@@ -615,7 +600,7 @@ mod tests {
                 &[],
                 ts(930),
             ),
-            logins(&["delta", "bravo"])
+            logins(&["charlie", "delta"])
         );
     }
 
@@ -866,7 +851,7 @@ mod tests {
                 ],
                 ts(1_900),
             ),
-            logins(&["alpha", "delta"])
+            logins(&["charlie", "alpha"])
         );
     }
 
@@ -907,7 +892,7 @@ mod tests {
                 &[streak("charlie", "broadcast-c")],
                 ts(1_100),
             ),
-            logins(&["delta", "charlie"])
+            logins(&["bravo", "delta"])
         );
     }
 
@@ -936,7 +921,7 @@ mod tests {
                 &[streak("charlie", "broadcast-c1")],
                 ts(1_000),
             ),
-            logins(&["bravo", "delta"])
+            logins(&["alpha", "bravo"])
         );
 
         // charlie starts a different broadcast, which releases the record and
@@ -948,7 +933,7 @@ mod tests {
                 &[streak("charlie", "broadcast-c2")],
                 ts(1_900),
             ),
-            logins(&["charlie", "bravo"])
+            logins(&["charlie", "alpha"])
         );
     }
 
@@ -978,7 +963,7 @@ mod tests {
         // promotion, so the queue keeps turning over at production scale.
         assert_eq!(
             rotation.select_with_campaigns(&eligible, &[], &candidates, ts(1_800)),
-            logins(&["s00", "s03"])
+            logins(&["s02", "s00"])
         );
     }
 }

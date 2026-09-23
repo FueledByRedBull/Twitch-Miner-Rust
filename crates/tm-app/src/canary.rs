@@ -168,7 +168,7 @@ async fn run_canary_read_checks(
         "watch-streak-reward-list",
         context
             .twitch
-            .fetch_watch_streak_achievement(&context.target_channel_id)
+            .fetch_watch_streak_milestone(&context.target_channel_id)
             .await,
     )?;
     let _ = canary_step(
@@ -200,7 +200,31 @@ async fn run_canary_read_checks(
         "playback-preflight",
         prime_playback_if_live(&context.twitch, &context.target, target_is_live).await,
     )?;
-    let _ = canary_step("inventory", context.twitch.fetch_inventory_typed().await)?;
+    let inventory = canary_step("inventory", context.twitch.fetch_inventory_typed().await)?;
+    tracing::info!(
+        "Drops inventory metadata: rewards={} timed={} prerequisites={} partial={} feasible={}",
+        inventory.len(),
+        inventory
+            .iter()
+            .filter(|drop| drop.starts_at.is_some() && drop.ends_at.is_some())
+            .count(),
+        inventory
+            .iter()
+            .filter(|drop| drop.prerequisites_met.is_some())
+            .count(),
+        inventory
+            .iter()
+            .filter(|drop| !drop.is_claimed
+                && drop.current_minutes_watched < drop.required_minutes_watched)
+            .count(),
+        inventory
+            .iter()
+            .filter(
+                |drop| crate::drops::watch_target(drop, tm_domain::OffsetDateTime::now_utc())
+                    .is_some()
+            )
+            .count(),
+    );
     let _ = canary_step(
         "drops-dashboard",
         context.twitch.fetch_viewer_drops_dashboard_typed().await,

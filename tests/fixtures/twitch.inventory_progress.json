@@ -1,0 +1,59 @@
+{
+  "data": {
+    "currentUser": {
+      "inventory": {
+        "dropCampaignsInProgress": [
+          {
+            "id": "campaign-deadline",
+            "name": "Deadline campaign",
+            "startAt": "2026-09-18T00:00:00Z",
+            "endAt": "2026-09-19T00:00:00Z",
+            "timeBasedDrops": [
+              {
+                "id": "first",
+                "name": "First",
+                "requiredMinutesWatched": 30,
+                "requiredSubs": 0,
+                "preconditionDrops": [],
+                "self": {
+                  "dropInstanceID": null,
+                  "currentMinutesWatched": 12,
+                  "isClaimed": false,
+                  "hasPreconditionsMet": true
+                }
+              },
+              {
+                "id": "second",
+                "name": "Second",
+                "requiredMinutesWatched": 60,
+                "requiredSubs": 0,
+                "preconditionDrops": [
+                  {
+                    "id": "first"
+                  }
+                ],
+                "self": {
+                  "dropInstanceID": null,
+                  "currentMinutesWatched": 0,
+                  "isClaimed": false
+                }
+              },
+              {
+                "id": "paid",
+                "name": "Paid",
+                "requiredMinutesWatched": 30,
+                "requiredSubs": 1,
+                "preconditionDrops": [],
+                "self": {
+                  "dropInstanceID": null,
+                  "currentMinutesWatched": 0,
+                  "isClaimed": false
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -505,16 +505,6 @@ impl TwitchClient {
         decode_gql_data(&payload, "PlaybackAccessToken")
     }
 
-    pub async fn fetch_watch_streak_achievement(
-        &self,
-        channel_id: &str,
-    ) -> Result<Option<OffsetDateTime>, TwitchClientError> {
-        Ok(self
-            .fetch_watch_streak_milestone(channel_id)
-            .await?
-            .map(|milestone| milestone.achievement_timestamp))
-    }
-
     pub async fn fetch_watch_streak_milestone(
         &self,
         channel_id: &str,
@@ -656,10 +646,6 @@ impl TwitchClient {
     ) -> Result<InventorySnapshot, TwitchClientError> {
         let response: InventoryData = self.post_gql_typed(&operations::inventory()).await?;
         inventory_snapshot_from_typed(response)
-    }
-
-    pub async fn fetch_claimable_drops(&self) -> Result<Vec<InventoryDrop>, TwitchClientError> {
-        self.fetch_inventory_typed().await
     }
 
     pub async fn fetch_viewer_drops_dashboard_typed(
