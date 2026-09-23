@@ -2,6 +2,10 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Rotates one ordinary watch slot per fair turn, retaining the other selected
+  channel while its replacement establishes credit. Equal-deadline Drops targets
+  use configured channel order instead of minute-by-minute progress to avoid
+  swapping the campaign slot as channel metadata refreshes.
 - Requires an observed unfinished watch reward before assigning Drops priority,
   filters subscription-only channel campaigns, and reports the complete current
   Drops inventory instead of evicting progress after 16 rewards.
@@ -9,8 +13,8 @@
 - Allows watch retries one minute after repeated request failures or a timeout,
   preventing shared connection failures from leaving every slot idle for 15 minutes.
 - Retains partial Drops progress before claim IDs exist, immediately records successful
-  claims, and ranks eligible configured channels by feasible reward deadlines and
-  remaining watch time after game preferences. Missing planning metadata retains
+  claims, and ranks eligible configured channels by feasible reward deadlines
+  after game preferences. Missing planning metadata retains
   the existing channel policy; the read-only canary reports metadata coverage.
 
 - Verifies release images once before promotion, then checks both stable aliases

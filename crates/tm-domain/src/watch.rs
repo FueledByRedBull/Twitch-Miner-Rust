@@ -245,7 +245,7 @@ pub fn pick_streamers_to_watch(
         (
             candidate.rank,
             target.is_none(),
-            target.map(|target| (target.ends_at, target.remaining_minutes)),
+            target.map(|target| target.ends_at),
             candidate.position,
         )
     });
@@ -596,6 +596,64 @@ mod tests {
         );
 
         assert_eq!(selected, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn equal_deadline_drop_targets_keep_channel_order_as_progress_refreshes() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let deadline = datetime!(2026-03-27 08:00 UTC);
+        let mut streamers = [12, 11]
+            .into_iter()
+            .enumerate()
+            .map(|(index, remaining_minutes)| Streamer {
+                username: format!("channel-{index}"),
+                is_online: true,
+                settings: StreamerSettings {
+                    farm_drops: true,
+                    single_watcher_during_drops: false,
+                    ..StreamerSettings::default()
+                },
+                stream: Some(Stream {
+                    drop_campaign_eligible: Some(true),
+                    drop_watch_target: Some(crate::types::DropWatchTarget {
+                        ends_at: deadline,
+                        remaining_minutes,
+                        observed_at: now,
+                    }),
+                    ..Stream::default()
+                }),
+                ..Streamer::default()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Drops], &[], &[], now),
+            vec![0, 1]
+        );
+        streamers[0]
+            .stream
+            .as_mut()
+            .expect("channel stream")
+            .drop_watch_target
+            .as_mut()
+            .expect("watch target")
+            .remaining_minutes = 10;
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Drops], &[], &[], now),
+            vec![0, 1]
+        );
+        streamers[1]
+            .stream
+            .as_mut()
+            .expect("channel stream")
+            .drop_watch_target
+            .as_mut()
+            .expect("watch target")
+            .ends_at = datetime!(2026-03-27 07:00 UTC);
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Drops], &[], &[], now),
+            vec![1, 0]
+        );
     }
 
     #[test]
