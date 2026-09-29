@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -138,18 +139,9 @@ impl IdentityCache {
         self.entries
             .sort_by(|left, right| right.verified_at.cmp(&left.verified_at));
 
-        let mut seen_logins = Vec::with_capacity(self.entries.len());
-        self.entries.retain(|entry| {
-            if seen_logins
-                .iter()
-                .any(|login: &String| login == &entry.configured_login)
-            {
-                false
-            } else {
-                seen_logins.push(entry.configured_login.clone());
-                true
-            }
-        });
+        let mut seen_logins = HashSet::with_capacity(self.entries.len());
+        self.entries
+            .retain(|entry| seen_logins.insert(entry.configured_login.clone()));
         self.entries.truncate(MAX_CACHE_ENTRIES);
     }
 }
@@ -256,6 +248,7 @@ mod tests {
 
         let loaded = IdentityCache::load(directory.path(), now)?;
         assert_eq!(loaded.entries.len(), MAX_CACHE_ENTRIES);
+        assert_eq!(loaded.lookup("user_1", now).unwrap().verified_at, now);
         assert_eq!(
             loaded
                 .entries

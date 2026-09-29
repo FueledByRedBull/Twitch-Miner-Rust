@@ -16,36 +16,10 @@ not guaranteed to be that name outside Compose. An exec of `sh` or `bash`
 cannot work, so use logs, mounted `/data` files, and host Docker tooling for
 interactive inspection.
 
-Example:
+Use the maintained Compose examples:
 
-```yaml
-services:
-  twitch-miner:
-    image: ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<recorded-digest>
-    user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      TCPM_CONFIG: /data/config.json
-      TCPM_DATA_DIR: /data
-    volumes:
-      - ./data:/data
-```
-
-Named-volume example:
-
-```yaml
-services:
-  twitch-miner:
-    image: ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:<recorded-digest>
-    user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      TCPM_CONFIG: /data/config.json
-      TCPM_DATA_DIR: /data
-    volumes:
-      - twitch-miner-data:/data
-
-volumes:
-  twitch-miner-data:
-```
+- [Bind mount](../../deploy/docker-compose.bind-mount.yml).
+- [Named volume](../../deploy/docker-compose.volume.yml).
 
 The published-image bind-mount example supports native AMD64 and ARM64 hosts
 and follows the same `/data` convention. The miner exits on `SIGTERM`, so

@@ -210,7 +210,7 @@ async fn claim_available_drops_with_health(
     coordinator: &DropClaimCoordinator,
 ) -> Result<()> {
     let drops = match twitch
-        .fetch_claimable_drops()
+        .fetch_inventory_typed()
         .await
         .with_context(|| format!("load {mode} drops inventory"))
     {
@@ -247,12 +247,12 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
     health: Option<&HealthTracker>,
     coordinator: &DropClaimCoordinator,
 ) -> Result<()> {
+    if let Some(health) = health {
+        health.record_drop_inventory(drops);
+    }
     for drop in drops {
         if drop.is_claimed {
             coordinator.confirm(&drop.drop_instance_id);
-        }
-        if let Some(health) = health {
-            health.record_drop_progress(drop);
         }
     }
     if mode == "periodic" {
@@ -275,7 +275,7 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
             .with_context(|| format!("claim drop {}", drop.drop_instance_id));
         if let Err(error) = result {
             coordinator.mark_unknown(&drop.drop_instance_id);
-            if let Ok(reconciled) = twitch.fetch_claimable_drops().await {
+            if let Ok(reconciled) = twitch.fetch_inventory_typed().await {
                 if let Some(current) = reconciled.iter().find(|current| {
                     current.drop_instance_id == drop.drop_instance_id && current.is_claimed
                 }) {
@@ -297,6 +297,9 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
         }
         lease.complete();
         if let Some(health) = health {
+            let mut claimed = drop.clone();
+            claimed.is_claimed = true;
+            health.record_drop_progress(&claimed);
             health.record_claim();
         }
         let message = observability.drop_claim_message(mode, drop);
@@ -326,10 +329,181 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
     }
 }
 
+/// Channel availability is authoritative; inventory alone never makes a channel eligible.
+pub(crate) fn channel_drop_target(
+    drops: &[InventoryDrop],
+    campaigns: &[String],
+    excluded: &HashSet<String>,
+    now: tm_domain::OffsetDateTime,
+) -> (bool, Option<tm_domain::DropWatchTarget>) {
+    let mut eligible = false;
+    let mut best = None;
+    for campaign in campaigns.iter().filter(|id| !excluded.contains(*id)) {
+        let rewards: Vec<_> = drops
+            .iter()
+            .filter(|drop| &drop.campaign_id == campaign)
+            .collect();
+        // Missing inventory is not evidence of an unfinished watch reward.
+        eligible |= rewards.iter().any(|drop| {
+            !drop.is_claimed
+                && !drop.subscription_required
+                && drop.prerequisites_met != Some(false)
+                && drop.starts_at.is_none_or(|start| start <= now)
+                && drop.ends_at.is_none_or(|end| {
+                    end > now
+                        && (end - now).whole_seconds()
+                            >= drop
+                                .required_minutes_watched
+                                .saturating_sub(drop.current_minutes_watched)
+                                .saturating_mul(60)
+                })
+                && drop.current_minutes_watched < drop.required_minutes_watched
+                && (drop.starts_at.is_none()
+                    || drop.ends_at.is_none()
+                    || drop.prerequisites_met.is_none())
+        });
+        for target in rewards
+            .into_iter()
+            .filter_map(|drop| watch_target(drop, now))
+        {
+            eligible = true;
+            if best.is_none_or(|previous: tm_domain::DropWatchTarget| {
+                (target.ends_at, target.remaining_minutes)
+                    < (previous.ends_at, previous.remaining_minutes)
+            }) {
+                best = Some(target);
+            }
+        }
+    }
+    (eligible, best)
+}
+
+/// Unknown prerequisites or timing cannot establish a deadline priority.
+pub(crate) fn watch_target(
+    drop: &InventoryDrop,
+    now: tm_domain::OffsetDateTime,
+) -> Option<tm_domain::DropWatchTarget> {
+    if drop.is_claimed
+        || drop.subscription_required
+        || drop.prerequisites_met != Some(true)
+        || drop.current_minutes_watched < 0
+        || drop.required_minutes_watched <= 0
+        || drop.starts_at? > now
+    {
+        return None;
+    }
+    let target = tm_domain::DropWatchTarget {
+        ends_at: drop.ends_at?,
+        remaining_minutes: drop
+            .required_minutes_watched
+            .saturating_sub(drop.current_minutes_watched),
+        observed_at: now,
+    };
+    target.feasible_at(now).then_some(target)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::DropClaimCoordinator;
+
+    #[test]
+    fn channel_target_obeys_availability_exclusions_and_deadlines() {
+        use tm_domain::OffsetDateTime;
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let reward = tm_twitch::InventoryDrop {
+            campaign_id: "restricted".into(),
+            starts_at: Some(now),
+            ends_at: Some(now + std::time::Duration::from_secs(3600)),
+            required_minutes_watched: 20,
+            prerequisites_met: Some(true),
+            ..Default::default()
+        };
+        let excluded = std::collections::HashSet::new();
+        assert_eq!(
+            super::channel_drop_target(std::slice::from_ref(&reward), &[], &excluded, now),
+            (false, None)
+        );
+        let campaigns = vec!["restricted".to_string()];
+        assert_eq!(
+            super::channel_drop_target(&[], &campaigns, &excluded, now),
+            (false, None)
+        );
+        let mut completed = reward.clone();
+        completed.is_claimed = true;
+        assert_eq!(
+            super::channel_drop_target(&[completed], &campaigns, &excluded, now),
+            (false, None)
+        );
+        assert!(super::channel_drop_target(
+            std::slice::from_ref(&reward),
+            &campaigns,
+            &excluded,
+            now
+        )
+        .1
+        .is_some());
+        let blocked = std::collections::HashSet::from(["restricted".to_string()]);
+        assert_eq!(
+            super::channel_drop_target(std::slice::from_ref(&reward), &campaigns, &blocked, now),
+            (false, None)
+        );
+        let mut expired = reward.clone();
+        expired.ends_at = Some(now);
+        assert_eq!(
+            super::channel_drop_target(&[expired], &campaigns, &excluded, now),
+            (false, None)
+        );
+        let mut locked = reward;
+        locked.prerequisites_met = Some(false);
+        assert_eq!(
+            super::channel_drop_target(&[locked.clone()], &campaigns, &excluded, now),
+            (false, None)
+        );
+        locked.ends_at = None;
+        assert_eq!(
+            super::channel_drop_target(std::slice::from_ref(&locked), &campaigns, &excluded, now),
+            (false, None)
+        );
+        locked.prerequisites_met = None;
+        assert_eq!(
+            super::channel_drop_target(&[locked], &campaigns, &excluded, now),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn deadline_target_requires_feasible_earned_prerequisites_and_no_subscription() {
+        use tm_domain::OffsetDateTime;
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let mut drop = tm_twitch::InventoryDrop {
+            starts_at: Some(now - std::time::Duration::from_secs(3600)),
+            ends_at: Some(now + std::time::Duration::from_secs(1200)),
+            required_minutes_watched: 30,
+            current_minutes_watched: 10,
+            prerequisites_met: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::watch_target(&drop, now).unwrap().remaining_minutes,
+            20
+        );
+        assert!(!super::drop_is_claimable(&drop));
+        drop.ends_at = Some(now + std::time::Duration::from_secs(1140));
+        assert!(super::watch_target(&drop, now).is_none());
+        drop.ends_at = Some(now + std::time::Duration::from_secs(3600));
+        drop.prerequisites_met = Some(false);
+        assert!(super::watch_target(&drop, now).is_none());
+        drop.prerequisites_met = Some(true);
+        drop.subscription_required = true;
+        assert!(super::watch_target(&drop, now).is_none());
+        drop.subscription_required = false;
+        drop.is_claimed = true;
+        assert!(super::watch_target(&drop, now).is_none());
+        drop.is_claimed = false;
+        drop.ends_at = None;
+        assert!(super::watch_target(&drop, now).is_none());
+    }
 
     #[test]
     fn coordinator_deduplicates_in_flight_claims_and_releases_after_completion() {

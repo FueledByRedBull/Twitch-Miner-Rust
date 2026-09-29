@@ -195,58 +195,14 @@ pub fn parse_followers_page(
     })
 }
 
+#[must_use]
 pub fn parse_inventory_drops(payload: &serde_json::Value) -> Vec<InventoryDrop> {
     payload
-        .pointer("/data/currentUser/inventory/dropCampaignsInProgress")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .flat_map(|campaign| {
-            let campaign_name = campaign
-                .get("name")
-                .or_else(|| campaign.get("displayName"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            campaign
-                .get("timeBasedDrops")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(move |drop| {
-                    let drop_instance_id = drop
-                        .pointer("/self/dropInstanceID")
-                        .and_then(serde_json::Value::as_str)?
-                        .to_string();
-                    let required_minutes_watched = drop
-                        .get("requiredMinutesWatched")
-                        .or_else(|| drop.get("requiredProgress"))
-                        .and_then(serde_json::Value::as_i64)
-                        .filter(|required| *required > 0)?;
-                    let is_claimed = drop
-                        .pointer("/self/isClaimed")
-                        .and_then(serde_json::Value::as_bool)?;
-                    Some(InventoryDrop {
-                        drop_instance_id,
-                        reward_name: drop
-                            .get("name")
-                            .or_else(|| drop.pointer("/benefit/name"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        campaign_name: campaign_name.clone(),
-                        current_minutes_watched: drop
-                            .pointer("/self/currentMinutesWatched")
-                            .or_else(|| drop.pointer("/self/currentProgress"))
-                            .and_then(serde_json::Value::as_i64)
-                            .unwrap_or_default(),
-                        required_minutes_watched,
-                        is_claimed,
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+        .get("data")
+        .and_then(|data| serde_json::from_value::<crate::types::InventoryData>(data.clone()).ok())
+        .and_then(|data| crate::responses::inventory_snapshot_from_typed(data).ok())
+        .map(|snapshot| snapshot.drops)
+        .unwrap_or_default()
 }
 
 pub fn parse_available_drop_campaign_ids(payload: &serde_json::Value) -> Vec<String> {

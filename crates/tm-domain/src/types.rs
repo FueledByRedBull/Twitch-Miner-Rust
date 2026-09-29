@@ -205,6 +205,8 @@ pub struct Stream {
     pub drops_tags: bool,
     #[serde(skip)]
     pub drop_campaign_eligible: Option<bool>,
+    #[serde(skip)]
+    pub drop_watch_target: Option<DropWatchTarget>,
     pub viewers_count: u32,
     pub payload: Vec<serde_json::Value>,
     pub watch_streak_missing: bool,
@@ -231,6 +233,7 @@ impl Default for Stream {
             game_id: None,
             drops_tags: false,
             drop_campaign_eligible: None,
+            drop_watch_target: None,
             viewers_count: 0,
             payload: Vec::new(),
             watch_streak_missing: true,
@@ -731,5 +734,23 @@ mod tests {
             name: Some(String::from("Other")),
         });
         assert_eq!(stream.game_name(), "Other");
+    }
+}
+
+/// A currently earnable reward on this channel, validated against its campaign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DropWatchTarget {
+    pub ends_at: OffsetDateTime,
+    pub remaining_minutes: i64,
+    pub observed_at: OffsetDateTime,
+}
+
+impl DropWatchTarget {
+    #[must_use]
+    pub fn feasible_at(self, now: OffsetDateTime) -> bool {
+        self.remaining_minutes > 0
+            && now >= self.observed_at
+            && now - self.observed_at <= time::Duration::minutes(10)
+            && (self.ends_at - now).whole_seconds() >= self.remaining_minutes.saturating_mul(60)
     }
 }

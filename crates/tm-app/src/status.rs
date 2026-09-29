@@ -16,7 +16,6 @@ const STATUS_SCHEMA_VERSION: u8 = 6;
 const MAX_HEARTBEAT_AGE_SECONDS: u64 = 120;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const MAX_COUNTER_VALUE: u64 = 1_000_000_000;
-const MAX_DROP_PROGRESS_ENTRIES: usize = 16;
 const MAX_WATCH_SLOTS: usize = 2;
 const MAX_WATCH_SLOT_AGE_SECONDS: u64 = 10 * 60;
 
@@ -275,11 +274,29 @@ impl HealthTracker {
         }
     }
 
+    pub(crate) fn record_drop_inventory(&self, drops: &[InventoryDrop]) {
+        let keys: std::collections::HashSet<_> = drops.iter().map(stable_drop_key).collect();
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counters
+            .drop_progress
+            .retain(|entry| keys.contains(&entry.drop_key));
+        for drop in drops {
+            Self::update_drop_progress(&mut counters, drop);
+        }
+    }
+
     pub(crate) fn record_drop_progress(&self, drop: &InventoryDrop) {
         let mut counters = self
             .counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::update_drop_progress(&mut counters, drop);
+    }
+
+    fn update_drop_progress(counters: &mut StatusCounters, drop: &InventoryDrop) {
         let now = unix_now_infallible();
         let drop_key = stable_drop_key(drop);
         let previous_progress_increase = counters
@@ -306,11 +323,10 @@ impl HealthTracker {
             .iter_mut()
             .find(|existing| existing.drop_key == snapshot.drop_key)
         {
+            let claimed = existing.is_claimed;
             *existing = snapshot;
+            existing.is_claimed |= claimed;
         } else {
-            if counters.drop_progress.len() >= MAX_DROP_PROGRESS_ENTRIES {
-                counters.drop_progress.remove(0);
-            }
             counters.drop_progress.push(snapshot);
         }
     }
@@ -749,7 +765,12 @@ fn stable_drop_key(drop: &InventoryDrop) -> String {
             &drop.campaign_name,
             &drop.reward_name,
             &drop.required_minutes_watched.to_string(),
-            &drop.drop_instance_id,
+            if drop.id.is_empty() {
+                &drop.drop_instance_id
+            } else {
+                &drop.id
+            },
+            &drop.campaign_id,
         ],
     )
 }
@@ -833,8 +854,7 @@ mod tests {
     use super::{
         atomic_json_write, check_health, validate_status, validate_status_for_supervision,
         write_support_bundle, HealthTracker, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus,
-        StatusCounters, StatusReporter, TaskStatus, MAX_DROP_PROGRESS_ENTRIES, STATUS_FILE_NAME,
-        STATUS_SCHEMA_VERSION,
+        StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
     };
     use tm_observability::{init_tracing, LoggerSettings, TracingInitOptions};
     use tm_twitch::InventoryDrop;
@@ -1059,24 +1079,52 @@ mod tests {
     }
 
     #[test]
-    fn drop_progress_is_identified_timestamped_and_bounded() {
+    fn drop_progress_covers_current_inventory_without_historical_growth() {
         let health = HealthTracker::default();
-        for index in 0..=MAX_DROP_PROGRESS_ENTRIES {
-            health.record_drop_progress(&InventoryDrop {
-                drop_instance_id: format!("drop-{index}"),
-                reward_name: String::from("reward"),
-                campaign_name: String::from("campaign"),
-                current_minutes_watched: i64::try_from(index).unwrap_or(i64::MAX),
+        let mut drops: Vec<_> = (0..40)
+            .map(|index| InventoryDrop {
+                id: format!("drop-{index}"),
+                current_minutes_watched: 1,
                 required_minutes_watched: 60,
-                is_claimed: false,
-            });
-        }
-
+                ..Default::default()
+            })
+            .collect();
+        health.record_drop_inventory(&drops);
+        assert_eq!(health.counters_snapshot().drop_progress.len(), 40);
+        drops[0].current_minutes_watched = 2;
+        health.record_drop_inventory(&drops);
         let progress = health.counters_snapshot().drop_progress;
-        assert_eq!(progress.len(), MAX_DROP_PROGRESS_ENTRIES);
-        assert_eq!(progress[0].current_minutes_watched, 1);
-        assert_ne!(progress[0].drop_key, "drop-1");
+        assert!(progress[0].last_progress_increase_unix.is_some());
+        assert_ne!(progress[0].drop_key, "drop-0");
         assert!(progress.iter().all(|entry| entry.observed_at_unix > 0));
+        health.record_drop_inventory(&drops[..1]);
+        assert_eq!(health.counters_snapshot().drop_progress.len(), 1);
+        health.record_drop_inventory(&[]);
+        assert!(health.counters_snapshot().drop_progress.is_empty());
+    }
+
+    #[test]
+    fn drop_identity_survives_claim_id_and_stale_inventory() {
+        let health = HealthTracker::default();
+        let mut drop = InventoryDrop {
+            id: "reward-id".into(),
+            campaign_id: "campaign-id".into(),
+            current_minutes_watched: 10,
+            required_minutes_watched: 30,
+            ..Default::default()
+        };
+        health.record_drop_progress(&drop);
+        drop.current_minutes_watched = 30;
+        drop.drop_instance_id = "private-claim-id".into();
+        drop.is_claimed = true;
+        health.record_drop_progress(&drop);
+        drop.is_claimed = false;
+        health.record_drop_progress(&drop);
+        let entries = health.counters_snapshot().drop_progress;
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_claimed);
+        assert!(entries[0].last_progress_increase_unix.is_some());
+        assert!(!entries[0].drop_key.contains("private-claim-id"));
     }
 
     #[test]
@@ -1089,6 +1137,7 @@ mod tests {
             current_minutes_watched: 10,
             required_minutes_watched: 60,
             is_claimed: false,
+            ..InventoryDrop::default()
         };
         health.record_drop_progress(&drop);
         assert!(health.counters_snapshot().drop_progress[0]

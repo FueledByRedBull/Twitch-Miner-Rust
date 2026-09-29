@@ -23,9 +23,9 @@ pub use prediction::{
 };
 pub use time::OffsetDateTime;
 pub use types::{
-    ActiveMultiplier, BetSettings, CommunityGoal, Condition, DelayMode, FilterCondition,
-    FollowersOrder, Game, HistoryEntry, IrcMode, OutcomeKey, Strategy, Stream, Streamer,
-    StreamerSettings,
+    ActiveMultiplier, BetSettings, CommunityGoal, Condition, DelayMode, DropWatchTarget,
+    FilterCondition, FollowersOrder, Game, HistoryEntry, IrcMode, OutcomeKey, Strategy, Stream,
+    Streamer, StreamerSettings,
 };
 pub use watch::{
     default_watch_priorities, normalize_game_list, normalize_streamer_list, parse_watch_priorities,

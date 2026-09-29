@@ -55,8 +55,18 @@ channel first delays the retained channel by one stagger at handover; faster
 request dispatch does not establish faster server credit or higher earnings.
 
 Fair rotations and streak promotions share a 15-minute promotion cooldown.
-The campaign pin ranks Drops by configured game priority and channel order,
-independently of temporary streak rank. Releasing a channel resets its watched
+When two ordinary watch slots are available, fair rotation replaces one per
+turn so an established slot remains selected while the replacement starts.
+The campaign pin preserves configured game priority, then ranks known earnable
+rewards by earliest expiry, with configured channel order breaking equal-deadline
+ties independently of progress refreshes and temporary streak rank. Channel availability must
+confirm the campaign; inventory alone cannot authorize a channel. Completed,
+subscription-only, prerequisite-blocked, future and infeasible rewards do not
+receive deadline priority. Missing planning metadata retains the existing
+campaign/channel-order behavior without inventing eligibility or deadlines.
+Targets older than ten minutes lose deadline priority. This ranks rewards on
+tracked channels; it does not discover new channels or guarantee optimal global
+campaign coverage. Releasing a channel resets its watched
 minutes; that reset must not send the campaign pin immediately back to it.
 A streak candidate arriving just after a fair rotation waits until the next
 turn instead of displacing a channel that has only just started watching.
@@ -64,9 +74,9 @@ Startup promotions, campaign preemption, unavailable-channel replacement and
 watchdog recovery remain immediate. Watchdog and unavailable-channel replacements
 start a fresh turn so the outgoing channel's rotation deadline cannot immediately
 displace the replacement. Campaign changes retain the existing fairness clock.
-When current-visit reward measurement is healthy and each outgoing channel's
+When current-visit reward measurement is healthy and the outgoing channel's
 last WATCH or WATCH_STREAK credit is 210–299 seconds old, fair rotation may wait
-for the next credit from each channel, capped at 120 seconds. Missing measurement,
+for the next credit from that channel, capped at 120 seconds. Missing measurement,
 campaign changes and eligible streak promotions bypass this wait. This is a
 bounded cadence heuristic, not a prediction of Twitch's next award.
 The 30-minute fairness ceiling
@@ -167,3 +177,19 @@ during release validation.
 The read-only canary also requires EventSub setup/list verification and a
 PubSub LISTEN acknowledgement for every configured compatibility topic. It
 never applies received transport events to runtime state.
+
+Drop progress is retained before a claim-instance ID exists. A missing claim ID
+still prevents a claim request. Reward/campaign IDs stabilize status identity
+across claim readiness; successful claim responses update status immediately,
+and stale unclaimed inventory does not reverse that status while the reward
+remains in the reported inventory.
+Inventory timestamps describe observations, not precise reward completion times.
+
+Channel campaign IDs alone do not establish Drops priority: selection requires
+an observed unfinished watch reward in inventory. Omitted completed campaigns
+therefore cannot regain priority. Channel-provided subscription and watch-time
+requirements filter non-watch campaigns before inventory selection. Missing
+inventory defers priority until an unfinished reward is observed; it does not
+prevent ordinary channel-points watching. Status retains the current inventory
+rather than a 16-reward history, preserving progress timestamps for retained
+rewards and removing entries absent from the next successful inventory.

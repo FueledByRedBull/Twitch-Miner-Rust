@@ -2366,3 +2366,37 @@ fn parses_available_drop_campaign_ids() {
         vec!["campaign-1", "campaign-2"]
     );
 }
+
+#[test]
+fn inventory_preserves_partial_rewards_without_claim_instances() {
+    let response: types::GqlResponse<types::InventoryData> =
+        serde_json::from_value(protocol_fixture("twitch.inventory_progress.json")).unwrap();
+    let snapshot = inventory_snapshot_from_typed(response.data.unwrap()).unwrap();
+    assert_eq!(snapshot.drops.len(), 3);
+    let first = &snapshot.drops[0];
+    assert_eq!(first.id, "first");
+    assert_eq!(first.campaign_id, "campaign-deadline");
+    assert!(first.drop_instance_id.is_empty());
+    assert_eq!(first.current_minutes_watched, 12);
+    assert_eq!(first.prerequisites_met, Some(true));
+    assert!(first.ends_at.unwrap() > first.starts_at.unwrap());
+    assert_eq!(snapshot.drops[1].prerequisites_met, Some(false));
+    assert!(snapshot.drops[2].subscription_required);
+}
+
+#[test]
+fn channel_campaign_requirements_exclude_subscription_and_non_watch_rewards() {
+    let response: types::GqlResponse<types::AvailableDropsData> = serde_json::from_value(
+        serde_json::json!({"data":{"channel":{"viewerDropCampaigns":[
+            {"id":"subscription", "timeBasedDrops":[{"requiredSubs":1,"requiredMinutesWatched":0}]},
+            {"id":"empty", "timeBasedDrops":[]},
+            {"id":"zero", "timeBasedDrops":[{"requiredSubs":0,"requiredMinutesWatched":0}]},
+            {"id":"mixed", "timeBasedDrops":[{"requiredSubs":1,"requiredMinutesWatched":30},{"requiredSubs":0,"requiredMinutesWatched":90}]},
+            {"id":"unknown"}
+        ]}}})
+    ).unwrap();
+    assert_eq!(
+        available_drop_campaign_ids_from_typed(response.data.unwrap()).unwrap(),
+        vec!["mixed", "unknown"]
+    );
+}
