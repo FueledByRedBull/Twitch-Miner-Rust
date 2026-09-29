@@ -4,9 +4,9 @@ use time::OffsetDateTime;
 
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome,
-    ClaimDropOutcome, CommunityGoalContributionData, FollowersData, GqlResponse, InventoryData,
-    InventoryDrop, InventorySnapshot, RecentClip, RecentClipsData, RewardListData, StreamInfo,
-    StreamInfoData, TwitchClientError, UserContributionData, WatchStreakMilestone,
+    ClaimDropOutcome, ClaimedDropReward, CommunityGoalContributionData, FollowersData, GqlResponse,
+    InventoryData, InventoryDrop, InventorySnapshot, RecentClip, RecentClipsData, RewardListData,
+    StreamInfo, StreamInfoData, TwitchClientError, UserContributionData, WatchStreakMilestone,
 };
 
 pub(crate) fn is_persisted_query_not_found(payload: &serde_json::Value) -> bool {
@@ -530,21 +530,40 @@ pub(crate) fn followers_page_from_typed(
 pub(crate) fn inventory_snapshot_from_typed(
     data: InventoryData,
 ) -> Result<InventorySnapshot, TwitchClientError> {
-    let campaigns = data
+    let inventory = data
         .current_user
         .ok_or(TwitchClientError::MissingField("data.currentUser"))?
         .inventory
         .ok_or(TwitchClientError::MissingField(
             "data.currentUser.inventory",
-        ))?
-        .campaigns
-        .unwrap_or_default();
+        ))?;
     let mut snapshot = InventorySnapshot {
-        drops: Vec::new(),
-        completed_campaign_ids: Vec::new(),
-        subscription_only_campaign_ids: Vec::new(),
+        claimed_rewards: inventory
+            .earned_rewards
+            .into_iter()
+            .flat_map(|rewards| rewards.edges)
+            .filter_map(|edge| {
+                let reward = edge.node?;
+                if reward.status.as_deref() != Some("CLAIMED") {
+                    return None;
+                }
+                let campaign_id = reward.campaign?.id;
+                let benefit_id = reward.item?.id;
+                if campaign_id.trim().is_empty() || benefit_id.trim().is_empty() {
+                    return None;
+                }
+                let earned_at =
+                    OffsetDateTime::parse(reward.earned_at.as_deref()?, &Rfc3339).ok()?;
+                Some(ClaimedDropReward {
+                    campaign_id,
+                    benefit_id,
+                    earned_at,
+                })
+            })
+            .collect(),
+        ..InventorySnapshot::default()
     };
-    for campaign in campaigns {
+    for campaign in inventory.campaigns.unwrap_or_default() {
         let campaign_complete = !campaign.drops.is_empty()
             && campaign.drops.iter().all(|drop| {
                 drop.self_data
@@ -639,6 +658,14 @@ fn inventory_campaign_drops(
         drops.push(InventoryDrop {
             id,
             campaign_id: campaign.id.clone().unwrap_or_default(),
+            // A partial benefit set cannot prove that the entire reward was awarded.
+            benefit_ids: drop
+                .benefit_edges
+                .unwrap_or_default()
+                .into_iter()
+                .map(|edge| edge.benefit?.id.filter(|id| !id.trim().is_empty()))
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default(),
             starts_at: parse_date(drop.start_at.as_deref().or(campaign.start_at.as_deref())),
             ends_at: parse_date(drop.end_at.as_deref().or(campaign.end_at.as_deref())),
             prerequisites_met,

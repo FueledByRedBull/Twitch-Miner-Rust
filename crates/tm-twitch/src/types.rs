@@ -577,6 +577,27 @@ pub(crate) struct InventoryUser {
 pub(crate) struct InventoryState {
     #[serde(rename = "dropCampaignsInProgress")]
     pub(crate) campaigns: Option<Vec<InventoryCampaign>>,
+    #[serde(rename = "earnedDropRewards")]
+    pub(crate) earned_rewards: Option<EarnedDropRewards>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct EarnedDropRewards {
+    pub(crate) edges: Vec<EarnedDropRewardEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct EarnedDropRewardEdge {
+    pub(crate) node: Option<EarnedDropReward>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct EarnedDropReward {
+    pub(crate) item: Option<DropPrecondition>,
+    pub(crate) campaign: Option<DropPrecondition>,
+    pub(crate) status: Option<String>,
+    #[serde(rename = "earnedAt")]
+    pub(crate) earned_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -608,6 +629,8 @@ pub(crate) struct InventoryTimeDrop {
     #[serde(default)]
     pub(crate) name: Option<String>,
     pub(crate) benefit: Option<InventoryBenefit>,
+    #[serde(rename = "benefitEdges")]
+    pub(crate) benefit_edges: Option<Vec<InventoryBenefitEdge>>,
     #[serde(rename = "self")]
     pub(crate) self_data: Option<InventoryDropSelf>,
     #[serde(rename = "requiredMinutesWatched", default)]
@@ -625,7 +648,13 @@ pub(crate) struct DropPrecondition {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct InventoryBenefit {
+    pub(crate) id: Option<String>,
     pub(crate) name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct InventoryBenefitEdge {
+    pub(crate) benefit: Option<InventoryBenefit>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -770,6 +799,7 @@ pub struct FollowersPage {
 pub struct InventoryDrop {
     pub id: String,
     pub campaign_id: String,
+    pub benefit_ids: Vec<String>,
     pub starts_at: Option<time::OffsetDateTime>,
     pub ends_at: Option<time::OffsetDateTime>,
     pub prerequisites_met: Option<bool>,
@@ -782,11 +812,19 @@ pub struct InventoryDrop {
     pub is_claimed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InventorySnapshot {
     pub drops: Vec<InventoryDrop>,
     pub completed_campaign_ids: Vec<String>,
     pub subscription_only_campaign_ids: Vec<String>,
+    pub claimed_rewards: Vec<ClaimedDropReward>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedDropReward {
+    pub campaign_id: String,
+    pub benefit_id: String,
+    pub earned_at: time::OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

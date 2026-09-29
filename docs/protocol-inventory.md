@@ -335,3 +335,19 @@ or invalid/missing dates cannot establish deadline priority. The channel's
 `viewerDropCampaigns` response remains the eligibility boundary. No new operation
 or request cadence is added. The synthetic `twitch.inventory_progress.json`
 fixture covers partial progress, locked prerequisites and subscription rewards.
+
+`Inventory.earnedDropRewards.edges[].node` also provides awarded rewards after
+their campaigns leave `dropCampaignsInProgress`. Only an explicit `CLAIMED`
+status with nonempty campaign/item IDs and a valid `earnedAt` timestamp is
+confirmation. Status reconciles a previously observed reward only when every
+`benefitEdges[].benefit.id` matches that campaign's awards and the awards are at
+least as recent as its last unclaimed observation, without future timestamps.
+Names and disappearance alone never establish a claim. Missing benefit IDs,
+unknown award states and invalid dates cannot establish confirmation.
+
+Confirmed entries remain in status while the current inventory still contains
+their awards. Their last observed watch minutes and progress timestamp remain
+unchanged; observing an award neither sends a claim mutation nor increments the
+miner's mutation counter. Matching IDs stay in memory and are excluded from
+status serialization. The synthetic `twitch.inventory_awarded.json` transition
+covers a 59/60 reward moving directly to the awarded list.

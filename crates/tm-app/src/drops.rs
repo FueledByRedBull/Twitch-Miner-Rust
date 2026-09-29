@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use tm_config::ConfigFile;
 use tm_domain::Streamer;
 use tm_observability::Event as DiscordEvent;
-use tm_twitch::{InventoryDrop, TwitchClient};
+use tm_twitch::{InventoryDrop, InventorySnapshot, TwitchClient};
 
 use crate::observability::AppObservability;
 use crate::status::HealthTracker;
@@ -209,8 +209,8 @@ async fn claim_available_drops_with_health(
     health: Option<&HealthTracker>,
     coordinator: &DropClaimCoordinator,
 ) -> Result<()> {
-    let drops = match twitch
-        .fetch_inventory_typed()
+    let inventory = match twitch
+        .fetch_inventory_snapshot_typed()
         .await
         .with_context(|| format!("load {mode} drops inventory"))
     {
@@ -222,8 +222,15 @@ async fn claim_available_drops_with_health(
             return Err(error);
         }
     };
-    claim_inventory_drops_with_coordinator(twitch, mode, &drops, observability, health, coordinator)
-        .await
+    claim_inventory_drops_with_coordinator(
+        twitch,
+        mode,
+        &inventory,
+        observability,
+        health,
+        coordinator,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -235,21 +242,33 @@ pub(crate) async fn claim_inventory_drops(
     health: Option<&HealthTracker>,
 ) -> Result<()> {
     let coordinator = DropClaimCoordinator::default();
-    claim_inventory_drops_with_coordinator(twitch, mode, drops, observability, health, &coordinator)
-        .await
+    let inventory = InventorySnapshot {
+        drops: drops.to_vec(),
+        ..InventorySnapshot::default()
+    };
+    claim_inventory_drops_with_coordinator(
+        twitch,
+        mode,
+        &inventory,
+        observability,
+        health,
+        &coordinator,
+    )
+    .await
 }
 
 pub(crate) async fn claim_inventory_drops_with_coordinator(
     twitch: &TwitchClient,
     mode: &str,
-    drops: &[InventoryDrop],
+    inventory: &InventorySnapshot,
     observability: &AppObservability,
     health: Option<&HealthTracker>,
     coordinator: &DropClaimCoordinator,
 ) -> Result<()> {
     if let Some(health) = health {
-        health.record_drop_inventory(drops);
+        health.record_drop_inventory(inventory);
     }
+    let drops = &inventory.drops;
     for drop in drops {
         if drop.is_claimed {
             coordinator.confirm(&drop.drop_instance_id);

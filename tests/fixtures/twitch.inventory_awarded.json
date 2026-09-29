@@ -1,0 +1,44 @@
+[
+  {
+    "data": {
+      "currentUser": {
+        "inventory": {
+          "dropCampaignsInProgress": [{
+            "id": "campaign-synthetic",
+            "name": "Synthetic campaign",
+            "timeBasedDrops": [{
+              "id": "drop-synthetic",
+              "name": "Synthetic reward",
+              "requiredMinutesWatched": 60,
+              "benefitEdges": [{"benefit": {"id": "benefit-synthetic"}}],
+              "self": {
+                "dropInstanceID": null,
+                "currentMinutesWatched": 59,
+                "isClaimed": false
+              }
+            }]
+          }],
+          "earnedDropRewards": {"edges": []}
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "currentUser": {
+        "inventory": {
+          "dropCampaignsInProgress": [],
+          "earnedDropRewards": {
+            "edges": [{"node": {
+              "id": "benefit-synthetic",
+              "item": {"id": "benefit-synthetic", "name": "Synthetic reward"},
+              "campaign": {"id": "campaign-synthetic"},
+              "status": "CLAIMED",
+              "earnedAt": "2026-09-27T19:17:00Z"
+            }}]
+          }
+        }
+      }
+    }
+  }
+]

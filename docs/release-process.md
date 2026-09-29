@@ -164,6 +164,23 @@ and records the full source SHA in the image. Run `--check-config` against the
 rollback digest on the target host before placing it in the rollback Compose
 file.
 
+## Reviewing a collected soak
+
+`scripts/review_soak.py` reviews an existing sanitized anchor and minute history
+without changing the deployment or starting another collector. With `--host`, it
+runs the analysis over SSH and returns only compact results; raw history stays on
+the evidence host. Run `python scripts/review_soak.py --help` for the local and SSH
+input options, and `python -B -m unittest scripts.tests.test_review_soak` for its
+synthetic regression tests. Keep `--output-dir` in a durable evidence directory
+outside build output such as `target/`.
+
+Review identity, continuity, coverage, historical findings, earnings, Drops and
+the milestone together. Failed or missing probes are unknown evidence. Recovered
+failures remain recorded; Docker health does not override direct application
+health or the five-consecutive-failure task threshold. The helper never grants
+acceptance: elapsed time, accepted watch requests and disappearing rewards alone
+do not prove sustained health, server-confirmed earnings or a claimed Drop.
+
 ## GHCR retention
 
 Package cleanup must preserve every digest referenced by the deployed Compose

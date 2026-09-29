@@ -36,11 +36,11 @@ pub use parsers::{
     validate_gql_mutation_response,
 };
 pub use types::{
-    ArchivedVideo, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, FollowersPage,
-    GqlPersistedExtensions, GqlPersistedOperation, GqlPersistedQuery, GqlRequest, InventoryDrop,
-    InventorySnapshot, MinuteWatchedRequest, RecentClip, StreamInfo, TwitchClientError,
-    TwitchContractError, TwitchEndpoints, TwitchFailureClass, ViewerDropsDashboard,
-    WatchStreakMilestone,
+    ArchivedVideo, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, ClaimedDropReward,
+    FollowersPage, GqlPersistedExtensions, GqlPersistedOperation, GqlPersistedQuery, GqlRequest,
+    InventoryDrop, InventorySnapshot, MinuteWatchedRequest, RecentClip, StreamInfo,
+    TwitchClientError, TwitchContractError, TwitchEndpoints, TwitchFailureClass,
+    ViewerDropsDashboard, WatchStreakMilestone,
 };
 
 #[cfg(test)]

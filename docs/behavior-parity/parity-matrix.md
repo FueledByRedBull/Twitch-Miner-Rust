@@ -192,4 +192,8 @@ requirements filter non-watch campaigns before inventory selection. Missing
 inventory defers priority until an unfinished reward is observed; it does not
 prevent ordinary channel-points watching. Status retains the current inventory
 rather than a 16-reward history, preserving progress timestamps for retained
-rewards and removing entries absent from the next successful inventory.
+rewards and removing entries absent from the next successful inventory unless
+that inventory explicitly confirms their awards. A removed reward can become
+claimed only through exact campaign/benefit matches and fresh award timestamps;
+its last observed watch minutes are preserved. This reconciliation uses the
+existing Inventory response and does not replay claims or add network requests.
