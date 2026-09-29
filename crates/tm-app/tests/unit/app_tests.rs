@@ -2661,6 +2661,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inventory_award_confirms_a_removed_drop_without_replaying_a_claim() {
+        let health = HealthTracker::default();
+        let coordinator = DropClaimCoordinator::default();
+        let directory = tempfile::tempdir().unwrap();
+        let reporter = crate::status::StatusReporter::ready(
+            directory.path(),
+            health.clone(),
+            Arc::new(tm_runtime::RuntimeMetrics::default()),
+        )
+        .unwrap();
+        let mut responses: Vec<serde_json::Value> =
+            serde_json::from_str(&fixture_json("twitch.inventory_awarded.json")).unwrap();
+        let mut first_key = serde_json::Value::Null;
+        for (index, response) in responses.iter_mut().enumerate() {
+            if index == 1 {
+                let now = OffsetDateTime::now_utc();
+                response["data"]["currentUser"]["inventory"]["earnedDropRewards"]["edges"][0]
+                    ["node"]["earnedAt"] = format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                    now.year(),
+                    u8::from(now.month()),
+                    now.day(),
+                    now.hour(),
+                    now.minute(),
+                    now.second()
+                )
+                .into();
+            }
+            let (endpoints, requests, server) =
+                spawn_json_response_server(vec![response.to_string()]);
+            let twitch = TwitchClient::with_client_and_endpoints(
+                reqwest::Client::new(),
+                "token",
+                "ua",
+                endpoints,
+            );
+            let snapshot = twitch.fetch_inventory_snapshot_typed().await.unwrap();
+            claim_inventory_drops_with_coordinator(
+                &twitch,
+                "prompt",
+                &snapshot,
+                &test_observability(),
+                Some(&health),
+                &coordinator,
+            )
+            .await
+            .unwrap();
+            server.join().unwrap();
+            assert!(requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| !request.contains("DropsPage_ClaimDropRewards")));
+            reporter.heartbeat().unwrap();
+            let text =
+                fs::read_to_string(directory.path().join(crate::status::STATUS_FILE_NAME)).unwrap();
+            let status: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let drops = status["counters"]["drop_progress"].as_array().unwrap();
+            assert_eq!(
+                drops.len(),
+                1,
+                "the server-confirmed award must retain its observed drop"
+            );
+            assert_eq!(
+                drops[0]["current_minutes_watched"], 59,
+                "do not invent a watch-minute observation"
+            );
+            assert_eq!(drops[0]["is_claimed"], index == 1);
+            assert_eq!(
+                status["counters"]["claims"], 0,
+                "an observed award is not our claim mutation"
+            );
+            assert!(!text.contains("campaign-synthetic"));
+            assert!(!text.contains("benefit-synthetic"));
+            if index == 0 {
+                first_key = drops[0]["drop_key"].clone();
+            } else {
+                assert_eq!(drops[0]["drop_key"], first_key);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn prompt_drop_claim_uses_the_existing_inventory_snapshot() {
         let (endpoints, requests, server) = spawn_json_response_server(vec![serde_json::json!({
             "data": {"claimDropRewards": {"status": "ELIGIBLE_FOR_ALL"}}
@@ -2720,19 +2803,22 @@ mod tests {
             endpoints,
         );
         let coordinator = DropClaimCoordinator::default();
-        let drops = [InventoryDrop {
-            drop_instance_id: String::from("drop-stale"),
-            reward_name: String::from("Reward"),
-            campaign_name: String::from("Campaign"),
-            current_minutes_watched: 60,
-            required_minutes_watched: 60,
-            is_claimed: false,
-            ..InventoryDrop::default()
-        }];
+        let inventory = tm_twitch::InventorySnapshot {
+            drops: vec![InventoryDrop {
+                drop_instance_id: String::from("drop-stale"),
+                reward_name: String::from("Reward"),
+                campaign_name: String::from("Campaign"),
+                current_minutes_watched: 60,
+                required_minutes_watched: 60,
+                is_claimed: false,
+                ..InventoryDrop::default()
+            }],
+            ..tm_twitch::InventorySnapshot::default()
+        };
         claim_inventory_drops_with_coordinator(
             &twitch,
             "prompt",
-            &drops,
+            &inventory,
             &test_observability(),
             None,
             &coordinator,
@@ -2742,7 +2828,7 @@ mod tests {
         claim_inventory_drops_with_coordinator(
             &twitch,
             "prompt",
-            &drops,
+            &inventory,
             &test_observability(),
             None,
             &coordinator,

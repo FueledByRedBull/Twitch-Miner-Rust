@@ -2368,6 +2368,42 @@ fn parses_available_drop_campaign_ids() {
 }
 
 #[test]
+fn inventory_awards_require_explicit_claimed_status_ids_and_timestamp() {
+    let fixture = protocol_fixture("twitch.inventory_awarded.json");
+    let parse = |payload: serde_json::Value| {
+        let response: types::GqlResponse<types::InventoryData> =
+            serde_json::from_value(payload).unwrap();
+        inventory_snapshot_from_typed(response.data.unwrap()).unwrap()
+    };
+    let before = parse(fixture[0].clone());
+    assert_eq!(before.drops[0].benefit_ids, vec!["benefit-synthetic"]);
+    let awarded = parse(fixture[1].clone());
+    assert!(awarded.drops.is_empty());
+    assert_eq!(awarded.claimed_rewards.len(), 1);
+    assert_eq!(awarded.claimed_rewards[0].campaign_id, "campaign-synthetic");
+    assert_eq!(awarded.claimed_rewards[0].benefit_id, "benefit-synthetic");
+    for (field, value) in [
+        ("status", serde_json::json!("READY_TO_CLAIM")),
+        ("status", serde_json::Value::Null),
+        ("item", serde_json::json!({"id":""})),
+        ("campaign", serde_json::Value::Null),
+        ("earnedAt", serde_json::json!("invalid")),
+    ] {
+        let mut payload = fixture[1].clone();
+        payload["data"]["currentUser"]["inventory"]["earnedDropRewards"]["edges"][0]["node"]
+            [field] = value;
+        assert!(parse(payload).claimed_rewards.is_empty(), "{field}");
+    }
+    let mut incomplete_benefits = fixture[0].clone();
+    incomplete_benefits["data"]["currentUser"]["inventory"]["dropCampaignsInProgress"][0]
+        ["timeBasedDrops"][0]["benefitEdges"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"benefit":null}));
+    assert!(parse(incomplete_benefits).drops[0].benefit_ids.is_empty());
+}
+
+#[test]
 fn inventory_preserves_partial_rewards_without_claim_instances() {
     let response: types::GqlResponse<types::InventoryData> =
         serde_json::from_value(protocol_fixture("twitch.inventory_progress.json")).unwrap();

@@ -2,6 +2,9 @@
 
 ## 0.2.0 - 2026-09-05
 
+- Reconciles observed Drops with Twitch's explicitly claimed inventory awards
+  when completed campaigns leave the in-progress list, preserving reward status
+  without guessing completion from disappearance or replaying a claim.
 - Rotates one ordinary watch slot per fair turn, retaining the other selected
   channel while its replacement establishes credit. Equal-deadline Drops targets
   use configured channel order instead of minute-by-minute progress to avoid

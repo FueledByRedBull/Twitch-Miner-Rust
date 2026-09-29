@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
-use tm_twitch::InventoryDrop;
+use tm_twitch::{InventoryDrop, InventorySnapshot};
 
 use crate::build_info;
 
@@ -69,6 +69,10 @@ struct DropProgressSnapshot {
     is_claimed: bool,
     observed_at_unix: u64,
     last_progress_increase_unix: Option<u64>,
+    #[serde(skip)]
+    campaign_id: String,
+    #[serde(skip)]
+    benefit_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -274,16 +278,39 @@ impl HealthTracker {
         }
     }
 
-    pub(crate) fn record_drop_inventory(&self, drops: &[InventoryDrop]) {
-        let keys: std::collections::HashSet<_> = drops.iter().map(stable_drop_key).collect();
+    pub(crate) fn record_drop_inventory(&self, inventory: &InventorySnapshot) {
+        let keys: std::collections::HashSet<_> =
+            inventory.drops.iter().map(stable_drop_key).collect();
+        let now = unix_now_infallible();
         let mut counters = self
             .counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        counters
-            .drop_progress
-            .retain(|entry| keys.contains(&entry.drop_key));
-        for drop in drops {
+        counters.drop_progress.retain_mut(|entry| {
+            if keys.contains(&entry.drop_key) {
+                return true;
+            }
+            // Twitch may move a completed reward directly out of the progress list.
+            // Require a fresh explicit award for every benefit, never disappearance alone.
+            let awarded = !entry.benefit_ids.is_empty()
+                && entry.benefit_ids.iter().all(|id| {
+                    inventory.claimed_rewards.iter().any(|reward| {
+                        let Ok(earned) = u64::try_from(reward.earned_at.unix_timestamp()) else {
+                            return false;
+                        };
+                        reward.campaign_id == entry.campaign_id
+                            && reward.benefit_id == *id
+                            && earned <= now
+                            && (entry.is_claimed || earned >= entry.observed_at_unix)
+                    })
+                });
+            if awarded {
+                entry.is_claimed = true;
+                entry.observed_at_unix = now;
+            }
+            awarded
+        });
+        for drop in &inventory.drops {
             Self::update_drop_progress(&mut counters, drop);
         }
     }
@@ -317,6 +344,8 @@ impl HealthTracker {
             is_claimed: drop.is_claimed,
             observed_at_unix: now,
             last_progress_increase_unix: previous_progress_increase,
+            campaign_id: drop.campaign_id.clone(),
+            benefit_ids: drop.benefit_ids.clone(),
         };
         if let Some(existing) = counters
             .drop_progress
@@ -857,7 +886,7 @@ mod tests {
         StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
     };
     use tm_observability::{init_tracing, LoggerSettings, TracingInitOptions};
-    use tm_twitch::InventoryDrop;
+    use tm_twitch::{ClaimedDropReward, InventoryDrop, InventorySnapshot};
 
     #[test]
     fn ready_status_passes_health_check() -> anyhow::Result<()> {
@@ -1081,26 +1110,130 @@ mod tests {
     #[test]
     fn drop_progress_covers_current_inventory_without_historical_growth() {
         let health = HealthTracker::default();
-        let mut drops: Vec<_> = (0..40)
-            .map(|index| InventoryDrop {
-                id: format!("drop-{index}"),
-                current_minutes_watched: 1,
-                required_minutes_watched: 60,
-                ..Default::default()
-            })
-            .collect();
-        health.record_drop_inventory(&drops);
+        let mut inventory = InventorySnapshot {
+            drops: (0..40)
+                .map(|index| InventoryDrop {
+                    id: format!("drop-{index}"),
+                    current_minutes_watched: 1,
+                    required_minutes_watched: 60,
+                    ..Default::default()
+                })
+                .collect(),
+            ..InventorySnapshot::default()
+        };
+        health.record_drop_inventory(&inventory);
         assert_eq!(health.counters_snapshot().drop_progress.len(), 40);
-        drops[0].current_minutes_watched = 2;
-        health.record_drop_inventory(&drops);
+        inventory.drops[0].current_minutes_watched = 2;
+        health.record_drop_inventory(&inventory);
         let progress = health.counters_snapshot().drop_progress;
         assert!(progress[0].last_progress_increase_unix.is_some());
         assert_ne!(progress[0].drop_key, "drop-0");
         assert!(progress.iter().all(|entry| entry.observed_at_unix > 0));
-        health.record_drop_inventory(&drops[..1]);
+        inventory.drops.truncate(1);
+        health.record_drop_inventory(&inventory);
         assert_eq!(health.counters_snapshot().drop_progress.len(), 1);
-        health.record_drop_inventory(&[]);
+        health.record_drop_inventory(&InventorySnapshot::default());
         assert!(health.counters_snapshot().drop_progress.is_empty());
+    }
+
+    #[test]
+    fn removed_drop_requires_fresh_awards_for_every_exact_benefit() -> anyhow::Result<()> {
+        let drop = InventoryDrop {
+            id: "drop".into(),
+            campaign_id: "campaign".into(),
+            benefit_ids: vec!["one".into(), "two".into()],
+            current_minutes_watched: 59,
+            required_minutes_watched: 60,
+            ..InventoryDrop::default()
+        };
+        let award = ClaimedDropReward {
+            campaign_id: "campaign".into(),
+            benefit_id: "one".into(),
+            earned_at: tm_domain::OffsetDateTime::from_unix_timestamp(101)?,
+        };
+        let second = ClaimedDropReward {
+            benefit_id: "two".into(),
+            ..award.clone()
+        };
+        let cases = [
+            (vec![], false),
+            (vec![award.clone()], false),
+            (
+                vec![
+                    award.clone(),
+                    ClaimedDropReward {
+                        campaign_id: "other".into(),
+                        ..second.clone()
+                    },
+                ],
+                false,
+            ),
+            (
+                vec![
+                    award.clone(),
+                    ClaimedDropReward {
+                        benefit_id: "other".into(),
+                        ..second.clone()
+                    },
+                ],
+                false,
+            ),
+            (
+                vec![
+                    award.clone(),
+                    ClaimedDropReward {
+                        earned_at: tm_domain::OffsetDateTime::from_unix_timestamp(99)?,
+                        ..second.clone()
+                    },
+                ],
+                false,
+            ),
+            (
+                vec![
+                    award.clone(),
+                    ClaimedDropReward {
+                        earned_at: tm_domain::OffsetDateTime::now_utc()
+                            + std::time::Duration::from_secs(3600),
+                        ..second.clone()
+                    },
+                ],
+                false,
+            ),
+            (vec![award, second], true),
+        ];
+        for (claimed_rewards, expected) in cases {
+            let health = HealthTracker::default();
+            health.record_drop_progress(&drop);
+            health
+                .counters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drop_progress[0]
+                .observed_at_unix = 100;
+            let inventory = InventorySnapshot {
+                claimed_rewards,
+                ..InventorySnapshot::default()
+            };
+            health.record_drop_inventory(&inventory);
+            let retained = health.counters_snapshot().drop_progress;
+            assert_eq!(!retained.is_empty(), expected);
+            if expected {
+                assert!(retained[0].is_claimed);
+                assert_eq!(retained[0].current_minutes_watched, 59);
+                health.record_drop_inventory(&inventory);
+                assert!(health.counters_snapshot().drop_progress[0].is_claimed);
+                health.record_drop_inventory(&InventorySnapshot::default());
+                assert!(health.counters_snapshot().drop_progress.is_empty());
+            }
+        }
+        let health = HealthTracker::default();
+        health.record_drop_progress(&InventoryDrop {
+            benefit_ids: vec![],
+            ..drop
+        });
+        health.record_drop_inventory(&InventorySnapshot::default());
+        assert!(health.counters_snapshot().drop_progress.is_empty());
+        Ok(())
     }
 
     #[test]
