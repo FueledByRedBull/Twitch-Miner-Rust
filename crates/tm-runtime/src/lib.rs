@@ -20,8 +20,8 @@ pub use handle::{spawn_runtime_state, RuntimeHandle, RuntimeMetrics, RuntimeMetr
 pub use summary::{apply_pubsub_gain, build_session_summary, update_history};
 pub use tm_domain::MinerEvent;
 pub use types::{
-    ContextUpdate, EventApplication, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
-    StreamerSummary,
+    ContextRequestToken, ContextUpdate, EventApplication, RuntimeState, RuntimeSummary,
+    SessionSummary, StreamUpdate, StreamerSummary,
 };
 
 #[cfg(test)]

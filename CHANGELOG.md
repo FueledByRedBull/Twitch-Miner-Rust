@@ -1,6 +1,57 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-09-05
+
+- Gives replacements for unavailable watch channels a full turn before voluntary
+  rotation or streak promotion.
+- Reconnects promptly after a PubSub server request while retaining backoff for
+  repeated short-lived connections.
+- Stabilizes the Drops campaign pin independently of transient streak ranking,
+  prevents watchdog recovery from being undone by a second rotation, and gives
+  nearby observed watch rewards a bounded grace period before fair rotation.
+- Updates Rustls to 0.23.45 for RUSTSEC-2026-0285, plus Tokio-Rustls 0.26.5,
+  dirs 7.0.0 and the pinned CI installer action 2.87.8.
+- Requires current-visit credit before reporting earning after channel reselection.
+- Allows a later bonus-availability observation to retry a claim whose connection
+  failed before sending, while retaining protection for ambiguous outcomes.
+- Retains journal headroom for rejected-to-confirmed upgrades and includes all
+  overdue watch slots in each rate-limited first-credit warning.
+- Reserves journal space for later prediction confirmations and exposes journal
+  bytes, unresolved/retained counts and capacity rejection in runtime status.
+- Warns about overdue first credit at most once per 30 minutes across watch
+  slots; optional Discord delivery uses the `WATCH_STATUS` event.
+- Shares the streak-promotion cooldown with fair rotations so a newly rotated
+  channel is not displaced again before its scheduled turn finishes.
+- Sends newly selected watch channels first and preserves request order while
+  the selected pair remains unchanged, without changing rotation frequency.
+- Applies the prediction journal's 128-placement limit only to unresolved
+  requests, retaining seven-day replay protection within the bounded file.
+- Reports unavailable earning measurement, first-credit waits, earning and
+  stalls in watch-slot status. Prolonged first-credit waits do not rotate slots.
+
+- Includes request time in watch pacing so network latency does not extend every
+  interval, without replaying missed ticks after a slow request.
+- Lets EventSub connection failures reach reconnect handling when their event
+  queue closes, instead of spinning until task supervision restarts the process.
+- Hardens EventSub capacity recovery and verifies inherited reconnect
+  subscriptions by channel conditions and unique subscription identities.
+- Preserves spare-slot rotation across campaign changes, separates metadata
+  refresh from watch requests, and exposes per-channel watch health and
+  confirmed progress observations.
+- Guards asynchronous context and broadcast updates against stale responses,
+  retains nonadjacent point-event replay identities, and separates bounded
+  prediction evaluation from ordinary PubSub effects.
+- Persists prediction placement decisions before sending mutations, restores
+  unresolved decisions after restart, and handles reordered confirmations.
+- Adds a bounded, freshly verified startup identity cache and an offline Hermes
+  replay adapter; Hermes does not have live transport or mutation authority.
+- Adds Windows portable ZIP and MSI packaging and strengthens immutable image
+  verification, deployment pinning, and evidence-gated release promotion.
+- Displays embedded streak timestamps in the configured timezone, matching log
+  headers and accounting for daylight-saving transitions.
+- Removes unused internal authentication and prediction helpers, shares Windows
+  packaging checks between CI and releases, and includes the isolated fuzz
+  workspace in dependency updates and policy checks.
 
 - Reconciles unresolved streak state once after a confirmed bonus claim and
   once after accepted offline-recovery playback settles, using Twitch's typed

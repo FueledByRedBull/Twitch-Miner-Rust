@@ -1,0 +1,24 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package
+        Name="Twitch Channel Points Miner"
+        Manufacturer="FueledByRedBull"
+        Version="$(var.Version)"
+        UpgradeCode="6a6d3e98-5f99-4a4b-9e79-6dbbd5d2f530"
+        Scope="perMachine">
+        <SummaryInformation Description="Twitch Channel Points Miner for Windows" />
+        <MajorUpgrade DowngradeErrorMessage="A newer Twitch Channel Points Miner is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+        <Feature Id="Main" Title="Twitch Channel Points Miner" Level="1">
+            <Component Directory="INSTALLFOLDER" Guid="8F48D2F5-3709-4E0B-BF07-0E0A4D64BDB2">
+                <File Source="$(var.BinaryPath)" Name="twitch-miner.exe" />
+                <File Source="$(var.ConfigPath)" Name="config.example.json" />
+                <File Source="$(var.ReadmePath)" Name="README.md" />
+                <File Source="$(var.LicensePath)" Name="LICENSE" />
+                <File Source="$(var.MetadataPath)" Name="BUILD-METADATA.txt" />
+            </Component>
+        </Feature>
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="INSTALLFOLDER" Name="TwitchMiner" />
+        </StandardDirectory>
+    </Package>
+</Wix>

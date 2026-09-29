@@ -38,15 +38,20 @@ pub struct RuntimeMetrics {
     total_command_wait_micros: AtomicU64,
     transport_events: AtomicU64,
     total_transport_latency_micros: AtomicU64,
+    effects_started: AtomicU64,
+    total_effect_queue_latency_micros: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct RuntimeMetricsSnapshot {
     pub processed_events: u64,
     pub total_command_wait_micros: u64,
     pub max_queue_depth: u64,
     pub transport_events: u64,
     pub total_transport_latency_micros: u64,
+    pub effects_started: u64,
+    pub total_effect_queue_latency_micros: u64,
 }
 
 impl RuntimeMetrics {
@@ -68,6 +73,13 @@ impl RuntimeMetrics {
             .fetch_add(micros, Ordering::Relaxed);
     }
 
+    pub fn record_effect_queue_latency(&self, latency: std::time::Duration) {
+        self.effects_started.fetch_add(1, Ordering::Relaxed);
+        let micros = latency.as_micros().try_into().unwrap_or(u64::MAX);
+        self.total_effect_queue_latency_micros
+            .fetch_add(micros, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot {
@@ -79,6 +91,10 @@ impl RuntimeMetrics {
             transport_events: self.transport_events.load(Ordering::Relaxed),
             total_transport_latency_micros: self
                 .total_transport_latency_micros
+                .load(Ordering::Relaxed),
+            effects_started: self.effects_started.load(Ordering::Relaxed),
+            total_effect_queue_latency_micros: self
+                .total_effect_queue_latency_micros
                 .load(Ordering::Relaxed),
         }
     }
@@ -197,13 +213,61 @@ impl RuntimeHandle {
         Ok(state.clone())
     }
 
-    pub async fn apply_context_update(&self, update: ContextUpdate) -> Result<Vec<RuntimeEffect>> {
+    pub async fn begin_context_update(
+        &self,
+        channel_id: impl Into<String>,
+    ) -> Result<Option<crate::ContextRequestToken>> {
+        let started = Instant::now();
+        let mut state = self.lock_open("BeginContextUpdate").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        let token = state.begin_context_update(&channel_id.into());
+        if token.is_some() {
+            self.notify_state_change();
+        }
+        Ok(token)
+    }
+
+    pub async fn apply_context_update(
+        &self,
+        update: ContextUpdate,
+    ) -> Result<(Vec<RuntimeEffect>, i64)> {
         let started = Instant::now();
         let mut state = self.lock_open("ApplyContext").await?;
         self.metrics.record_command_wait(started.elapsed());
-        let effects = state.apply_context_update(&update);
+        let application = state.apply_context_update(&update);
         self.notify_state_change();
-        Ok(effects)
+        Ok(application)
+    }
+
+    pub async fn begin_stream_update(&self, channel_id: impl Into<String>) -> Result<Option<u64>> {
+        let started = Instant::now();
+        let mut state = self.lock_open("BeginStreamUpdate").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        let generation = state.begin_stream_update(&channel_id.into());
+        if generation.is_some() {
+            self.notify_state_change();
+        }
+        Ok(generation)
+    }
+
+    pub async fn prediction_channel_id(
+        &self,
+        event_id: impl Into<String>,
+    ) -> Result<Option<String>> {
+        let started = Instant::now();
+        let state = self.lock_open("PredictionChannelId").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        Ok(state.prediction_channel_id(&event_id.into()))
+    }
+
+    pub async fn active_prediction_channel_id(
+        &self,
+        event_id: impl Into<String>,
+    ) -> Result<Option<String>> {
+        let started = Instant::now();
+        let state = self.lock_open("ActivePredictionChannelId").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        Ok(state.active_prediction_channel_id(&event_id.into()))
     }
 
     pub async fn apply_stream_update(
@@ -244,6 +308,30 @@ impl RuntimeHandle {
         state.set_drop_campaign_eligibility(&channel_id.into(), eligible);
         self.notify_state_change();
         Ok(())
+    }
+
+    pub async fn set_drop_campaign_eligibility_if_current(
+        &self,
+        channel_id: impl Into<String>,
+        expected_broadcast_id: impl Into<String>,
+        expected_game_id: Option<String>,
+        eligible: bool,
+    ) -> Result<bool> {
+        let started = Instant::now();
+        let mut state = self
+            .lock_open("SetDropCampaignEligibilityIfCurrent")
+            .await?;
+        self.metrics.record_command_wait(started.elapsed());
+        let changed = state.set_drop_campaign_eligibility_if_current(
+            &channel_id.into(),
+            &expected_broadcast_id.into(),
+            expected_game_id.as_deref(),
+            eligible,
+        );
+        if changed {
+            self.notify_state_change();
+        }
+        Ok(changed)
     }
 
     pub async fn update_streamer_login(
@@ -291,15 +379,39 @@ impl RuntimeHandle {
         Ok(changed)
     }
 
+    pub async fn set_presence_if_current(
+        &self,
+        channel_id: &str,
+        online: bool,
+        expected_generation: u64,
+        now: OffsetDateTime,
+    ) -> Result<bool> {
+        let started = Instant::now();
+        let mut state = self.lock_open("SetPresenceCurrent").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        if !state.streamers.iter().any(|streamer| {
+            streamer.channel_id == channel_id
+                && streamer.stream_update_generation == expected_generation
+        }) {
+            return Ok(false);
+        }
+        let changed = state.apply_presence(channel_id, online, now);
+        if changed {
+            self.notify_state_change();
+        }
+        Ok(changed)
+    }
+
     pub async fn mark_minute_watched(
         &self,
         channel_id: impl Into<String>,
+        expected_broadcast_id: impl Into<String>,
         now: OffsetDateTime,
     ) -> Result<()> {
         let started = Instant::now();
         let mut state = self.lock_open("MarkMinuteWatched").await?;
         self.metrics.record_command_wait(started.elapsed());
-        state.mark_minute_watched(&channel_id.into(), now);
+        state.mark_minute_watched(&channel_id.into(), &expected_broadcast_id.into(), now);
         self.notify_state_change();
         Ok(())
     }
@@ -345,6 +457,63 @@ impl RuntimeHandle {
         let mut state = self.lock_open("RecordPredictionPlaced").await?;
         self.metrics.record_command_wait(started.elapsed());
         state.record_prediction_placed(&event_id.into(), &decision, deduct_stake);
+        self.notify_state_change();
+        Ok(())
+    }
+
+    pub async fn restore_prediction_placement(
+        &self,
+        event_id: impl Into<String>,
+        decision: PredictionDecision,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let mut state = self.lock_open("RestorePredictionPlacement").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        state.restore_prediction_placement(&event_id.into(), &decision);
+        self.notify_state_change();
+        Ok(())
+    }
+
+    pub async fn reserve_prediction_placement(
+        &self,
+        event_id: impl Into<String>,
+        decision: PredictionDecision,
+    ) -> Result<bool> {
+        let started = Instant::now();
+        let mut state = self.lock_open("ReservePredictionPlacement").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        let reserved = state.reserve_prediction_placement(&event_id.into(), &decision);
+        if reserved {
+            self.notify_state_change();
+        }
+        Ok(reserved)
+    }
+
+    pub async fn release_prediction_placement_reservation(
+        &self,
+        event_id: impl Into<String>,
+    ) -> Result<bool> {
+        let started = Instant::now();
+        let mut state = self
+            .lock_open("ReleasePredictionPlacementReservation")
+            .await?;
+        self.metrics.record_command_wait(started.elapsed());
+        let released = state.release_prediction_placement_reservation(&event_id.into());
+        if released {
+            self.notify_state_change();
+        }
+        Ok(released)
+    }
+
+    pub async fn mark_prediction_placement_unknown(
+        &self,
+        event_id: impl Into<String>,
+        decision: PredictionDecision,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let mut state = self.lock_open("MarkPredictionPlacementUnknown").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        state.mark_prediction_placement_unknown(&event_id.into(), &decision);
         self.notify_state_change();
         Ok(())
     }

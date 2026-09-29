@@ -1,8 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
-$revision = (git rev-parse --short=12 HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($revision)) {
-    throw 'Unable to determine the source revision.'
+$revision = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+    throw 'Unable to determine the full source revision.'
 }
 $sourceDateEpoch = (git show -s --format=%ct HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceDateEpoch -notmatch '^\d+$') {

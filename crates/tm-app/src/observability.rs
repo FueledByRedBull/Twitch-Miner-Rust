@@ -18,9 +18,11 @@ pub(crate) struct AppObservability {
     pub(crate) discord_client: DiscordClient,
     anonymizer: Arc<Mutex<Anonymizer>>,
     pending_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    notification_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) emoji: bool,
     pub(crate) show_claimed_bonus: bool,
     show_game: bool,
+    timezone: Option<chrono_tz::Tz>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -32,6 +34,7 @@ pub(crate) struct AppObservabilitySettings {
     pub(crate) emoji: bool,
     pub(crate) show_claimed_bonus: bool,
     pub(crate) show_game: bool,
+    pub(crate) timezone: Option<chrono_tz::Tz>,
 }
 
 impl AppObservability {
@@ -45,9 +48,11 @@ impl AppObservability {
             discord_client,
             anonymizer: Arc::new(Mutex::new(Anonymizer::new(settings.anonymize_logs))),
             pending_tasks: Arc::new(Mutex::new(Vec::new())),
+            notification_slots: Arc::new(tokio::sync::Semaphore::new(128)),
             emoji: settings.emoji,
             show_claimed_bonus: settings.show_claimed_bonus,
             show_game: settings.show_game,
+            timezone: settings.timezone,
         }
     }
 
@@ -131,6 +136,11 @@ impl AppObservability {
             ("streak resolved at", stream.watch_streak_resolved_at),
         ] {
             if let Some(value) = value {
+                let value = tm_observability::format_timestamp(
+                    value.into(),
+                    self.timezone,
+                    "%Y-%m-%d %H:%M:%S %:z",
+                );
                 let _ = write!(message, " | {label} {value}");
             }
         }
@@ -376,8 +386,17 @@ impl AppObservability {
     }
 
     pub(crate) fn spawn_event(&self, event: DiscordEvent, message: String) {
+        let Ok(permit) = self.notification_slots.clone().try_acquire_owned() else {
+            tracing::warn!(
+                task = "observability",
+                error_class = "notification-queue-full",
+                "dropping notification because the bounded queue is full"
+            );
+            return;
+        };
         let this = self.clone();
         let task = tokio::spawn(async move {
+            let _permit = permit;
             this.send_event(event, &message).await;
         });
         self.track_task(task);
@@ -407,8 +426,10 @@ impl AppObservability {
                 std::mem::take(&mut *pending)
             }
         };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         for task in tasks {
-            await_observability_task(task, Duration::from_secs(5)).await;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            await_observability_task(task, remaining).await;
         }
     }
 }
@@ -441,6 +462,10 @@ pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservabilit
             emoji: config.emojis,
             show_claimed_bonus: config.show_claimed_bonus_msg,
             show_game: config.show_game,
+            timezone: config
+                .timezone
+                .as_deref()
+                .and_then(|value| value.parse().ok()),
         },
     ))
 }

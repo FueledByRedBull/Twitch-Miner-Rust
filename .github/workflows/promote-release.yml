@@ -1,0 +1,149 @@
+name: Promote Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing signed vX.Y.Z Git tag to promote'
+        required: true
+        type: string
+      source_revision:
+        description: 'Full source commit SHA used by the candidate build'
+        required: true
+        type: string
+      manifest_digest:
+        description: 'Accepted immutable multiarch manifest digest'
+        required: true
+        type: string
+      evidence_json:
+        description: 'Sanitized release evidence JSON for the external acceptance record'
+        required: true
+        type: string
+
+concurrency:
+  group: twitch-miner-stable-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_revision }}
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify signed tag and source version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'Release tag must be vX.Y.Z.'
+          }
+          if ($env:SOURCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'Source revision must be a full Git SHA.'
+          }
+          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          $tagSha = $ref.object.sha
+          $verification = $null
+          if ($ref.object.type -eq 'tag') {
+            $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$tagSha" | ConvertFrom-Json
+            $tagSha = $tagObject.object.sha
+            $verification = $tagObject.verification
+          }
+          if ($ref.object.type -ne 'tag' -or $verification.verified -ne $true) {
+            throw 'Release tag must be an existing signed annotated Git tag.'
+          }
+          if ($tagSha -ne $env:SOURCE_REVISION) {
+            throw 'Signed release tag does not point to the accepted source revision.'
+          }
+          $metadata = (cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json)
+          $package = @($metadata.packages | Where-Object { $_.name -eq 'tm-app' })
+          if ($package.Count -ne 1 -or "v$($package[0].version)" -ne $env:RELEASE_TAG) {
+            throw 'Release tag does not match the tm-app package version.'
+          }
+
+      - name: Verify immutable candidate and acceptance evidence
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+          RELEASE_EVIDENCE_JSON: ${{ inputs.evidence_json }}
+        run: |
+          $image = "ghcr.io/$($env:GITHUB_REPOSITORY.ToLowerInvariant())"
+          $evidencePath = Join-Path $env:RUNNER_TEMP 'release-evidence.json'
+          [System.IO.File]::WriteAllText(
+            $evidencePath,
+            $env:RELEASE_EVIDENCE_JSON,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          $verified = ./scripts/verify-published-manifest.ps1 `
+            -ImageReference "$image@$env:MANIFEST_DIGEST" `
+            -ExpectedDigest $env:MANIFEST_DIGEST `
+            -ExpectedRevision $env:SOURCE_REVISION `
+            -Repository $env:GITHUB_REPOSITORY `
+            -SignerWorkflow "$env:GITHUB_REPOSITORY/.github/workflows/multiarch-build.yml" `
+            -SourceRef 'refs/heads/main' `
+            -VerifyAttestations
+          if ($verified -ne $env:MANIFEST_DIGEST) {
+            throw 'Immutable candidate verification returned an unexpected digest.'
+          }
+          ./scripts/verify-release-evidence.ps1 `
+            -EvidencePath $evidencePath `
+            -ExpectedRevision $env:SOURCE_REVISION `
+            -ExpectedDigest $env:MANIFEST_DIGEST `
+            -ExpectedReleaseTag $env:RELEASE_TAG `
+            -ImageReference "$image@$env:MANIFEST_DIGEST" `
+            -Repository $env:GITHUB_REPOSITORY `
+            -GitHubToken $env:GITHUB_TOKEN
+
+      - name: Promote accepted digest to the release image tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+        run: |
+          $image = "ghcr.io/$($env:GITHUB_REPOSITORY.ToLowerInvariant())"
+          $release = $image + ':' + $env:RELEASE_TAG
+          $latest = $image + ':latest'
+          $arguments = @('buildx', 'imagetools', 'create', '--tag', $release, '--tag', $latest, "$image@$env:MANIFEST_DIGEST")
+          docker @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to promote the accepted digest $env:MANIFEST_DIGEST to the stable release aliases."
+          }
+          foreach ($tag in @($release, $latest)) {
+            $promoted = ./scripts/verify-published-manifest.ps1 `
+              -ImageReference $tag `
+              -ExpectedDigest $env:MANIFEST_DIGEST `
+              -ExpectedRevision $env:SOURCE_REVISION `
+              -Repository $env:GITHUB_REPOSITORY `
+              -SignerWorkflow "$env:GITHUB_REPOSITORY/.github/workflows/multiarch-build.yml" `
+              -SourceRef 'refs/heads/main' `
+              -VerifyAttestations
+            if ($promoted -ne $env:MANIFEST_DIGEST) {
+              throw "Stable image tag $tag resolved to $promoted instead of the accepted digest."
+            }
+          }

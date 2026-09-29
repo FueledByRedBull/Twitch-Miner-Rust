@@ -264,23 +264,20 @@ async fn persist_runtime_cache(
     true
 }
 
-fn atomic_write(path: &Path, payload: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, payload: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(STREAK_CACHE_FILE_NAME);
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    let result = (|| {
+    let result: std::io::Result<()> = (|| {
         let mut file = open_private_file(&temporary)?;
         file.write_all(payload)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        match fs::rename(&temporary, path) {
-            Ok(()) => Ok(()),
-            #[cfg(windows)]
-            Err(_) if path.is_file() => replace_windows_file(&temporary, path),
-            Err(error) => Err(error),
-        }
+        drop(file);
+        fs::rename(&temporary, path)?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -307,24 +304,6 @@ fn open_private_file(path: &Path) -> std::io::Result<fs::File> {
         .truncate(true)
         .write(true)
         .open(path)
-}
-
-#[cfg(windows)]
-fn replace_windows_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
-    let replacement = path.with_file_name(format!(
-        ".{}.{}.replace.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(STREAK_CACHE_FILE_NAME),
-        std::process::id()
-    ));
-    fs::rename(path, &replacement)?;
-    if let Err(error) = fs::rename(temporary, path) {
-        let _ = fs::rename(&replacement, path);
-        return Err(error);
-    }
-    let _ = fs::remove_file(replacement);
-    Ok(())
 }
 
 #[cfg(test)]

@@ -40,6 +40,8 @@ const EVENTSUB_WELCOME_TIMEOUT: Duration = Duration::from_secs(15);
 const EVENTSUB_SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 const EVENTSUB_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const EVENTSUB_KEEPALIVE_GRACE: Duration = Duration::from_secs(5);
+const EVENTSUB_CAPACITY_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+const EVENTSUB_CAPACITY_RECHECKS: usize = 3;
 
 type EventSubSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -48,6 +50,7 @@ struct EventSubDeadlines {
     connect: Duration,
     welcome: Duration,
     session_setup: Duration,
+    capacity_recheck: Duration,
 }
 
 impl EventSubDeadlines {
@@ -55,6 +58,7 @@ impl EventSubDeadlines {
         connect: EVENTSUB_CONNECT_TIMEOUT,
         welcome: EVENTSUB_WELCOME_TIMEOUT,
         session_setup: EVENTSUB_SESSION_SETUP_TIMEOUT,
+        capacity_recheck: EVENTSUB_CAPACITY_RECHECK_INTERVAL,
     };
 }
 
@@ -194,7 +198,7 @@ pub struct EventSubSetupReport {
     pub capabilities: Vec<EventSubStreamerCapability>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct SubscriptionRequest {
     streamer_index: usize,
     subscription_type: String,
@@ -233,6 +237,7 @@ struct SubscriptionResponseEntry {
 #[derive(Debug, Deserialize)]
 struct SubscriptionTransport {
     method: String,
+    #[serde(default)]
     session_id: String,
 }
 
@@ -301,27 +306,38 @@ impl EventSubClient {
         }
 
         let mut deduper = MessageDeduper::default();
-        let (mut socket, mut keepalive_timeout, mut report) = self
-            .connect_socket(
+        let (mut socket, mut keepalive_timeout, mut report, mut session_id) =
+            Box::pin(self.connect_socket(
                 &self.settings.websocket_url,
                 tracked_streamers,
                 deadlines,
                 None,
-            )
+            ))
             .await?;
         send_setup(&sender, &report).await?;
 
         loop {
-            let carried_report = report.clone();
-            match listen_socket(
-                &mut socket,
-                tracked_streamers,
-                &sender,
-                &mut deduper,
-                keepalive_timeout,
-            )
-            .await
-            {
+            let result = {
+                let listening = listen_socket(
+                    &mut socket,
+                    tracked_streamers,
+                    &sender,
+                    &mut deduper,
+                    keepalive_timeout,
+                );
+                tokio::pin!(listening);
+                tokio::select! {
+                    result = &mut listening => result,
+                    result = Box::pin(self.recheck_capacity(
+                        &session_id, tracked_streamers, &mut report, &sender,
+                        deadlines.capacity_recheck,
+                    )) => {
+                        result?;
+                        listening.await
+                    }
+                }
+            };
+            match result {
                 Err(EventSubError::ReconnectRequested { reconnect_url }) => {
                     validate_reconnect_url(&reconnect_url)?;
 
@@ -332,7 +348,7 @@ impl EventSubClient {
                         &reconnect_url,
                         tracked_streamers,
                         deadlines,
-                        Some(carried_report),
+                        Some(report.clone()),
                     ));
                     let mut old_socket = Box::pin(listen_socket(
                         &mut socket,
@@ -341,7 +357,12 @@ impl EventSubClient {
                         &mut deduper,
                         keepalive_timeout,
                     ));
-                    let (replacement_socket, replacement_keepalive, replacement_report) = tokio::select! {
+                    let (
+                        replacement_socket,
+                        replacement_keepalive,
+                        replacement_report,
+                        replacement_session,
+                    ) = tokio::select! {
                         biased;
                         result = &mut old_socket => match result {
                             // The old socket is no longer usable, but the replacement
@@ -361,6 +382,7 @@ impl EventSubClient {
                     socket = replacement_socket;
                     keepalive_timeout = replacement_keepalive;
                     report = replacement_report;
+                    session_id = replacement_session;
                 }
                 result => return result,
             }
@@ -373,7 +395,7 @@ impl EventSubClient {
         tracked_streamers: &[Streamer],
         deadlines: EventSubDeadlines,
         inherited_subscriptions: Option<EventSubSetupReport>,
-    ) -> Result<(EventSubSocket, Duration, EventSubSetupReport), EventSubError> {
+    ) -> Result<(EventSubSocket, Duration, EventSubSetupReport, String), EventSubError> {
         let setup = async {
             let (mut socket, _) =
                 tokio::time::timeout(deadlines.connect, connect_async(websocket_url))
@@ -399,7 +421,7 @@ impl EventSubClient {
                 // Twitch carries the subscriptions to the reconnect URL, but the count must be
                 // re-derived for the new session rather than reported from memory.
                 Some(previous) => {
-                    self.reconcile_inherited_report(&session_id, previous)
+                    self.reconcile_inherited_report(&session_id, tracked_streamers, previous)
                         .await?
                 }
                 None => {
@@ -410,7 +432,7 @@ impl EventSubClient {
             if report.active_subscriptions == 0 {
                 return Err(EventSubError::NoSubscriptions);
             }
-            Ok((socket, keepalive_timeout, report))
+            Ok((socket, keepalive_timeout, report, session_id))
         };
         tokio::time::timeout(deadlines.session_setup, setup)
             .await
@@ -438,6 +460,23 @@ impl EventSubClient {
             existing.total_cost,
             existing.max_total_cost,
         );
+        let created_ids = self
+            .create_planned_subscriptions(session_id, requests, &mut report)
+            .await?;
+        if self.settings.verify_subscriptions && !created_ids.is_empty() {
+            self.verify_created_subscriptions(session_id, &created_ids)
+                .await?;
+            report.verified = true;
+        }
+        Ok(report)
+    }
+
+    async fn create_planned_subscriptions(
+        &self,
+        session_id: &str,
+        requests: Vec<SubscriptionRequest>,
+        report: &mut EventSubSetupReport,
+    ) -> Result<HashSet<String>, EventSubError> {
         let mut created_ids = HashSet::new();
         for request in requests {
             match self
@@ -460,7 +499,7 @@ impl EventSubClient {
                     if !self.settings.allow_prediction_scope_fallback {
                         return Err(error);
                     }
-                    record_subscription_failure(&mut report, &request, "unauthorized");
+                    record_subscription_failure(report, &request, "unauthorized");
                     // Existing sessions may predate the optional prediction scope. Keep
                     // stream presence available and report the missing prediction capability.
                     tracing::warn!(
@@ -471,7 +510,7 @@ impl EventSubClient {
                 }
                 Err(error) => {
                     let failure_class = subscription_failure_class(&error);
-                    record_subscription_failure(&mut report, &request, failure_class);
+                    record_subscription_failure(report, &request, failure_class);
                     tracing::warn!(
                         error_class = failure_class,
                         subscription_type = %request.subscription_type,
@@ -480,12 +519,218 @@ impl EventSubClient {
                 }
             }
         }
-        if self.settings.verify_subscriptions && !created_ids.is_empty() {
-            self.verify_created_subscriptions(session_id, &created_ids)
-                .await?;
+        refresh_active_sources(report);
+        Ok(created_ids)
+    }
+
+    // Recheck only during the cleanup grace period after setup. This is not a
+    // periodic allocator: keep reading the socket while the bounded HTTP work runs.
+    async fn recheck_capacity(
+        &self,
+        session_id: &str,
+        tracked_streamers: &[Streamer],
+        report: &mut EventSubSetupReport,
+        sender: &mpsc::Sender<EventSubConnectionEvent>,
+        interval: Duration,
+    ) -> Result<(), EventSubError> {
+        for _ in 0..EVENTSUB_CAPACITY_RECHECKS {
+            tokio::time::sleep(interval).await;
+            let result = tokio::time::timeout(
+                EVENTSUB_SESSION_SETUP_TIMEOUT,
+                self.reconcile_capacity(session_id, tracked_streamers, report),
+            )
+            .await
+            .unwrap_or(Err(EventSubError::Timeout(
+                EventSubTimeoutStage::SessionSetup,
+            )));
+            // A timeout may follow a successful mutation; publish the conservative
+            // partial report too, without tearing down the healthy socket.
+            refresh_active_sources(report);
+            send_setup(sender, report).await?;
+            if let Err(error) = result {
+                tracing::warn!(
+                    error_class = subscription_failure_class(&error),
+                    "EventSub capacity recheck failed; retaining active subscriptions"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_session_subscriptions(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<SubscriptionResponseEntry>, u32, u32), EventSubError> {
+        let mut owned = Vec::new();
+        let mut cursor = None;
+        let mut metadata = None;
+        for _ in 0..EVENTSUB_MAX_LIST_PAGES {
+            let page = self.list_subscriptions_page(cursor.as_deref()).await?;
+            if page.max_total_cost == 0 || page.total_cost > page.max_total_cost {
+                return Err(EventSubError::Protocol(
+                    "subscription list has invalid cost metadata",
+                ));
+            }
+            if metadata.is_some_and(|prior| prior != (page.total_cost, page.max_total_cost)) {
+                return Err(EventSubError::Protocol(
+                    "subscription cost changed during pagination",
+                ));
+            }
+            metadata = Some((page.total_cost, page.max_total_cost));
+            owned.extend(page.data.into_iter().filter(|entry| {
+                entry.status == "enabled"
+                    && entry.transport.method == "websocket"
+                    && entry.transport.session_id == session_id
+            }));
+            cursor = page
+                .pagination
+                .cursor
+                .filter(|value| !value.trim().is_empty());
+            if cursor.is_none() {
+                break;
+            }
+        }
+        if cursor.is_some() {
+            return Err(EventSubError::Protocol(
+                "subscription list exceeded the bounded page limit",
+            ));
+        }
+        let (total_cost, max_total_cost) =
+            metadata.ok_or(EventSubError::Protocol("subscription list was empty"))?;
+        Ok((owned, total_cost, max_total_cost))
+    }
+
+    async fn reconcile_capacity(
+        &self,
+        session_id: &str,
+        tracked_streamers: &[Streamer],
+        report: &mut EventSubSetupReport,
+    ) -> Result<(), EventSubError> {
+        let (owned, total_cost, max_total_cost) =
+            self.list_session_subscriptions(session_id).await?;
+        report.total_cost = total_cost;
+        report.max_total_cost = max_total_cost;
+        let (all_requests, _) = subscription_plan_with_capacity(
+            tracked_streamers,
+            self.settings
+                .authorized_prediction_broadcaster_id
+                .as_deref(),
+            u32::MAX,
+            0,
+            max_total_cost,
+        );
+        let mut ids = HashSet::new();
+        let mut owned_requests = Vec::new();
+        let mut own_cost = 0_u32;
+        for entry in &owned {
+            let request = all_requests
+                .iter()
+                .find(|request| subscription_matches(entry, request))
+                .ok_or(EventSubError::Protocol(
+                    "current session contains an unknown subscription",
+                ))?;
+            // Never infer ownership from a type alone, nor delete unknown entries.
+            if entry.id.trim().is_empty()
+                || !ids.insert(entry.id.clone())
+                || owned_requests.contains(&request)
+            {
+                return Err(EventSubError::Protocol(
+                    "current session contains unknown or duplicate subscriptions",
+                ));
+            }
+            own_cost = own_cost
+                .checked_add(entry.cost)
+                .ok_or(EventSubError::Protocol("subscription cost overflow"))?;
+            owned_requests.push(request);
+        }
+        let external_cost = total_cost
+            .checked_sub(own_cost)
+            .ok_or(EventSubError::Protocol("session cost exceeds total cost"))?;
+        let (requests, mut refreshed) = subscription_plan_with_capacity(
+            tracked_streamers,
+            self.settings
+                .authorized_prediction_broadcaster_id
+                .as_deref(),
+            max_total_cost - external_cost,
+            total_cost,
+            max_total_cost,
+        );
+        // External consumers gaining capacity must not evict our working set.
+        if requests.len() < owned.len() {
+            return Ok(());
+        }
+        for (entry, request) in owned.iter().zip(&owned_requests) {
+            refreshed.capabilities[request.streamer_index]
+                .active_subscription_types
+                .push(entry.subscription_type.clone());
+        }
+        refreshed.active_subscriptions = owned.len();
+        refreshed.verified = true;
+        *report = refreshed;
+        refresh_active_sources(report);
+
+        // A reduced odd budget may have funded a raid. Replace only that session's
+        // now-lower-priority entries so the existing presence-first planner can fill pairs.
+        for (entry, request) in owned.iter().zip(&owned_requests) {
+            if requests
+                .iter()
+                .any(|request| subscription_matches(entry, request))
+            {
+                continue;
+            }
+            report.verified = false;
+            self.delete_subscription(&entry.id).await?;
+            ids.remove(&entry.id);
+            report.total_cost = report.total_cost.saturating_sub(entry.cost);
+            report.active_subscriptions -= 1;
+            report.capabilities[request.streamer_index]
+                .active_subscription_types
+                .retain(|kind| kind != &entry.subscription_type);
+        }
+        let missing = requests
+            .into_iter()
+            .filter(|request| {
+                !owned
+                    .iter()
+                    .any(|entry| subscription_matches(entry, request))
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            report.verified = false;
+            ids.extend(
+                self.create_planned_subscriptions(session_id, missing, report)
+                    .await?,
+            );
+            self.verify_created_subscriptions(session_id, &ids).await?;
             report.verified = true;
         }
-        Ok(report)
+        refresh_active_sources(report);
+        Ok(())
+    }
+
+    async fn delete_subscription(&self, id: &str) -> Result<(), EventSubError> {
+        let response = tokio::time::timeout(
+            EVENTSUB_HTTP_TIMEOUT,
+            self.settings
+                .http_client
+                .delete(&self.settings.subscriptions_url)
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.settings.auth_token),
+                )
+                .header("Client-Id", &self.settings.client_id)
+                .query(&[("id", id)])
+                .send(),
+        )
+        .await
+        .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::SessionSetup))??;
+        if response.status() != StatusCode::NO_CONTENT {
+            return Err(EventSubError::HttpStatus {
+                status: response.status(),
+                context: "delete owned eventsub subscription",
+            });
+        }
+        Ok(())
     }
 
     /// Re-derives the active subscription count for a session inherited through
@@ -494,50 +739,55 @@ impl EventSubClient {
     async fn reconcile_inherited_report(
         &self,
         session_id: &str,
+        tracked_streamers: &[Streamer],
         previous: EventSubSetupReport,
     ) -> Result<EventSubSetupReport, EventSubError> {
-        let mut expected_types = previous
-            .capabilities
+        let (requests, _) = subscription_plan_with_capacity(
+            tracked_streamers,
+            self.settings
+                .authorized_prediction_broadcaster_id
+                .as_deref(),
+            u32::MAX,
+            0,
+            EVENTSUB_MAX_TOTAL_COST,
+        );
+        let expected = requests
             .iter()
-            .flat_map(|capability| capability.active_subscription_types.iter().cloned())
+            .filter(|request| {
+                previous.capabilities.iter().any(|capability| {
+                    capability.streamer_index == request.streamer_index
+                        && capability
+                            .active_subscription_types
+                            .contains(&request.subscription_type)
+                })
+            })
             .collect::<Vec<_>>();
-        expected_types.sort_unstable();
         let mut report = previous;
-        let mut active_types = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..EVENTSUB_MAX_LIST_PAGES {
-            let response = self.list_subscriptions_page(cursor.as_deref()).await?;
-            report.total_cost = response.total_cost;
-            report.max_total_cost = response.max_total_cost;
-            active_types.extend(response.data.iter().filter_map(|subscription| {
-                if subscription.transport.method == "websocket"
-                    && subscription.transport.session_id == session_id
-                    && subscription.status == "enabled"
-                {
-                    Some(subscription.subscription_type.clone())
-                } else {
-                    None
-                }
-            }));
-            cursor = response
-                .pagination
-                .cursor
-                .filter(|value| !value.trim().is_empty());
-            if cursor.is_none() {
-                active_types.sort_unstable();
-                if active_types != expected_types {
-                    return Err(EventSubError::Protocol(
-                        "inherited EventSub subscriptions did not match prior session",
-                    ));
-                }
-                report.active_subscriptions = active_types.len();
-                report.verified = true;
-                return Ok(report);
-            }
+        let (owned, total_cost, max_total_cost) =
+            self.list_session_subscriptions(session_id).await?;
+        let mut ids = HashSet::new();
+        if owned.len() != report.active_subscriptions
+            || owned.len() != expected.len()
+            || owned
+                .iter()
+                .any(|entry| entry.id.trim().is_empty() || !ids.insert(&entry.id))
+            || expected.iter().any(|request| {
+                owned
+                    .iter()
+                    .filter(|entry| subscription_matches(entry, request))
+                    .count()
+                    != 1
+            })
+        {
+            return Err(EventSubError::Protocol(
+                "inherited EventSub subscriptions did not match prior session",
+            ));
         }
-        Err(EventSubError::Protocol(
-            "subscription list exceeded the bounded page limit",
-        ))
+        report.total_cost = total_cost;
+        report.max_total_cost = max_total_cost;
+        report.active_subscriptions = owned.len();
+        report.verified = true;
+        Ok(report)
     }
 
     async fn create_subscription(
@@ -583,6 +833,11 @@ impl EventSubClient {
             ));
         };
         validate_created_subscription(subscription, subscription_type, session_id)?;
+        if subscription.condition != *condition {
+            return Err(EventSubError::Protocol(
+                "create subscription condition does not match the request",
+            ));
+        }
         if response.max_total_cost == 0 || response.total_cost > response.max_total_cost {
             return Err(EventSubError::Protocol(
                 "create subscription response has invalid cost metadata",
@@ -601,38 +856,21 @@ impl EventSubClient {
         session_id: &str,
         created_ids: &HashSet<String>,
     ) -> Result<(), EventSubError> {
+        let (owned, _, _) = self.list_session_subscriptions(session_id).await?;
         let mut enabled_ids = HashSet::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..EVENTSUB_MAX_LIST_PAGES {
-            let response = self.list_subscriptions_page(cursor.as_deref()).await?;
-            for subscription in response.data {
-                if subscription.transport.method == "websocket"
-                    && subscription.transport.session_id == session_id
-                    && subscription.status == "enabled"
-                {
-                    if subscription.id.trim().is_empty() {
-                        return Err(EventSubError::Protocol("listed subscription id is empty"));
-                    }
-                    enabled_ids.insert(subscription.id);
-                }
-            }
-            cursor = response
-                .pagination
-                .cursor
-                .filter(|value| !value.trim().is_empty());
-            if cursor.is_none() {
-                return if enabled_ids == *created_ids {
-                    Ok(())
-                } else {
-                    Err(EventSubError::Protocol(
-                        "listed subscriptions do not match the created session set",
-                    ))
-                };
+        for entry in owned {
+            if entry.id.trim().is_empty() || !enabled_ids.insert(entry.id) {
+                return Err(EventSubError::Protocol(
+                    "listed subscription id is empty or duplicated",
+                ));
             }
         }
-        Err(EventSubError::Protocol(
-            "subscription list exceeded the bounded page limit",
-        ))
+        if enabled_ids != *created_ids {
+            return Err(EventSubError::Protocol(
+                "listed subscriptions do not match the created session set",
+            ));
+        }
+        Ok(())
     }
 
     async fn list_subscriptions_page(
@@ -812,6 +1050,38 @@ fn subscription_failure_class(error: &EventSubError) -> &'static str {
         | EventSubError::Revoked { .. }
         | EventSubError::NoSubscriptions
         | EventSubError::ReconnectRequested { .. } => "transport",
+    }
+}
+
+fn subscription_matches(entry: &SubscriptionResponseEntry, request: &SubscriptionRequest) -> bool {
+    entry.subscription_type == request.subscription_type && entry.condition == request.condition
+}
+
+fn refresh_active_sources(report: &mut EventSubSetupReport) {
+    for capability in &mut report.capabilities {
+        capability.presence_source = if ["stream.online", "stream.offline"].iter().all(|kind| {
+            capability
+                .active_subscription_types
+                .iter()
+                .any(|active| active == kind)
+        }) {
+            "eventsub+gql-polling"
+        } else {
+            "gql-polling"
+        }
+        .to_string();
+        if capability.raid_source != "disabled" {
+            capability.raid_source = if capability
+                .active_subscription_types
+                .iter()
+                .any(|kind| kind == "channel.raid")
+            {
+                "eventsub+pubsub-compatibility"
+            } else {
+                "pubsub-compatibility"
+            }
+            .to_string();
+        }
     }
 }
 

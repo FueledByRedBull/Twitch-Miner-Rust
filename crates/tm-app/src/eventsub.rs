@@ -5,7 +5,9 @@ use tm_pubsub::{EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
 use tm_twitch::{TwitchClient, TwitchFailureClass};
 
 use crate::observability::AppObservability;
-use crate::runtime_effects::{execute_runtime_effects, RuntimeEffectContext};
+use crate::runtime_effects::{
+    execute_runtime_effects, reconcile_prediction_journal, RuntimeEffectContext,
+};
 use crate::status::HealthTracker;
 use crate::utilities::time_now;
 
@@ -76,9 +78,16 @@ async fn listen_once(
         let tracked_streamers = context.tracked_streamers.clone();
         async move { client.connect_and_listen(&tracked_streamers, sender).await }
     });
+    let _connection_guard = crate::shutdown::AbortTasksOnDrop(vec![connect.abort_handle()]);
     tokio::pin!(connect);
     let connection_result = loop {
+        if *stop.borrow() || stop.has_changed().is_err() {
+            connect.as_mut().abort();
+            let _ = connect.as_mut().await;
+            return None;
+        }
         tokio::select! {
+            biased;
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
                     connect.as_mut().abort();
@@ -86,10 +95,7 @@ async fn listen_once(
                     return None;
                 }
             }
-            message = receiver.recv() => {
-                let Some(message) = message else {
-                    continue;
-                };
+            Some(message) = receiver.recv() => {
                 if matches!(&message, EventSubConnectionEvent::Heartbeat) {
                     *failure_attempt = 0;
                 }
@@ -103,6 +109,9 @@ async fn listen_once(
         }
     };
     while let Ok(message) = receiver.try_recv() {
+        if *stop.borrow() || stop.has_changed().is_err() {
+            return None;
+        }
         if process_eventsub_message(context, message).await {
             return None;
         }
@@ -275,10 +284,14 @@ async fn poll_presence_fallback(
                 continue;
             };
             let channel_id = streamer.channel_id.clone();
+            let Ok(Some(generation)) = runtime.begin_stream_update(channel_id.clone()).await else {
+                failure_class.get_or_insert("state-update");
+                continue;
+            };
             let twitch = Arc::clone(twitch);
             queries.spawn(async move {
                 let result = twitch.is_stream_live(&channel_id).await;
-                (streamer_index, channel_id, result)
+                (streamer_index, channel_id, generation, result)
             });
         }
 
@@ -286,9 +299,9 @@ async fn poll_presence_fallback(
             continue;
         };
         match result {
-            Ok((streamer_index, channel_id, Ok(online))) => {
+            Ok((streamer_index, channel_id, generation, Ok(online))) => {
                 match runtime
-                    .set_presence_if_changed(&channel_id, online, time_now())
+                    .set_presence_if_current(&channel_id, online, generation, time_now())
                     .await
                 {
                     Ok(true) => {
@@ -326,7 +339,7 @@ async fn poll_presence_fallback(
                     }
                 }
             }
-            Ok((streamer_index, _, Err(error))) => {
+            Ok((streamer_index, _, _, Err(error))) => {
                 let error_class = classify_presence_poll_error(error.failure_class());
                 failure_class.get_or_insert(error_class);
                 tracing::warn!(
@@ -407,6 +420,21 @@ async fn handle_eventsub_message(
                             );
                         }
                     }
+                    if let Err(error) = reconcile_prediction_journal(
+                        &context.effects.runtime,
+                        &context.effects.prediction_journal,
+                        &context.effects.persistent_user_id,
+                        &log_event,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            task = "eventsub",
+                            error_class = "prediction-journal",
+                            %error,
+                            "failed to reconcile prediction placement journal"
+                        );
+                    }
                     let effect_context = context.runtime_effect_context();
                     if let Err(error) =
                         execute_runtime_effects(&effect_context, application.effects).await
@@ -474,7 +502,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        classify_eventsub_error, eventsub_reconnect_delay, poll_presence_fallback,
+        classify_eventsub_error, eventsub_reconnect_delay, listen_once, poll_presence_fallback,
         process_eventsub_message, record_connection_result, update_presence_fallback,
         EventSubTaskContext,
     };
@@ -790,8 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_and_heartbeat_restore_eventsub_health_and_fallback_state() -> anyhow::Result<()>
-    {
+    async fn setup_heartbeat_and_closed_queue_preserve_eventsub_recovery() -> anyhow::Result<()> {
         let config = tm_config::ConfigFile {
             streamers: vec![String::from("alice")],
             ..tm_config::ConfigFile::default()
@@ -807,7 +834,7 @@ mod tests {
         health.register("eventsub", Duration::from_secs(60));
         health.failure("eventsub", "connection-reset");
         let (fallback_tx, fallback_rx) = tokio::sync::watch::channel(vec![0]);
-        let context = EventSubTaskContext {
+        let mut context = EventSubTaskContext {
             effects: RuntimeEffectContext::new(
                 runtime,
                 Arc::new(TwitchClient::with_client_and_endpoints(
@@ -856,6 +883,21 @@ mod tests {
         health.failure("eventsub", "keepalive-timeout");
         assert!(!process_eventsub_message(&context, EventSubConnectionEvent::Heartbeat).await);
         assert_eq!(health.task_consecutive_failures("eventsub"), Some(0));
+        // No subscriptions exits before networking and closes the event queue.
+        // That closure must not hide the completed connection task from select.
+        context.tracked_streamers.clear();
+        let (_sender, mut stop) = tokio::sync::watch::channel(false);
+        let mut attempts = 0;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            listen_once(&mut stop, &context, &mut attempts),
+        )
+        .await
+        .expect("closed queue must allow connection completion")
+        .expect("connection should finish without shutdown");
+        assert!(matches!(result, Ok(Err(EventSubError::NoSubscriptions))));
+        assert!(record_connection_result(result, &health, &mut attempts));
+        assert_eq!(attempts, 1);
         Ok(())
     }
 

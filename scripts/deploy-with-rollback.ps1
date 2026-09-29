@@ -25,6 +25,14 @@ param(
     [int]$RuntimeGid = 1000,
     [ValidateRange(30, 600)]
     [int]$HealthTimeoutSeconds = 180,
+
+    [ValidateSet('linux/amd64', 'linux/arm64')]
+    [string]$Platform = 'linux/arm64',
+
+    [string]$DeploymentStateFile = '',
+
+    [string]$DataBackupPath = '',
+
     [switch]$ValidateOnly
 )
 
@@ -76,8 +84,7 @@ function Test-RuntimeStatusReady(
         ($Now - $Status.heartbeat_at_unix) -le 120 -and
         $tasks.Count -gt 0 -and
         @($tasks | Where-Object {
-                $_.consecutive_failures -ne 0 -or
-                $null -ne $_.last_error_class
+                $_.consecutive_failures -ne 0
             }).Count -eq 0 -and
         $null -ne $eventSub -and
         $eventSub.active_subscriptions -eq $eventSub.planned_subscriptions -and
@@ -86,8 +93,7 @@ function Test-RuntimeStatusReady(
         $acknowledgedTopics -eq $pubSub.total_topics -and
         @($pubSubCapabilities | Where-Object {
                 $null -ne $_.failure_class
-            }).Count -eq 0 -and
-        $null -eq $Status.counters.last_error_class
+            }).Count -eq 0
 }
 
 if ($ValidateOnly) {
@@ -117,6 +123,12 @@ if ($ValidateOnly) {
     }
     if (-not (Test-RuntimeStatusReady $readyStatus $validationRevision 100 120)) {
         throw 'Fresh complete deployment status validation failed.'
+    }
+    $recoveredStatus = $readyStatus | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $recoveredStatus.tasks[0].last_error_class = 'historical-timeout'
+    $recoveredStatus.counters.last_error_class = 'historical-timeout'
+    if (-not (Test-RuntimeStatusReady $recoveredStatus $validationRevision 100 120)) {
+        throw 'Recovered task status with historical errors was rejected.'
     }
     $staleStatus = $readyStatus | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     $staleStatus.started_at_unix = 99
@@ -149,12 +161,33 @@ if (-not (Test-Path -LiteralPath (Join-Path $DataDir 'config.json') -PathType Le
 
 $resolvedCompose = (Resolve-Path -LiteralPath $ComposeFile).Path
 $resolvedData = (Resolve-Path -LiteralPath $DataDir).Path
+if ($resolvedData -match '[\r\n]') {
+    throw 'Runtime data directory paths cannot contain newline characters in the Compose environment file.'
+}
+$resolvedState = if ([string]::IsNullOrWhiteSpace($DeploymentStateFile)) {
+    Join-Path (Split-Path -Parent $resolvedCompose) '.twitch-miner.env'
+} elseif ([System.IO.Path]::IsPathRooted($DeploymentStateFile)) {
+    [System.IO.Path]::GetFullPath($DeploymentStateFile)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $DeploymentStateFile))
+}
+if ($resolvedState -eq $resolvedData -or $resolvedState.StartsWith(
+        $resolvedData + [System.IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Deployment state must remain outside the runtime data directory.'
+}
 $runtimeUser = "${RuntimeUid}:${RuntimeGid}"
 $oldImage = $env:TWITCH_MINER_IMAGE
 $oldDataDir = $env:TWITCH_MINER_DATA_DIR
 $oldUid = $env:UID
 $oldGid = $env:GID
 $rollbackRecoveryRequired = $false
+$dataSnapshotAvailable = $false
+$dataSnapshotArchive = $null
+$previousStateExisted = Test-Path -LiteralPath $resolvedState -PathType Leaf
+$resolvedDataBackup = $null
+$resolvedStateBackup = $null
 
 function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
     & docker @Arguments
@@ -165,7 +198,7 @@ function Invoke-Docker([string[]]$Arguments, [string]$FailureMessage) {
 
 function Test-ImageConfig([string]$Image, [bool]$RequireJson) {
     $arguments = @(
-        'run', '--rm', '--platform', 'linux/arm64', '--user', $runtimeUser,
+        'run', '--rm', '--platform', $Platform, '--user', $runtimeUser,
         '--volume', "${resolvedData}:/data:ro", $Image,
         '--data-dir', '/data', '--check-config'
     )
@@ -177,14 +210,14 @@ function Test-ImageConfig([string]$Image, [bool]$RequireJson) {
 
 function Test-ImageCanary([string]$Image) {
     Invoke-Docker @(
-        'run', '--rm', '--platform', 'linux/arm64', '--user', $runtimeUser,
+        'run', '--rm', '--platform', $Platform, '--user', $runtimeUser,
         '--volume', "${resolvedData}:/data:ro", $Image,
         '--data-dir', '/data', '--canary'
     ) 'Read-only candidate canary failed'
 }
 
 function Test-ImageRevision([string]$Image, [string]$Revision) {
-    $version = (& docker run --rm --platform linux/arm64 $Image --version 2>&1) -join "`n"
+    $version = (& docker run --rm --platform $Platform $Image --version 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0 -or $version -notmatch [regex]::Escape($Revision)) {
         throw "Immutable image revision verification failed."
     }
@@ -217,7 +250,7 @@ function Test-DeployedService([string]$Revision, [string]$Label) {
                     $versionReady = $LASTEXITCODE -eq 0 -and $version -match [regex]::Escape($Revision)
                     & docker compose -f $resolvedCompose exec -T $Service /twitch-miner --health *> $null
                     $healthReady = $LASTEXITCODE -eq 0
-                    $statusText = (& docker compose -f $resolvedCompose exec -T $Service /twitch-miner --status --json 2>&1) -join "`n"
+                    $statusText = (& docker compose -f $resolvedCompose exec -T $Service /twitch-miner --status 2>&1) -join "`n"
                     $statusReady = $false
                     if ($LASTEXITCODE -eq 0) {
                         try {
@@ -255,6 +288,190 @@ function Assert-RunningRollbackImage {
     }
 }
 
+function Write-DeploymentState([string]$Image) {
+    $stateDirectory = Split-Path -Parent $resolvedState
+    New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+    $dataValue = ConvertTo-ComposeLiteral $resolvedData.Replace('\', '/')
+    $content = @(
+        "TWITCH_MINER_IMAGE=$Image"
+        "TWITCH_MINER_DATA_DIR=$dataValue"
+        "UID=$RuntimeUid"
+        "GID=$RuntimeGid"
+    ) -join "`n"
+    Write-AtomicUtf8NoBom $resolvedState "$content`n"
+    Protect-PrivateFile $resolvedState
+}
+
+function ConvertTo-ComposeLiteral([string]$Value) {
+    if ($Value -match '[\r\n]') {
+        throw 'Compose environment values cannot contain newline characters.'
+    }
+    return "'$(($Value -replace "'", "\'"))'"
+}
+
+function Write-AtomicUtf8NoBom([string]$Path, [string]$Content) {
+    $temporary = "$Path.tmp-$PID"
+    try {
+        [System.IO.File]::WriteAllText(
+            $temporary,
+            $Content,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [System.IO.File]::Replace($temporary, $Path, $null)
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
+function Restore-DeploymentState {
+    if (-not $previousStateExisted) {
+        Write-DeploymentState $RollbackImage
+        return
+    }
+
+    # Restore operator-owned entries from the previous state, but always pin
+    # the image back to the known rollback digest. Blindly copying the old file
+    # could leave a failed candidate or an unrelated image as the next default.
+    $lines = [System.IO.File]::ReadAllLines($resolvedStateBackup)
+    $restored = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^TWITCH_MINER_IMAGE=') {
+            if (-not $seen.ContainsKey('TWITCH_MINER_IMAGE')) {
+                $restored.Add("TWITCH_MINER_IMAGE=$RollbackImage")
+                $seen['TWITCH_MINER_IMAGE'] = $true
+            }
+        } elseif ($line -match '^TWITCH_MINER_DATA_DIR=') {
+            if (-not $seen.ContainsKey('TWITCH_MINER_DATA_DIR')) {
+                $restored.Add("TWITCH_MINER_DATA_DIR=$(ConvertTo-ComposeLiteral $resolvedData.Replace('\', '/'))")
+                $seen['TWITCH_MINER_DATA_DIR'] = $true
+            }
+        } elseif ($line -match '^UID=') {
+            if (-not $seen.ContainsKey('UID')) {
+                $restored.Add("UID=$RuntimeUid")
+                $seen['UID'] = $true
+            }
+        } elseif ($line -match '^GID=') {
+            if (-not $seen.ContainsKey('GID')) {
+                $restored.Add("GID=$RuntimeGid")
+                $seen['GID'] = $true
+            }
+        } else {
+            $restored.Add($line)
+        }
+    }
+    foreach ($entry in @(
+            "TWITCH_MINER_IMAGE=$RollbackImage",
+            "TWITCH_MINER_DATA_DIR=$(ConvertTo-ComposeLiteral $resolvedData.Replace('\', '/'))",
+            "UID=$RuntimeUid",
+            "GID=$RuntimeGid"
+        )) {
+        $key = $entry.Split('=', 2)[0]
+        if (-not $seen.ContainsKey($key)) {
+            $restored.Add($entry)
+            $seen[$key] = $true
+        }
+    }
+    Write-AtomicUtf8NoBom $resolvedState (($restored -join "`n") + "`n")
+    Protect-PrivateFile $resolvedState
+}
+
+function Protect-PrivateDirectory([string]$Path) {
+    if ($IsWindows) {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        & icacls $Path /inheritance:r /grant:r "$($identity):(OI)(CI)(F)" /T /C *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to restrict deployment backup permissions: $Path"
+        }
+    } elseif (Get-Command chmod -ErrorAction SilentlyContinue) {
+        & chmod 700 $Path
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to restrict deployment backup permissions: $Path"
+        }
+    }
+}
+
+function Protect-PrivateFile([string]$Path) {
+    if ($IsWindows) {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        & icacls $Path /inheritance:r /grant:r "$($identity):F" /C *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to restrict deployment backup file permissions: $Path"
+        }
+    } elseif (Get-Command chmod -ErrorAction SilentlyContinue) {
+        & chmod 600 $Path
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to restrict deployment backup file permissions: $Path"
+        }
+    }
+}
+
+function Backup-RuntimeData {
+    if (Test-Path -LiteralPath $resolvedDataBackup) {
+        throw "Runtime data backup already exists: $resolvedDataBackup"
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $resolvedDataBackup) -Force | Out-Null
+    New-Item -ItemType Directory -Path $resolvedDataBackup -Force | Out-Null
+    Protect-PrivateDirectory $resolvedDataBackup
+    $tar = if (-not $IsWindows) { Get-Command tar -ErrorAction SilentlyContinue } else { $null }
+    if ($null -ne $tar) {
+        $archive = Join-Path $resolvedDataBackup 'runtime-data.tar'
+        & $tar.Source -C $resolvedData --numeric-owner -cpf $archive .
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw 'Unable to create a metadata-preserving runtime data backup.'
+        }
+        Protect-PrivateFile $archive
+        $script:dataSnapshotArchive = $archive
+    } else {
+        Copy-Item -LiteralPath $resolvedData -Destination (Join-Path $resolvedDataBackup 'data') -Recurse -Force
+    }
+    $script:dataSnapshotAvailable = $true
+}
+
+function Restore-RuntimeData {
+    if (-not $script:dataSnapshotAvailable) {
+        return
+    }
+    $failedData = "$resolvedData.candidate-$PID"
+    if (Test-Path -LiteralPath $failedData) {
+        throw "Candidate data preservation path already exists: $failedData"
+    }
+    if ($null -ne $script:dataSnapshotArchive) {
+        $restoredData = "$resolvedData.restore-$PID"
+        if (Test-Path -LiteralPath $restoredData) {
+            throw "Runtime data restore path already exists: $restoredData"
+        }
+        New-Item -ItemType Directory -Path $restoredData -Force | Out-Null
+        $tar = Get-Command tar -ErrorAction Stop
+        & $tar.Source -C $restoredData --numeric-owner --same-owner -xpf $script:dataSnapshotArchive
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item -LiteralPath $restoredData -Recurse -Force
+            throw 'Unable to restore the metadata-preserving runtime data backup.'
+        }
+        Move-Item -LiteralPath $resolvedData -Destination $failedData
+        Move-Item -LiteralPath $restoredData -Destination $resolvedData
+    } else {
+        $restoreSource = Join-Path $resolvedDataBackup 'data'
+        $restoredData = "$resolvedData.restore-$PID"
+        if (Test-Path -LiteralPath $restoredData) {
+            throw "Runtime data restore path already exists: $restoredData"
+        }
+        New-Item -ItemType Directory -Path $restoredData -Force | Out-Null
+        foreach ($entry in @(Get-ChildItem -LiteralPath $restoreSource -Force)) {
+            Copy-Item -LiteralPath $entry.FullName -Destination $restoredData -Recurse -Force
+        }
+        Move-Item -LiteralPath $resolvedData -Destination $failedData
+        Move-Item -LiteralPath $restoredData -Destination $resolvedData
+    }
+    Write-Output "candidate-data-preserved: path=$failedData"
+}
+
 function Stop-RollbackForExclusiveCanary {
     Invoke-Docker @(
         'compose', '-f', $resolvedCompose, 'stop', '--timeout', '30', $Service
@@ -271,6 +488,11 @@ function Stop-RollbackForExclusiveCanary {
 }
 
 function Restore-RollbackService {
+    Invoke-Docker @(
+        'compose', '-f', $resolvedCompose, 'stop', '--timeout', '30', $Service
+    ) 'Candidate service did not stop cleanly before rollback'
+    Restore-RuntimeData
+    Restore-DeploymentState
     Set-ComposeImage $RollbackImage
     Invoke-Docker @('compose', '-f', $resolvedCompose, 'pull', $Service) 'Rollback pull failed'
     Invoke-Docker @(
@@ -286,17 +508,40 @@ try {
     Test-ImageRevision $RollbackImage $RollbackRevision
     Assert-RunningRollbackImage
 
-    $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-    $backup = "$resolvedCompose.pre-${timestamp}.bak"
+    $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + "-$PID"
+    $backupRoot = Join-Path (Get-Location) 'target/deploy-backups'
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    Protect-PrivateDirectory $backupRoot
+    $backup = Join-Path $backupRoot "compose-$timestamp.yml"
+    $resolvedStateBackup = Join-Path $backupRoot "deployment-state-$timestamp.env"
+    $resolvedDataBackup = if ([string]::IsNullOrWhiteSpace($DataBackupPath)) {
+        Join-Path $backupRoot "data-$timestamp"
+    } elseif ([System.IO.Path]::IsPathRooted($DataBackupPath)) {
+        [System.IO.Path]::GetFullPath($DataBackupPath)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $DataBackupPath))
+    }
+    if ($resolvedDataBackup -eq $resolvedData -or $resolvedDataBackup.StartsWith(
+            $resolvedData + [System.IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'Runtime data backup must remain outside the runtime data directory.'
+    }
     if (-not $PSCmdlet.ShouldProcess(
             $Service,
-            "Back up Compose, stop rollback normally, run the exclusive canary, deploy $CandidateImage, and restore rollback on failure"
+            "Back up Compose and runtime data, stop rollback normally, run the exclusive canary, deploy $CandidateImage, and restore rollback on failure"
         )) {
         return
     }
     Copy-Item -LiteralPath $resolvedCompose -Destination $backup -ErrorAction Stop
-    $rollbackRecoveryRequired = $true
+    Protect-PrivateFile $backup
+    if ($previousStateExisted) {
+        Copy-Item -LiteralPath $resolvedState -Destination $resolvedStateBackup -ErrorAction Stop
+        Protect-PrivateFile $resolvedStateBackup
+    }
     Stop-RollbackForExclusiveCanary
+    $rollbackRecoveryRequired = $true
+    Backup-RuntimeData
     Test-ImageCanary $CandidateImage
 
     Set-ComposeImage $CandidateImage
@@ -307,7 +552,9 @@ try {
     ) 'Candidate deployment failed'
 
     Test-DeployedService $CandidateRevision 'Candidate'
-    Write-Output "candidate-deployment-ok: revision=$CandidateRevision backup=$backup"
+    Write-DeploymentState $CandidateImage
+    Write-Output "candidate-deployment-ok: revision=$CandidateRevision state=$resolvedState backup=$backup data-backup=$resolvedDataBackup"
+    Write-Output "compose-command=docker compose --env-file `"$resolvedState`" -f `"$resolvedCompose`" up -d $Service"
 } catch {
     $candidateFailure = $_
     if (-not $rollbackRecoveryRequired) {
@@ -316,7 +563,8 @@ try {
     try {
         Restore-RollbackService
     } catch {
-        throw "Candidate failed and rollback health verification also failed. Candidate failure: $($candidateFailure.Exception.Message)"
+        $rollbackFailure = $_
+        throw "Candidate failed and rollback health verification also failed. Candidate failure: $($candidateFailure.Exception.Message) Rollback failure: $($rollbackFailure.Exception.Message)"
     }
     throw "Candidate verification failed; rollback was requested. $($candidateFailure.Exception.Message)"
 } finally {

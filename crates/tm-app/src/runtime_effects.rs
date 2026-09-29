@@ -1,7 +1,8 @@
 use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tm_domain::{PredictionDecision, Streamer};
@@ -10,6 +11,10 @@ use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
 
 use crate::context::{contribute_streamer_community_goals, refresh_streamer_context};
 use crate::observability::AppObservability;
+use crate::prediction_journal::{
+    PredictionPlacementJournal, PredictionPlacementRequest, PredictionPlacementReservation,
+    PredictionPlacementStatus,
+};
 use crate::status::HealthTracker;
 use crate::streak_recovery::milestone_resolves_current_stream;
 use crate::utilities::time_now;
@@ -21,6 +26,149 @@ pub(crate) struct RuntimeEffectContext {
     pub(crate) persistent_user_id: String,
     pub(crate) observability: AppObservability,
     pub(crate) health: HealthTracker,
+    pub(crate) prediction_journal: PredictionPlacementJournal,
+    prediction_scheduler: Option<PredictionEvaluationScheduler>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PredictionEvaluationScheduler {
+    sender: tokio::sync::mpsc::Sender<PredictionEvaluationWork>,
+    stop: tokio::sync::watch::Receiver<bool>,
+}
+
+struct PredictionEvaluationWork {
+    context: RuntimeEffectContext,
+    event_id: String,
+    enqueued_at: Instant,
+}
+
+impl PredictionEvaluationScheduler {
+    pub(crate) fn start(
+        stop: tokio::sync::watch::Receiver<bool>,
+        observability: &AppObservability,
+    ) -> Self {
+        const PREDICTION_QUEUE_CAPACITY: usize = 128;
+        const MAX_PENDING_PREDICTION_EVALUATIONS: usize = 64;
+        let (sender, receiver) = tokio::sync::mpsc::channel(PREDICTION_QUEUE_CAPACITY);
+        let worker = tokio::spawn(run_prediction_evaluation_scheduler(
+            stop.clone(),
+            receiver,
+            MAX_PENDING_PREDICTION_EVALUATIONS,
+        ));
+        observability.track_task(worker);
+        Self { sender, stop }
+    }
+
+    pub(crate) async fn enqueue(
+        &self,
+        context: RuntimeEffectContext,
+        event_id: String,
+        enqueued_at: Instant,
+    ) -> Result<()> {
+        if *self.stop.borrow() {
+            return Ok(());
+        }
+        let work = PredictionEvaluationWork {
+            context,
+            event_id,
+            enqueued_at,
+        };
+        let mut stop = self.stop.clone();
+        tokio::select! {
+            _changed = stop.changed() => Ok(()),
+            result = self.sender.send(work) => result.map_err(|_| anyhow::anyhow!("prediction evaluation scheduler closed")),
+        }
+    }
+}
+
+async fn run_prediction_evaluation_scheduler(
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    mut receiver: tokio::sync::mpsc::Receiver<PredictionEvaluationWork>,
+    max_pending: usize,
+) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(max_pending));
+    let mut channel_lanes = HashMap::<String, Arc<tokio::sync::Mutex<()>>>::new();
+    loop {
+        if *stop.borrow() {
+            break;
+        }
+        let Some(work) = (tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    None
+                } else {
+                    continue;
+                }
+            }
+            work = receiver.recv() => work,
+        }) else {
+            break;
+        };
+        let permit = tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    break;
+                }
+                continue;
+            }
+            permit = permits.clone().acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+        };
+        let Some(channel_key) = work
+            .context
+            .runtime
+            .active_prediction_channel_id(work.event_id.clone())
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let channel_lane = channel_lanes
+            .entry(channel_key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let PredictionEvaluationWork {
+            context,
+            event_id,
+            enqueued_at,
+        } = work;
+        let observability = context.observability.clone();
+        let mut child_stop = stop.clone();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            if !wait_for_prediction_delay_or_stop(&context, &event_id, &mut child_stop).await {
+                return;
+            }
+            let _channel_guard = tokio::select! {
+                changed = child_stop.changed() => {
+                    if changed.is_err() || *child_stop.borrow() {
+                        return;
+                    }
+                    channel_lane.lock().await
+                }
+                guard = channel_lane.lock() => guard,
+            };
+            if *child_stop.borrow() {
+                return;
+            }
+            context
+                .runtime
+                .metrics_handle()
+                .record_effect_queue_latency(enqueued_at.elapsed());
+            tokio::select! {
+                _changed = child_stop.changed() => {}
+                result = evaluate_prediction(&context, &event_id) => {
+                    if let Err(error) = result {
+                        tracing::warn!(event_id = %event_id, %error, "prediction evaluation failed");
+                    }
+                }
+            }
+        });
+        observability.track_task(task);
+    }
 }
 
 impl RuntimeEffectContext {
@@ -37,6 +185,28 @@ impl RuntimeEffectContext {
             persistent_user_id,
             observability,
             health,
+            prediction_journal: PredictionPlacementJournal::memory(),
+            prediction_scheduler: None,
+        }
+    }
+
+    pub(crate) fn new_with_journal(
+        runtime: tm_runtime::RuntimeHandle,
+        twitch: Arc<TwitchClient>,
+        persistent_user_id: String,
+        observability: AppObservability,
+        health: HealthTracker,
+        prediction_journal: PredictionPlacementJournal,
+        prediction_scheduler: PredictionEvaluationScheduler,
+    ) -> Self {
+        Self {
+            runtime,
+            twitch,
+            persistent_user_id,
+            observability,
+            health,
+            prediction_journal,
+            prediction_scheduler: Some(prediction_scheduler),
         }
     }
 }
@@ -80,6 +250,37 @@ pub(crate) async fn execute_runtime_effects(
     }
 
     Ok(())
+}
+
+pub(crate) async fn reconcile_prediction_journal(
+    runtime: &tm_runtime::RuntimeHandle,
+    journal: &PredictionPlacementJournal,
+    account_id: &str,
+    event: &tm_domain::MinerEvent,
+) -> Result<()> {
+    let tm_domain::MinerEvent::PredictionUser {
+        event_id,
+        kind,
+        result,
+    } = event
+    else {
+        return Ok(());
+    };
+    let authoritative = match kind {
+        tm_domain::PredictionUserKind::PredictionMade => true,
+        tm_domain::PredictionUserKind::PredictionResult => result
+            .as_ref()
+            .and_then(|value| value.get("type"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| matches!(value, "WIN" | "LOSE" | "REFUND")),
+    };
+    if !authoritative {
+        return Ok(());
+    }
+    let Some(channel_id) = runtime.prediction_channel_id(event_id).await? else {
+        return Ok(());
+    };
+    journal.confirm(account_id, &channel_id, event_id)
 }
 
 pub(crate) async fn execute_runtime_effect(
@@ -143,7 +344,7 @@ pub(crate) async fn execute_runtime_effect(
             .await?;
         }
         tm_runtime::RuntimeEffect::EvaluatePrediction { event_id } => {
-            spawn_prediction_evaluation(context, &event_id);
+            context.enqueue_prediction_evaluation(event_id).await?;
         }
         tm_runtime::RuntimeEffect::PredictionSettled {
             event_id,
@@ -168,6 +369,26 @@ pub(crate) async fn execute_runtime_effect(
     Ok(())
 }
 
+impl RuntimeEffectContext {
+    pub(crate) async fn enqueue_prediction_evaluation(&self, event_id: String) -> Result<()> {
+        self.enqueue_prediction_evaluation_at(event_id, Instant::now())
+            .await
+    }
+
+    pub(crate) async fn enqueue_prediction_evaluation_at(
+        &self,
+        event_id: String,
+        enqueued_at: Instant,
+    ) -> Result<()> {
+        if let Some(scheduler) = self.prediction_scheduler.as_ref() {
+            scheduler.enqueue(self.clone(), event_id, enqueued_at).await
+        } else {
+            spawn_prediction_evaluation(self, &event_id);
+            Ok(())
+        }
+    }
+}
+
 pub(crate) async fn handle_claim_bonus_effect(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
@@ -184,9 +405,18 @@ pub(crate) async fn handle_claim_bonus_effect(
         runtime.release_claim_bonus(channel_id, claim_id).await?;
         return Ok(());
     }
-    twitch
+    if let Err(error) = twitch
         .claim_bonus(channel_id, claim_id, Some(persistent_user_id))
-        .await?;
+        .await
+    {
+        // The production client rejects redirects, so a connect failure
+        // precedes sending the mutation. Let a later
+        // availability observation retry; ambiguous outcomes stay reserved.
+        if matches!(&error, tm_twitch::TwitchClientError::Http(error) if error.is_connect()) {
+            runtime.release_claim_bonus(channel_id, claim_id).await?;
+        }
+        return Err(error.into());
+    }
     health.record_claim();
     reconcile_claimed_bonus_streak(runtime, twitch, channel_id).await;
     if observability.show_claimed_bonus {
@@ -291,7 +521,7 @@ pub(crate) async fn handle_community_goal_effect(
         return Ok(());
     };
     if contribute_streamer_community_goals(twitch, &streamer).await? {
-        let effects = refresh_streamer_context(runtime, twitch, &streamer).await?;
+        let (effects, _) = refresh_streamer_context(runtime, twitch, &streamer).await?;
         for effect in effects {
             if let tm_runtime::RuntimeEffect::ClaimBonus {
                 channel_id,
@@ -351,8 +581,15 @@ pub(crate) async fn evaluate_prediction_after_delay(
     context: &RuntimeEffectContext,
     event_id: &str,
 ) -> Result<()> {
-    let Some((wait, event)) = prediction_wait_for_event(&context.runtime, event_id).await? else {
+    if !wait_for_prediction_delay(context, event_id).await? {
         return Ok(());
+    }
+    evaluate_prediction(context, event_id).await
+}
+
+async fn wait_for_prediction_delay(context: &RuntimeEffectContext, event_id: &str) -> Result<bool> {
+    let Some((wait, event)) = prediction_wait_for_event(&context.runtime, event_id).await? else {
+        return Ok(false);
     };
     tracing::info!(
         operation = "on_message",
@@ -362,7 +599,33 @@ pub(crate) async fn evaluate_prediction_after_delay(
     if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
-    evaluate_prediction(context, event_id).await
+    Ok(true)
+}
+
+async fn wait_for_prediction_delay_or_stop(
+    context: &RuntimeEffectContext,
+    event_id: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    if *stop.borrow() {
+        return false;
+    }
+    let Ok(Some((wait, event))) = prediction_wait_for_event(&context.runtime, event_id).await
+    else {
+        return false;
+    };
+    tracing::info!(
+        operation = "on_message",
+        "{}",
+        context.observability.prediction_wait_message(&event, wait)
+    );
+    if wait.is_zero() {
+        return !*stop.borrow();
+    }
+    tokio::select! {
+        changed = stop.changed() => changed.is_ok() && !*stop.borrow(),
+        () = tokio::time::sleep(wait) => !*stop.borrow(),
+    }
 }
 
 pub(crate) async fn prediction_wait_for_event(
@@ -377,6 +640,7 @@ pub(crate) async fn prediction_wait_for_event(
         .map(|event| (prediction_wait_duration(&event, time_now()), event)))
 }
 
+#[allow(clippy::too_many_lines)] // Keep the ordered policy gates and durable reservation together.
 pub(crate) async fn evaluate_prediction(
     context: &RuntimeEffectContext,
     event_id: &str,
@@ -400,6 +664,19 @@ pub(crate) async fn evaluate_prediction(
             .await?;
         return Ok(());
     };
+
+    // Rehydrate a durable reservation before applying current status, balance,
+    // filter, or decision policy. A restart may observe a changed event or
+    // balance, but those values must not turn an already-issued mutation into
+    // a fresh bet or discard the exact decision that was persisted with it.
+    if let Some(reservation) = context.prediction_journal.lookup(
+        &context.persistent_user_id,
+        &streamer.channel_id,
+        event_id,
+    )? {
+        restore_journaled_prediction(context, event_id, &streamer, reservation).await?;
+        return Ok(());
+    }
 
     if maybe_skip_prediction_for_status(
         &context.runtime,
@@ -570,43 +847,235 @@ pub(crate) async fn place_prediction(
     decision: &PredictionDecision,
     streamer: &Streamer,
 ) -> Result<()> {
+    // Replaying an event after a process restart is unsafe when the prior
+    // response was lost. The durable journal is checked before reserving local
+    // state so a recovered pending/unknown request cannot reach Twitch twice.
+    if let Some(reservation) = context.prediction_journal.lookup(
+        &context.persistent_user_id,
+        &streamer.channel_id,
+        event_id,
+    )? {
+        restore_journaled_prediction(context, event_id, streamer, reservation).await?;
+        return Ok(());
+    }
+
+    if !reserve_prediction_placement(context, event_id, decision, streamer).await? {
+        // Another evaluation effect already reserved, confirmed, or resolved
+        // this event while this one was waiting on the runtime lane.
+        return Ok(());
+    }
+
     match context
         .twitch
         .make_prediction(&event.event_id, &decision.outcome_id, decision.amount)
         .await
     {
-        Ok(()) => {
-            context.health.record_bet();
-            let deduct_stake = streamer.settings.bet.deduct_stake_on_place.unwrap_or(true);
+        Ok(()) => complete_prediction_placement(context, event_id, event, decision, streamer).await,
+        Err(error) => fail_prediction_placement(context, event_id, decision, streamer, error).await,
+    }
+}
+
+async fn restore_journaled_prediction(
+    context: &RuntimeEffectContext,
+    event_id: &str,
+    streamer: &Streamer,
+    reservation: PredictionPlacementReservation,
+) -> Result<()> {
+    let stored_decision = PredictionDecision {
+        choice: reservation.choice,
+        outcome_id: reservation.outcome_id.into(),
+        amount: reservation.amount,
+    };
+    match reservation.status {
+        PredictionPlacementStatus::Pending | PredictionPlacementStatus::Unknown => {
             context
                 .runtime
-                .record_prediction_placed(&event.event_id, decision.clone(), deduct_stake)
+                .mark_prediction_placement_unknown(event_id, stored_decision)
                 .await?;
-            let message = context
-                .observability
-                .prediction_placed_message(event, decision);
-            tracing::info!(operation = "make_predictions", event_id = %event.event_id, "{message}");
-            context
-                .observability
-                .spawn_event(DiscordEvent::BetGeneral, message);
-            Ok(())
         }
-        Err(error) => {
+        PredictionPlacementStatus::Confirmed => {
             context
                 .runtime
-                .stop_tracking_prediction(event_id, "ERROR")
+                .restore_prediction_placement(event_id, stored_decision)
                 .await?;
-            let failure_class = twitch_error_class(&error);
-            context.observability.spawn_event(
-                DiscordEvent::BetFailed,
-                format!(
-                    "Prediction failed for {} ({failure_class})",
-                    context.observability.streamer_name(streamer),
-                ),
-            );
-            Err(error.into())
+        }
+        PredictionPlacementStatus::Rejected => {
+            context
+                .runtime
+                .stop_tracking_prediction(event_id, "REJECTED")
+                .await?;
         }
     }
+    tracing::warn!(
+        event_id = %event_id,
+        streamer = %context.observability.streamer_name(streamer),
+        "prediction placement journal suppressed replay"
+    );
+    Ok(())
+}
+
+async fn reserve_prediction_placement(
+    context: &RuntimeEffectContext,
+    event_id: &str,
+    decision: &PredictionDecision,
+    streamer: &Streamer,
+) -> Result<bool> {
+    if !context
+        .runtime
+        .reserve_prediction_placement(event_id, decision.clone())
+        .await?
+    {
+        return Ok(false);
+    }
+    let request = PredictionPlacementRequest {
+        account_id: &context.persistent_user_id,
+        channel_id: &streamer.channel_id,
+        event_id,
+        choice: decision.choice,
+        outcome_id: &decision.outcome_id,
+        amount: decision.amount,
+        reserved_at_unix_seconds: time_now().unix_timestamp(),
+    };
+    match context.prediction_journal.reserve(&request) {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            let _ = context
+                .runtime
+                .release_prediction_placement_reservation(event_id)
+                .await;
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = context
+                .runtime
+                .release_prediction_placement_reservation(event_id)
+                .await;
+            Err(error.context("persist prediction placement reservation"))
+        }
+    }
+}
+
+async fn complete_prediction_placement(
+    context: &RuntimeEffectContext,
+    event_id: &str,
+    event: &tm_domain::PredictionEvent,
+    decision: &PredictionDecision,
+    streamer: &Streamer,
+) -> Result<()> {
+    context.health.record_bet();
+    let deduct_stake = streamer.settings.bet.deduct_stake_on_place.unwrap_or(true);
+    context
+        .runtime
+        .record_prediction_placed(&event.event_id, decision.clone(), deduct_stake)
+        .await?;
+    context.prediction_journal.confirm(
+        &context.persistent_user_id,
+        &streamer.channel_id,
+        event_id,
+    )?;
+    let message = context
+        .observability
+        .prediction_placed_message(event, decision);
+    tracing::info!(operation = "make_predictions", event_id = %event.event_id, "{message}");
+    context
+        .observability
+        .spawn_event(DiscordEvent::BetGeneral, message);
+    Ok(())
+}
+
+async fn fail_prediction_placement(
+    context: &RuntimeEffectContext,
+    event_id: &str,
+    decision: &PredictionDecision,
+    streamer: &Streamer,
+    error: TwitchClientError,
+) -> Result<()> {
+    let failure_class = twitch_error_class(&error);
+    if prediction_placement_is_ambiguous(&error) {
+        context
+            .runtime
+            .mark_prediction_placement_unknown(event_id, decision.clone())
+            .await?;
+        // Keep the reservation on disk. If this process exits now, the next
+        // run must wait for Twitch's prediction notification rather than
+        // issue a second transaction.
+        if let Err(journal_error) = context.prediction_journal.mark_unknown(
+            &context.persistent_user_id,
+            &streamer.channel_id,
+            event_id,
+        ) {
+            // The reservation was durably written before the network call.
+            // mark_unknown restores its prior in-memory status on failure, so
+            // the on-disk Pending record remains fail-closed; preserve the
+            // original mutation error while surfacing the persistence fault.
+            tracing::error!(
+                event_id = %event_id,
+                %journal_error,
+                "failed to persist ambiguous prediction placement"
+            );
+        }
+    } else {
+        if let Some(reservation) = context.prediction_journal.lookup(
+            &context.persistent_user_id,
+            &streamer.channel_id,
+            event_id,
+        )? {
+            if reservation.status == PredictionPlacementStatus::Confirmed {
+                // A viewer confirmation can race the HTTP response. Preserve
+                // that authoritative success in both persistence and runtime
+                // state even when the mutation response later reports a typed
+                // rejection.
+                context
+                    .runtime
+                    .restore_prediction_placement(
+                        event_id,
+                        PredictionDecision {
+                            choice: reservation.choice,
+                            outcome_id: reservation.outcome_id.into(),
+                            amount: reservation.amount,
+                        },
+                    )
+                    .await?;
+                tracing::warn!(
+                    event_id = %event_id,
+                    "ignoring late mutation rejection after authoritative prediction confirmation"
+                );
+                return Ok(());
+            }
+        }
+        context
+            .runtime
+            .stop_tracking_prediction(event_id, "REJECTED")
+            .await?;
+        if let Err(journal_error) = context.prediction_journal.reject(
+            &context.persistent_user_id,
+            &streamer.channel_id,
+            event_id,
+        ) {
+            // A failed terminal write leaves the original durable Pending
+            // reservation in place, which suppresses replay after restart.
+            tracing::error!(
+                event_id = %event_id,
+                %journal_error,
+                "failed to clear rejected prediction placement"
+            );
+        }
+    }
+    context.observability.spawn_event(
+        DiscordEvent::BetFailed,
+        format!(
+            "Prediction failed for {} ({failure_class})",
+            context.observability.streamer_name(streamer),
+        ),
+    );
+    Err(error.into())
+}
+
+fn prediction_placement_is_ambiguous(error: &TwitchClientError) -> bool {
+    // Only Twitch's typed rejection is authoritative. A malformed/truncated
+    // response, auth/rate-limit response, or transport error may all follow a
+    // mutation that Twitch accepted before the response was lost.
+    !matches!(error, TwitchClientError::MutationRejected { .. })
 }
 
 fn twitch_error_class(error: &TwitchClientError) -> &'static str {
@@ -617,6 +1086,356 @@ fn twitch_error_class(error: &TwitchClientError) -> &'static str {
         TwitchFailureClass::Timeout => "timeout",
         TwitchFailureClass::ConnectionReset => "connection-reset",
         TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
-        TwitchFailureClass::Other => "mutation-rejected",
+        TwitchFailureClass::Other => {
+            if matches!(error, TwitchClientError::MutationRejected { .. }) {
+                "mutation-rejected"
+            } else {
+                "unknown"
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::{
+        evaluate_prediction, fail_prediction_placement, PredictionEvaluationScheduler,
+        RuntimeEffectContext,
+    };
+    use crate::observability::{AppObservability, AppObservabilitySettings};
+    use crate::prediction_journal::{PredictionPlacementRequest, PredictionPlacementStatus};
+    use crate::status::HealthTracker;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tm_config::ConfigFile;
+    use tm_domain::{OffsetDateTime, PredictionDecision, PredictionEvent, PredictionOutcome};
+    use tm_twitch::{TwitchClient, TwitchClientError, TwitchEndpoints};
+
+    fn test_observability() -> AppObservability {
+        AppObservability::new(
+            None,
+            tm_observability::DiscordClient::new(Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings::default(),
+        )
+    }
+
+    fn test_twitch() -> Arc<TwitchClient> {
+        Arc::new(TwitchClient::with_client_and_endpoints(
+            reqwest::Client::new(),
+            "token",
+            "user-agent",
+            TwitchEndpoints::default(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn journaled_prediction_is_restored_before_restart_policy_checks() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_config(&config, OffsetDateTime::UNIX_EPOCH);
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points_enabled = Some(true);
+        state.streamers[0].channel_points = 1;
+        state.streamers[0].settings.make_predictions = true;
+        state.streamers[0].settings.bet.minimum_points = Some(10_000);
+        let event_id = String::from("restart-policy-guard");
+        state.predictions.insert(
+            event_id.clone(),
+            PredictionEvent {
+                streamer: state.streamers[0].clone(),
+                event_id: event_id.clone(),
+                title: String::from("Restart policy guard"),
+                status: String::from("LOCKED"),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                window_seconds: 30.0,
+                outcomes: vec![PredictionOutcome {
+                    id: "new-choice".into(),
+                    title: String::from("New choice"),
+                    ..PredictionOutcome::default()
+                }],
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            },
+        );
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let observability = test_observability();
+        let context = RuntimeEffectContext::new(
+            runtime.clone(),
+            test_twitch(),
+            String::from("account"),
+            observability,
+            HealthTracker::default(),
+        );
+        let original = PredictionDecision {
+            choice: Some(0),
+            outcome_id: "original-choice".into(),
+            amount: 75,
+        };
+        assert!(context
+            .prediction_journal
+            .reserve(&PredictionPlacementRequest {
+                account_id: "account",
+                channel_id: "100",
+                event_id: &event_id,
+                choice: original.choice,
+                outcome_id: &original.outcome_id,
+                amount: original.amount,
+                reserved_at_unix_seconds: 1,
+            })
+            .unwrap());
+
+        evaluate_prediction(&context, &event_id).await.unwrap();
+        let restored = runtime.state_snapshot().await.unwrap().predictions[&event_id].clone();
+        assert!(restored.bet_placed);
+        assert!(!restored.bet_confirmed);
+        assert_eq!(restored.decision, original);
+    }
+
+    #[tokio::test]
+    async fn authoritative_confirmation_survives_late_typed_rejection() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_config(&config, OffsetDateTime::UNIX_EPOCH);
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points_enabled = Some(true);
+        state.streamers[0].settings.make_predictions = true;
+        let event_id = String::from("late-rejection");
+        state.predictions.insert(
+            event_id.clone(),
+            PredictionEvent {
+                streamer: state.streamers[0].clone(),
+                event_id: event_id.clone(),
+                title: String::from("Late rejection"),
+                status: String::from("ACTIVE"),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                window_seconds: 30.0,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: true,
+                bet_confirmed: true,
+                result_type: String::new(),
+                result_string: String::new(),
+            },
+        );
+        let streamer = state.streamers[0].clone();
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let context = RuntimeEffectContext::new(
+            runtime.clone(),
+            test_twitch(),
+            String::from("account"),
+            test_observability(),
+            HealthTracker::default(),
+        );
+        let decision = PredictionDecision {
+            choice: Some(0),
+            outcome_id: "confirmed-choice".into(),
+            amount: 50,
+        };
+        assert!(context
+            .prediction_journal
+            .reserve(&PredictionPlacementRequest {
+                account_id: "account",
+                channel_id: "100",
+                event_id: &event_id,
+                choice: decision.choice,
+                outcome_id: &decision.outcome_id,
+                amount: decision.amount,
+                reserved_at_unix_seconds: 1,
+            })
+            .unwrap());
+        context
+            .prediction_journal
+            .confirm("account", "100", &event_id)
+            .unwrap();
+
+        fail_prediction_placement(
+            &context,
+            &event_id,
+            &decision,
+            &streamer,
+            TwitchClientError::MutationRejected {
+                context: String::from("prediction"),
+                detail: String::from("late rejection"),
+            },
+        )
+        .await
+        .unwrap();
+        let snapshot = runtime.state_snapshot().await.unwrap();
+        assert!(snapshot.predictions[&event_id].bet_confirmed);
+        assert!(snapshot.predictions[&event_id].bet_placed);
+        assert_eq!(
+            context
+                .prediction_journal
+                .lookup("account", "100", &event_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PredictionPlacementStatus::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_long_prediction_does_not_block_new_same_channel_work() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_config(&config, OffsetDateTime::UNIX_EPOCH);
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points_enabled = Some(true);
+        let mut event_streamer = state.streamers[0].clone();
+        event_streamer.settings.bet.delay = Some(0.0);
+        let old_id = String::from("old-prediction");
+        let new_id = String::from("new-prediction");
+        state.predictions.insert(
+            old_id.clone(),
+            PredictionEvent {
+                streamer: event_streamer.clone(),
+                event_id: old_id.clone(),
+                title: String::from("old"),
+                status: String::from("ACTIVE"),
+                created_at: OffsetDateTime::now_utc(),
+                window_seconds: 0.5,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            },
+        );
+        state.predictions.insert(
+            new_id.clone(),
+            PredictionEvent {
+                streamer: event_streamer,
+                event_id: new_id.clone(),
+                title: String::from("new"),
+                status: String::from("CLOSED"),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                window_seconds: 0.0,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            },
+        );
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let observability = AppObservability::new(
+            None,
+            tm_observability::DiscordClient::new(Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings::default(),
+        );
+        let context = RuntimeEffectContext::new(
+            runtime.clone(),
+            Arc::new(TwitchClient::with_client_and_endpoints(
+                reqwest::Client::new(),
+                "token",
+                "user-agent",
+                TwitchEndpoints::default(),
+            )),
+            String::from("account"),
+            observability.clone(),
+            HealthTracker::default(),
+        );
+        let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+        let scheduler = PredictionEvaluationScheduler::start(stop_receiver, &observability);
+        scheduler
+            .enqueue(context.clone(), old_id, Instant::now())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        runtime
+            .stop_tracking_prediction("old-prediction", "SKIPPED")
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(context, new_id.clone(), Instant::now())
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                if !runtime
+                    .state_snapshot()
+                    .await
+                    .unwrap()
+                    .predictions
+                    .contains_key(&new_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("short new prediction should run while old delay is pending");
+        stop_sender.send(true).unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+
+    #[tokio::test]
+    async fn prediction_scheduler_cancels_delayed_work_on_shutdown() {
+        let config = ConfigFile {
+            streamers: vec![String::from("tester")],
+            ..ConfigFile::default()
+        };
+        let mut state = tm_runtime::RuntimeState::from_config(&config, OffsetDateTime::UNIX_EPOCH);
+        state.streamers[0].channel_id = String::from("100");
+        state.streamers[0].channel_points_enabled = Some(true);
+        state.streamers[0].settings.make_predictions = true;
+        state.streamers[0].settings.bet.delay = Some(0.05);
+        let event_id = String::from("shutdown-prediction");
+        state.predictions.insert(
+            event_id.clone(),
+            PredictionEvent {
+                streamer: state.streamers[0].clone(),
+                event_id: event_id.clone(),
+                title: String::from("Shutdown prediction"),
+                status: String::from("ACTIVE"),
+                created_at: OffsetDateTime::now_utc(),
+                window_seconds: 0.2,
+                outcomes: Vec::new(),
+                decision: PredictionDecision::default(),
+                bet_placed: false,
+                bet_confirmed: false,
+                result_type: String::new(),
+                result_string: String::new(),
+            },
+        );
+        let runtime = tm_runtime::spawn_runtime_state(state);
+        let observability = test_observability();
+        let context = RuntimeEffectContext::new(
+            runtime.clone(),
+            test_twitch(),
+            String::from("account"),
+            observability.clone(),
+            HealthTracker::default(),
+        );
+        let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
+        let scheduler = PredictionEvaluationScheduler::start(stop_receiver, &observability);
+        scheduler
+            .enqueue(context, event_id.clone(), Instant::now())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        stop_sender.send(true).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(runtime
+            .state_snapshot()
+            .await
+            .unwrap()
+            .predictions
+            .contains_key(&event_id));
     }
 }

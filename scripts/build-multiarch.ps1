@@ -11,18 +11,23 @@ if ([string]::IsNullOrWhiteSpace($Image)) {
         "twitch-miner-rust"
     }
 }
-if ([string]::IsNullOrWhiteSpace($Tag)) {
-    $Tag = if ($Push) { "latest" } else { "local" }
-}
-
 $publishPlatforms = "linux/amd64,linux/arm64"
-$buildRevision = (git rev-parse --short=12 HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildRevision)) {
-    throw "Unable to determine the source revision for build metadata."
+$buildRevision = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $buildRevision -notmatch '^[0-9a-f]{40}$') {
+    throw "Unable to determine the full source revision for build metadata."
 }
 $sourceDateEpoch = (git show -s --format=%ct HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceDateEpoch -notmatch '^\d+$') {
     throw "Unable to determine SOURCE_DATE_EPOCH."
+}
+if ([string]::IsNullOrWhiteSpace($Tag)) {
+    $Tag = if ($Push) { "candidate-$buildRevision" } else { "local" }
+}
+if ($Push) {
+    $candidateTagPattern = '^candidate-' + [regex]::Escape($buildRevision) + '(?:-[A-Za-z0-9][A-Za-z0-9._-]*)?$'
+    if ($Tag -notmatch $candidateTagPattern) {
+        throw 'Pushed local images must use a candidate tag scoped to the exact full source revision. Stable image tags are published only by the protected Promote Release workflow.'
+    }
 }
 
 function Get-LocalLinuxPlatform {

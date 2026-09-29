@@ -5,9 +5,14 @@ use tm_domain::{format_channel_points, BetSettings, PredictionEvent, Strategy, S
 use crate::types::{PredictionSummary, SessionSummary, StreamerSummary};
 
 pub fn apply_pubsub_gain(streamer: &mut Streamer, earned: i64, reason: &str, balance: i64) -> i64 {
-    // A replay key is valid only while no other point event has been applied. This avoids
-    // suppressing a legitimate later equal gain after a prediction stake or other balance move.
-    streamer.processed_point_event_keys.clear();
+    // Keep source IDs across balance changes; only fallback fingerprints are invalidated by a
+    // local spend or authoritative balance refresh. Equal gains without a source ID remain
+    // intentionally bounded to the current balance epoch.
+    if earned < 0 && reason == "PREDICTION" {
+        streamer
+            .processed_point_event_keys
+            .retain(|key| key.starts_with("source:") || key.starts_with("prediction:"));
+    }
     let previous = streamer.channel_points;
     let expected = previous.saturating_add(earned);
     let mut new_balance = expected;
@@ -31,6 +36,7 @@ pub fn apply_pubsub_gain(streamer: &mut Streamer, earned: i64, reason: &str, bal
     };
 
     update_history(streamer, reason, earned);
+    streamer.context_balance_revision = streamer.context_balance_revision.saturating_add(1);
     delta
 }
 

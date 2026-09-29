@@ -47,5 +47,6 @@ pub fn base_runtime_state() -> RuntimeState {
         predictions: HashMap::new(),
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
+        pending_prediction_winners: std::collections::HashMap::new(),
     }
 }

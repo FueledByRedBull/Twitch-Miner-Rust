@@ -180,11 +180,23 @@ in [deploy/docker-compose.bind-mount.yml](deploy/docker-compose.bind-mount.yml)
 pins a host UID/GID override for that reason.
 
 GitHub Actions builds and publishes the multi-arch GHCR image on pushes to
-`main`. A signed `v*` tag promotes the already-tested manifest for that exact
-commit without rebuilding it, and fails if the release tag does not retain the
-same digest. For local Docker validation, `scripts/build-multiarch.ps1` builds
-and loads a single local-platform image by default; pass `-Push` to build and
-publish `linux/amd64` and `linux/arm64`. ARMv7 is not supported.
+`main`. After the exact digest has passed the canary, soak, rollback, and
+required-check evidence gate, create a signed `v*` tag at that source commit
+and dispatch the protected `Promote Release` workflow. It promotes the
+already-tested manifest without rebuilding it to the version and `latest`
+aliases, and fails if either alias does not retain the same digest. For local
+Docker validation,
+`scripts/build-multiarch.ps1` builds and loads a single local-platform image by
+default; pass `-Push` to build and publish `linux/amd64` and `linux/arm64`.
+ARMv7 is not supported.
+
+Windows releases are built by `scripts/build-windows-release.ps1`. The portable
+ZIP is self-contained and the MSI installs only the executable and documentation
+under Program Files. Keep config, cookies, and runtime status in a writable
+directory such as `%LOCALAPPDATA%\TwitchMiner` and pass it explicitly with
+`--data-dir` for `--check-config`, `--status`, `--health`, and normal operation.
+The MSI lane uses pinned WiX 4.0.6 in GitHub Actions; artifacts are unsigned
+unless a separate signing record is published.
 
 Deploy published images by immutable digest. See
 [docs/release-process.md](docs/release-process.md) for the release, host update,

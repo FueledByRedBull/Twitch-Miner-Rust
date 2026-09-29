@@ -1,8 +1,20 @@
+param([string[]]$AdditionalPaths = @())
+
 $ErrorActionPreference = 'Stop'
 
-$root = (Get-Location).Path
-$markdownFiles = Get-ChildItem -Path $root -Recurse -File -Filter '*.md' |
-    Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' }
+$root = git rev-parse --show-toplevel
+if ($LASTEXITCODE -ne 0) { throw 'Unable to locate the documentation Git root.' }
+$root = (Resolve-Path -LiteralPath $root).Path
+$tracked = (git -C $root ls-files -z -- '*.md') -join "`n"
+if ($LASTEXITCODE -ne 0) { throw 'Unable to list tracked Markdown files.' }
+$paths = @($tracked.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries)) + $AdditionalPaths
+$markdownFiles = foreach ($relative in $paths | Select-Object -Unique) {
+    $path = [IO.Path]::GetFullPath((Join-Path $root $relative))
+    if (-not $path.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Documentation path must remain inside the repository: $relative"
+    }
+    Get-Item -LiteralPath $path
+}
 
 foreach ($file in $markdownFiles) {
     $lineNumber = 0

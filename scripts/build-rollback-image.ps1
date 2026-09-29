@@ -1,6 +1,8 @@
 param(
     [string]$Revision = '1c10f11',
     [string]$Image = '',
+    [ValidateSet('linux/amd64', 'linux/arm64')]
+    [string]$Platform = 'linux/arm64',
     [switch]$Push
 )
 
@@ -17,22 +19,29 @@ git cat-file -e "$Revision^{commit}"
 if ($LASTEXITCODE -ne 0) {
     throw "Revision does not resolve to a commit: $Revision"
 }
-$resolved = (git rev-parse --short=12 "$Revision^{commit}").Trim()
+$resolved = (git rev-parse "$Revision^{commit}").Trim()
+if ($LASTEXITCODE -ne 0 -or $resolved -notmatch '^[0-9a-f]{40}$') {
+    throw "Unable to determine the full rollback revision for $Revision"
+}
 $tag = "rollback-$resolved"
 $reference = "$Image`:$tag"
 $sourceDateEpoch = (git show -s --format=%ct "$Revision^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceDateEpoch -notmatch '^\d+$') {
     throw "Unable to determine rollback SOURCE_DATE_EPOCH for $resolved"
 }
-$archive = Join-Path $env:TEMP "twitch-miner-rollback-$PID.tar"
+$archiveToken = "$PID-$([Guid]::NewGuid().ToString('N'))"
+$archive = Join-Path $env:TEMP "twitch-miner-rollback-$archiveToken.tar"
 try {
+    if (Test-Path -LiteralPath $archive -PathType Any -ErrorAction SilentlyContinue) {
+        throw "Rollback source archive path unexpectedly already exists: $archive"
+    }
     git archive --format=tar --output=$archive "$Revision^{commit}"
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archive -PathType Leaf)) {
         throw "Unable to create source archive for $Revision"
     }
 
     $args = @(
-        'buildx', 'build', '--platform', 'linux/arm64', '--tag', $reference,
+        'buildx', 'build', '--platform', $Platform, '--tag', $reference,
         '--build-arg', "BUILD_REVISION=$resolved",
         '--build-arg', "SOURCE_DATE_EPOCH=$sourceDateEpoch"
     )

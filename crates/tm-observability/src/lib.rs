@@ -79,6 +79,7 @@ pub enum Event {
     DropClaim,
     DropStatus,
     ChatMention,
+    WatchStatus,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +249,7 @@ pub fn normalize_event_name(raw: &str) -> Option<Event> {
         "DROP_CLAIM" => Some(Event::DropClaim),
         "DROP_STATUS" => Some(Event::DropStatus),
         "CHAT_MENTION" => Some(Event::ChatMention),
+        "WATCH_STATUS" => Some(Event::WatchStatus),
         _ => None,
     }
 }
@@ -812,12 +814,19 @@ fn current_log_timestamp(show_seconds: bool, timezone: Option<Tz>) -> String {
         "%H:%M %d/%m/%y"
     };
 
+    format_timestamp(SystemTime::now(), timezone, format)
+}
+
+/// Format a displayed event time using the same timezone policy as log headers.
+#[must_use]
+pub fn format_timestamp(timestamp: SystemTime, timezone: Option<Tz>, format: &str) -> String {
+    let timestamp: chrono::DateTime<Utc> = timestamp.into();
     match timezone {
-        Some(timezone) => Utc::now()
+        Some(timezone) => timestamp
             .with_timezone(&timezone)
             .format(format)
             .to_string(),
-        None => Local::now().format(format).to_string(),
+        None => timestamp.with_timezone(&Local).format(format).to_string(),
     }
 }
 

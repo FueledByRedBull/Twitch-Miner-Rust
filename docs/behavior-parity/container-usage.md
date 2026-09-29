@@ -55,6 +55,11 @@ fresh.
 
 On Linux bind mounts, the mounted directory and any existing cookie/log files must be writable by the configured container UID/GID. If you are migrating from an older root-run image, a one-time `chown` of the data directory may be required before the Rust container can reuse saved cookies.
 
-On pushes to `main`, GitHub Actions builds, smoke-tests, and publishes the multi-architecture GHCR image. A signed `v*` tag promotes the already-tested manifest for that exact commit without rebuilding it. Set `TWITCH_MINER_IMAGE` to the recorded manifest digest before using either published Compose example; `latest` is not a deployment input.
+On pushes to `main`, GitHub Actions builds, smoke-tests, signs, and publishes a
+candidate multi-architecture GHCR manifest. After the external canary, soak,
+rollback, and required-check evidence is approved, a signed `v*` tag and the
+protected `Promote Release` workflow promote that exact manifest without
+rebuilding it. Set `TWITCH_MINER_IMAGE` to the recorded manifest digest before
+using either published Compose example; `latest` is not a deployment input.
 
 For a shorter operator-oriented checklist, see [operator-guide.md](operator-guide.md).

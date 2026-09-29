@@ -398,11 +398,41 @@ pub struct Streamer {
     pub processed_moment_ids: VecDeque<String>,
     #[serde(skip)]
     pub processed_point_event_keys: VecDeque<String>,
+    #[serde(skip)]
+    pub stream_update_generation: u64,
+    #[serde(skip)]
+    pub context_request_generation: u64,
+    #[serde(skip)]
+    pub context_balance_revision: u64,
+    #[serde(skip)]
+    pub last_server_confirmed_points_at: Option<OffsetDateTime>,
+    #[serde(skip)]
+    pub last_context_observed_at: Option<OffsetDateTime>,
     pub history: HashMap<String, HistoryEntry>,
     pub community_goals: HashMap<String, CommunityGoal>,
 }
 
 impl Streamer {
+    /// Returns when the runtime last accepted a server-confirmed WATCH gain.
+    ///
+    /// This is an observation timestamp for the watcher watchdog. It is kept
+    /// separate from [`Stream::last_minute_update`], which records a successful
+    /// local watch request and therefore cannot prove that Twitch credited the
+    /// account.
+    #[must_use]
+    pub const fn last_server_confirmed_points_at(&self) -> Option<OffsetDateTime> {
+        self.last_server_confirmed_points_at
+    }
+
+    /// Returns when the runtime last accepted a current context response.
+    ///
+    /// A context observation is useful to distinguish a healthy account with
+    /// no new points from a context request that has stopped completing.
+    #[must_use]
+    pub const fn last_context_observed_at(&self) -> Option<OffsetDateTime> {
+        self.last_context_observed_at
+    }
+
     #[must_use]
     pub fn has_active_multipliers(&self) -> bool {
         !self.active_multipliers.is_empty()
@@ -444,11 +474,50 @@ impl Streamer {
         active_multipliers: &[ActiveMultiplier],
         community_goals: &[CommunityGoal],
     ) {
+        self.apply_channel_points_context_with_status_if_balance(
+            None,
+            channel_points_enabled,
+            balance,
+            active_multipliers,
+            community_goals,
+        );
+    }
+
+    pub fn apply_channel_points_context_with_status_if_balance(
+        &mut self,
+        expected_balance: Option<i64>,
+        channel_points_enabled: Option<bool>,
+        balance: i64,
+        active_multipliers: &[ActiveMultiplier],
+        community_goals: &[CommunityGoal],
+    ) -> bool {
+        let balance_is_current =
+            expected_balance.is_none_or(|expected| self.channel_points == expected);
+        self.apply_channel_points_context_with_status_if_allowed(
+            balance_is_current,
+            channel_points_enabled,
+            balance,
+            active_multipliers,
+            community_goals,
+        )
+    }
+
+    pub fn apply_channel_points_context_with_status_if_allowed(
+        &mut self,
+        balance_is_current: bool,
+        channel_points_enabled: Option<bool>,
+        balance: i64,
+        active_multipliers: &[ActiveMultiplier],
+        community_goals: &[CommunityGoal],
+    ) -> bool {
         let balance = balance.max(0);
-        if self.channel_points != balance {
-            self.processed_point_event_keys.clear();
+        if balance_is_current {
+            if self.channel_points != balance {
+                self.processed_point_event_keys
+                    .retain(|key| key.starts_with("source:") || key.starts_with("prediction:"));
+            }
+            self.channel_points = balance;
         }
-        self.channel_points = balance;
         self.active_multipliers.clear();
         self.active_multipliers
             .extend_from_slice(active_multipliers);
@@ -459,6 +528,7 @@ impl Streamer {
             .collect();
         self.channel_points_enabled = channel_points_enabled;
         self.points_init = true;
+        balance_is_current
     }
 
     #[must_use]
