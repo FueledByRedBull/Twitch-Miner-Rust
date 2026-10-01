@@ -193,6 +193,28 @@ and records the full source SHA in the image. Run `--check-config` against the
 rollback digest on the target host before placing it in the rollback Compose
 file.
 
+## Collecting a soak
+
+The soak host runs three standard-library Python scripts, copied together into
+one directory there:
+
+- `scripts/soak_checkpoint.py` prints one sanitized checkpoint from Docker
+  metadata, `--status`, `--health`, and current-session logs.
+  `SOAK_CONTAINER` (default `twitch-miner`) and `SOAK_EXPECTED_DNS` (default
+  `1.1.1.1,8.8.8.8`; empty for none) match the deployment.
+- `scripts/soak_start.py <evidence-dir> <image@sha256:digest> <full-revision>`
+  runs after a guarded update reports `candidate-deployment-ok`. The evidence
+  directory must already exist and contain the short revision in its name. The
+  script waits until every task, EventSub, PubSub and both watch slots show fresh
+  server credit, writes the anchor, and starts the collector.
+- `scripts/soak_collect.py` appends one checkpoint per minute to
+  `minute-checkpoints.jsonl` and stops after 72 hours or at the first identity or
+  clock discontinuity.
+
+`scripts/soak_dns_path.py` is an optional one-shot probe for DNS interception
+on the host path. Run `python -B -m unittest scripts.tests.test_soak_tools` after
+changing any of these scripts.
+
 ## Reviewing a collected soak
 
 `scripts/review_soak.py` reviews an existing sanitized anchor and minute history

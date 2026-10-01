@@ -3,7 +3,6 @@
   "username": "your_twitch_login",
   "debug": false,
   "debug_deep": false,
-  "smart_logging": true,
   "show_seconds": false,
   "claim_drops_startup": true,
   "farm_drops": true,

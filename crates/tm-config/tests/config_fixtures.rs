@@ -19,6 +19,10 @@ fn empty_config_fixture_is_extended_on_load() {
 
     let config = load_or_create_config(&target).unwrap();
     assert_eq!(config.chat_presence, "ONLINE");
+    // Built-in defaults match the conservative choices in config.example.json.
+    assert!(!config.betting_make_predictions);
+    assert!(!config.follow_raid);
+    assert!(config.privacy.anonymize_logs);
 
     let written: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert!(written["privacy"]["anonymize_logs"].is_boolean());

@@ -14,7 +14,6 @@ pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
     LoggerSettings {
         save: config.save_logs,
         emoji: config.emojis,
-        smart: config.smart_logging,
         show_seconds: config.show_seconds,
         console_username: config.show_username_in_console,
         show_claimed_bonus: config.show_claimed_bonus_msg,

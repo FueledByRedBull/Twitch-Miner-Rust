@@ -13,9 +13,9 @@ their exact JSON path (for example `config.bet.strategy`) before the miner
 starts or writes anything. Older Go and Python files are migrated as described
 in the [migration guide](migration.md).
 
-If the file is missing, the miner creates one from built-in defaults. Those
-defaults differ from the template in a few places, noted below, so prefer copying
-the template.
+If the file is missing, the miner creates one from built-in defaults that match
+the template except for the placeholder username and streamer list. Missing keys
+in an existing file are filled from the same defaults.
 
 ## Where the files live
 
@@ -69,8 +69,8 @@ pinning and fair rotation are separate rules, described in the
 | `watch_one_stream_when_drops_active` | `true` | While `DROPS` has picked a channel with an unfinished reward, watch only that channel and leave the second slot unused. Twitch advances Drop progress on one channel at a time, so set this to `false` to keep earning channel points on a second channel. |
 | `claim_moments` | `true` | Claim moment rewards. |
 | `watch_streak_vod_recovery` | `false` | Try to recover a missed watch streak by playing back the matching VOD or clip. |
-| `betting(make_predictions)` | `false` in the template, `true` built-in | Place prediction bets using the `bet` settings. The key keeps its historical Go/Python name; do not rename it. |
-| `follow_raid` | `false` in the template, `true` built-in | Join raids started by watched channels. |
+| `betting(make_predictions)` | `false` | Place prediction bets using the `bet` settings. The key keeps its historical Go/Python name; do not rename it. |
+| `follow_raid` | `false` | Join raids started by watched channels. |
 | `community_goals` | `false` | Contribute points to community goals. |
 | `chat_presence` | `ONLINE` | When to join the channel's chat over IRC: `ALWAYS`, `ONLINE` (only while live), `OFFLINE` (only while offline), or `NEVER`. |
 | `disable_at_in_nickname` | `false` | Also treat your plain username, without `@`, as a chat mention. |
@@ -81,7 +81,6 @@ pinning and fair rotation are separate rules, described in the
 | --- | --- | --- |
 | `debug` | `false` | Verbose diagnostic logging. |
 | `debug_deep` | `false` | Extra detail. Takes effect only with `debug` enabled and `privacy.anonymize_logs` disabled. |
-| `smart_logging` | `true` | Accepted for compatibility with older configurations; currently has no effect. |
 | `show_seconds` | `false` | Include seconds in log timestamps. |
 | `emojis` | `true` | Use emoji in log messages. |
 | `save_logs` | `false` | Also write logs to `log/` in the data directory. Each log rotates at 10 MiB, keeps at most five archives, and prunes archives older than 30 days. |
@@ -89,7 +88,7 @@ pinning and fair rotation are separate rules, described in the
 | `show_claimed_bonus_msg` | `true` | Log each claimed bonus chest. |
 | `show_game` | `true` | Include the game name in point messages. |
 | `timezone` | `null` | IANA time zone for timestamps, such as `Europe/Athens`. `null` uses the host's local time. |
-| `privacy.anonymize_logs` | `true` in the template, `false` built-in | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, points, and results in logs and Discord messages. The saved log is named `miner.log` instead of after the account. |
+| `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, points, and results in logs and Discord messages. The saved log is named `miner.log` instead of after the account. |
 | `discord.webhook_api` | `""` | Discord webhook URL. Empty disables Discord. Treat it as a secret. |
 | `discord.events` | `[]` | Events to send. An empty list sends all events. |
 

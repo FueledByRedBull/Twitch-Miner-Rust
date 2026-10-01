@@ -1027,6 +1027,9 @@ mod tests {
     fn observability_presence_messages_include_privacy_safe_streak_context() {
         let config = ConfigFile {
             timezone: Some(String::from("Europe/Athens")),
+            privacy: tm_config::PrivacyConfig {
+                anonymize_logs: false,
+            },
             ..ConfigFile::default()
         };
         let visible = crate::observability::build_observability(&config).unwrap();

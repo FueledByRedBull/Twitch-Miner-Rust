@@ -25,7 +25,7 @@ self-supervising service on a Raspberry Pi, a server, or your desktop.
   recover a missed streak from a recent VOD or clip.
 - **Drops**: prefers channels with an unfinished, earnable Drop campaign and
   claims rewards when they are ready.
-- **Predictions** (off in the example configuration): configurable strategies,
+- **Predictions** (off by default): configurable strategies,
   filters, delays, and stake limits.
 - **Extras**: raid following, moments, community goals, chat presence, and
   Discord notifications.

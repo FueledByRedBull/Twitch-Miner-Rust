@@ -134,7 +134,6 @@ pub struct ConfigFile {
     pub username: String,
     pub debug: bool,
     pub debug_deep: bool,
-    pub smart_logging: bool,
     pub show_seconds: bool,
     pub claim_drops_startup: bool,
     pub farm_drops: bool,
@@ -188,7 +187,6 @@ pub fn default_config_value() -> Value {
         "username": "your-twitch-username",
         "debug": false,
         "debug_deep": false,
-        "smart_logging": true,
         "show_seconds": false,
         "claim_drops_startup": true,
         "farm_drops": true,
@@ -196,8 +194,8 @@ pub fn default_config_value() -> Value {
         "watch_one_stream_when_drops_active": true,
         "claim_moments": true,
         "watch_streak_vod_recovery": false,
-        "betting(make_predictions)": true,
-        "follow_raid": true,
+        "betting(make_predictions)": false,
+        "follow_raid": false,
         "community_goals": false,
         "emojis": true,
         "save_logs": false,
@@ -214,7 +212,7 @@ pub fn default_config_value() -> Value {
         "followers_order": "DESC",
         "timezone": Value::Null,
         "privacy": {
-            "anonymize_logs": false
+            "anonymize_logs": true
         },
         "discord": {
             "webhook_api": "",
@@ -728,6 +726,15 @@ fn migrate_removed_runtime_options(
         root.remove("watch_queue_logging");
         *changed = true;
     }
+    if let Some(smart_logging) = root.get("smart_logging") {
+        if !smart_logging.is_boolean() {
+            return Err(ConfigError::Validation(String::from(
+                "config.smart_logging must be a boolean when present",
+            )));
+        }
+        root.remove("smart_logging");
+        *changed = true;
+    }
     Ok(())
 }
 
@@ -784,7 +791,6 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "username",
     "debug",
     "debug_deep",
-    "smart_logging",
     "show_seconds",
     "claim_drops_startup",
     "farm_drops",
@@ -1301,7 +1307,7 @@ fn ensure_streamer_override_fields(value: &mut Value, bet_defaults: &Value) -> b
 }
 
 fn privacy_defaults() -> Value {
-    json!({ "anonymize_logs": false })
+    json!({ "anonymize_logs": true })
 }
 
 fn discord_defaults() -> Value {
