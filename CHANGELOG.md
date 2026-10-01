@@ -1,7 +1,11 @@
 # Changelog
 
-## 0.2.0 - 2026-09-05
+## 0.2.0 - Unreleased
 
+- Describes every command-line option in `--help`.
+- Reorganizes the documentation so each topic has one home: a shorter README,
+  a new configuration reference and operations guide, and a flat `docs/`
+  directory replacing `docs/behavior-parity/` and `docs/architecture/`.
 - Reconciles observed Drops with Twitch's explicitly claimed inventory awards
   when completed campaigns leave the in-progress list, preserving reward status
   without guessing completion from disappearance or replaying a claim.
