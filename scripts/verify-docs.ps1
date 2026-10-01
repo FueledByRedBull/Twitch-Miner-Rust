@@ -7,7 +7,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to locate the documentation Git root.' 
 $root = (Resolve-Path -LiteralPath $root).Path
 $tracked = (git -C $root ls-files -z -- '*.md') -join "`n"
 if ($LASTEXITCODE -ne 0) { throw 'Unable to list tracked Markdown files.' }
-$paths = @($tracked.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries)) + $AdditionalPaths
+# The char[] overload exists on .NET Framework, so this also runs on Windows PowerShell 5.1.
+$paths = @($tracked.Split([char[]]@([char]0), [StringSplitOptions]::RemoveEmptyEntries)) + $AdditionalPaths
 $markdownFiles = foreach ($relative in $paths | Select-Object -Unique) {
     $path = [IO.Path]::GetFullPath((Join-Path $root $relative))
     if (-not $path.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
