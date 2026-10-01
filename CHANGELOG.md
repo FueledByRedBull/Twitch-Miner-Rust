@@ -1,7 +1,12 @@
 # Changelog
 
-## 0.2.0 - Unreleased
+## 0.3.0 - Unreleased
 
+- Matches the built-in defaults to `config.example.json`: predictions and raid
+  following are off and log anonymization is on. Configurations already written
+  by an earlier miner contain these keys and keep their values.
+- Retires the `smart_logging` setting, which had no effect; startup removes a
+  boolean value and rejects any other.
 - Describes every command-line option in `--help`.
 - Reorganizes the documentation so each topic has one home: a shorter README,
   a new configuration reference and operations guide, and a flat `docs/`
@@ -9,6 +14,14 @@
 - Reconciles observed Drops with Twitch's explicitly claimed inventory awards
   when completed campaigns leave the in-progress list, preserving reward status
   without guessing completion from disappearance or replaying a claim.
+- Versions the soak host tools (`scripts/soak_*.py`) and the sanitized soak
+  review helper, with synthetic tests.
+- Runs `scripts/verify-docs.ps1` on Windows PowerShell 5.1.
+- Updates base64 to 0.23.1 and refreshes locked dependencies and pinned build
+  actions.
+
+## 0.2.0 - 2026-10-01
+
 - Rotates one ordinary watch slot per fair turn, retaining the other selected
   channel while its replacement establishes credit. Equal-deadline Drops targets
   use configured channel order instead of minute-by-minute progress to avoid
