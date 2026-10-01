@@ -64,8 +64,8 @@ jobs:
       - name: Validate architecture boundaries
         shell: pwsh
         run: ./scripts/verify-architecture.ps1
-      - name: Test sanitized soak review
-        run: python3 -B -m unittest scripts.tests.test_review_soak
+      - name: Test soak review and host tools
+        run: python3 -B -m unittest scripts.tests.test_review_soak scripts.tests.test_soak_tools
       - name: Validate Compose examples
         env:
           TWITCH_MINER_IMAGE: ghcr.io/fueledbyredbull/twitch-miner-rust@sha256:0000000000000000000000000000000000000000000000000000000000000000
