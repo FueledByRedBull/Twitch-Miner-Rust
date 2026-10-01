@@ -395,8 +395,9 @@ than treated as protocol violations, so an additive Twitch change cannot force a
 reconnect loop that shrinks the subscription set on each cycle; a payload for a
 subscription type the miner does act on still fails closed. A session inherited
 through a reconnect keeps its subscriptions. The supplied URL must use `wss`,
-the exact `eventsub.wss.twitch.tv` host, no user information, the default/443
-port, and no fragment; its opaque path and query are then used unchanged. The
+a `twitch.tv` subdomain host (Twitch requires the URL to be used as is and does
+not promise the original host), no user information, the default/443 port, and
+no fragment; its opaque path and query are then used unchanged. The
 old socket continues delivering through the overlap until the replacement sends
 Welcome, no duplicate subscription POSTs are made, and the active count is
 re-derived from Twitch for the new session ID rather than carried over from the

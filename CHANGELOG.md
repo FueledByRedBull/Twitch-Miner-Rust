@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Accepts EventSub reconnect URLs on any `twitch.tv` subdomain instead of only
+  `eventsub.wss.twitch.tv`, so a Twitch handoff to another host keeps its
+  subscriptions instead of forcing a fresh connection and resubscription.
+
 ## 0.3.0 - Unreleased
 
 - Matches the built-in defaults to `config.example.json`: predictions and raid

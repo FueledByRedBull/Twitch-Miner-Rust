@@ -46,12 +46,18 @@ fn reconnect_url_validation_keeps_twitch_endpoint_and_opaque_query() {
         "wss://EVENTSUB.WSS.TWITCH.TV/",
         "wss://eventsub.wss.twitch.tv:443/ws?keepalive_timeout_seconds=30",
         "wss://eventsub.wss.twitch.tv/opaque/reconnect?token=a%2Fb",
+        "wss://eventsub-reconnect.twitch.tv/ws?opaque=1",
+        "wss://edge.eventsub.WSS.Twitch.TV/ws",
     ] {
         assert!(validate_reconnect_url(url).is_ok(), "{url}");
     }
     for url in [
         "ws://eventsub.wss.twitch.tv/ws",
         "wss://example.test/ws",
+        "wss://eviltwitch.tv/ws",
+        "wss://twitch.tv.example.test/ws",
+        "wss://eventsub.wss.twitch.tv.example.test/ws",
+        "wss://eventsub.twitch.tv@example.test/ws",
         "wss://user:eventsub.wss.twitch.tv/ws",
         "wss://eventsub.wss.twitch.tv:444/ws",
         "wss://eventsub.wss.twitch.tv/ws#fragment",
