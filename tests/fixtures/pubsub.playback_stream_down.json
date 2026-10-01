@@ -1,7 +1,0 @@
-{
-  "type": "MESSAGE",
-  "data": {
-    "topic": "video-playback-by-id.123",
-    "message": "{\"type\":\"stream-down\",\"server_time\":1711519200}"
-  }
-}

@@ -32,7 +32,7 @@
 //! For the next layer, read [`startup`] for state construction, [`tasks`] for
 //! task wiring, [`eventsub`] and [`pubsub`] for transport adapters,
 //! [`runtime_effects`] for effect execution, and `tm-runtime` for reducer and
-//! effect contracts. The workspace map is in `docs/architecture/README.md`.
+//! effect contracts. The workspace map is in `docs/architecture.md`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -95,21 +95,30 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 // by health checks and deployment scripts, not independent runtime policy.
 #[allow(clippy::struct_excessive_bools)]
 #[command(version = build_info::VERSION)]
+/// Unofficial Twitch channel-points miner.
 struct Cli {
+    /// Configuration file [default: config.json in the data directory]
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Directory holding the configuration, session cookies, logs, and runtime state
     #[arg(long = "data-dir")]
     data_dir: Option<PathBuf>,
+    /// Exit successfully only while the running miner's tasks are healthy
     #[arg(long, conflicts_with_all = ["status", "check_config", "support_bundle", "canary"])]
     health: bool,
+    /// Validate the configuration and preview migrations without contacting Twitch
     #[arg(long, conflicts_with_all = ["health", "status", "support_bundle", "canary"])]
     check_config: bool,
+    /// Print the running miner's sanitized status
     #[arg(long, conflicts_with = "check_config")]
     status: bool,
+    /// Print the configuration check as JSON (with --check-config)
     #[arg(long, requires = "check_config")]
     json: bool,
+    /// Write a privacy-safe support file without cookies, configuration values, or logs
     #[arg(long, value_name = "PATH", conflicts_with_all = ["health", "status", "check_config", "canary"])]
     support_bundle: Option<PathBuf>,
+    /// Run read-only live checks before a release; use a dedicated account
     #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle"])]
     canary: bool,
 }
