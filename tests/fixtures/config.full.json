@@ -4,7 +4,6 @@
   "debug": false,
   "debug_deep": false,
   "watch_queue_logging": true,
-  "smart_logging": true,
   "disable_ssl_cert_verification": false,
   "show_seconds": false,
   "claim_drops_startup": true,

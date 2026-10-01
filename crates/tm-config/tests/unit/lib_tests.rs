@@ -62,7 +62,7 @@ fn migrates_removed_security_and_logging_fields_with_backup() {
     let dir = unique_temp_dir("removed-fields");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.json");
-    let original = br#"{"username":"Alice","password":"","disable_ssl_cert_verification":false,"watch_queue_logging":true}"#;
+    let original = br#"{"username":"Alice","password":"","disable_ssl_cert_verification":false,"watch_queue_logging":true,"smart_logging":true}"#;
     fs::write(&path, original).unwrap();
 
     let config = load_or_create_config(&path).unwrap();
@@ -73,6 +73,7 @@ fn migrates_removed_security_and_logging_fields_with_backup() {
         "password",
         "disable_ssl_cert_verification",
         "watch_queue_logging",
+        "smart_logging",
     ] {
         assert!(migrated.get(key).is_none());
     }
@@ -83,7 +84,7 @@ fn previews_removed_security_and_logging_fields_without_writing() {
     let dir = unique_temp_dir("removed-fields-preview");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.json");
-    let original = br#"{"username":"Alice","password":"","disable_ssl_cert_verification":false,"watch_queue_logging":false}"#;
+    let original = br#"{"username":"Alice","password":"","disable_ssl_cert_verification":false,"watch_queue_logging":false,"smart_logging":false}"#;
     fs::write(&path, original).unwrap();
 
     let preview = preview_config(&path).unwrap();
@@ -119,6 +120,11 @@ fn rejects_unsafe_or_malformed_removed_fields_without_writing() {
             "queue-type",
             br#"{"username":"Alice","watch_queue_logging":"yes"}"#.as_slice(),
             "watch_queue_logging",
+        ),
+        (
+            "smart-logging-type",
+            br#"{"username":"Alice","smart_logging":"yes"}"#.as_slice(),
+            "smart_logging",
         ),
     ] {
         let dir = unique_temp_dir(name);

@@ -23,7 +23,7 @@ working Rust implementation:
 | Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved; global and per-streamer controls are preserved. |
 | Raid observation and auto-join | Preserved. EventSub observes the raid lifecycle and PubSub supplies the legacy raid ID. |
 | Prediction and per-streamer override settings | Preserved. |
-| `password`, `disable_ssl_cert_verification`, `watch_queue_logging`, `auto_update`, `watch_streak_warm_start_cache`, `betting.make_predictions`, `watch_streams` | Migrated or rejected as listed below. |
+| `password`, `disable_ssl_cert_verification`, `watch_queue_logging`, `auto_update`, `watch_streak_warm_start_cache`, `smart_logging`, `betting.make_predictions`, `watch_streams` | Migrated or rejected as listed below. |
 
 ## Moving a data directory
 
@@ -51,7 +51,9 @@ normal Rust startup performs a versioned config migration only when necessary:
 - it removes empty `password`, `disable_ssl_cert_verification=false`, and
   `watch_queue_logging` fields; unsafe or malformed legacy values are rejected;
 - it removes the Go `watch_streak_warm_start_cache` boolean because Rust always
-  manages its bounded streak cache internally; and
+  manages its bounded streak cache internally;
+- it removes the boolean `smart_logging` field, which had no effect in the
+  Rust miner; a non-boolean value is rejected;
 - it converts the former `betting.make_predictions` wrapper to the canonical
   `betting(make_predictions)` flag, removes matching duplicates, and rejects
   conflicting or malformed wrappers without writing; and

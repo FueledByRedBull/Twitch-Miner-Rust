@@ -39,7 +39,6 @@ const MAX_LOG_ARCHIVE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub struct LoggerSettings {
     pub save: bool,
     pub emoji: bool,
-    pub smart: bool,
     pub show_seconds: bool,
     pub console_username: bool,
     pub show_claimed_bonus: bool,
