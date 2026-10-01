@@ -32,7 +32,7 @@
 //! For the next layer, read [`startup`] for state construction, [`tasks`] for
 //! task wiring, [`eventsub`] and [`pubsub`] for transport adapters,
 //! [`runtime_effects`] for effect execution, and `tm-runtime` for reducer and
-//! effect contracts. The workspace map is in `docs/architecture/README.md`.
+//! effect contracts. The workspace map is in `docs/architecture.md`.
 
 use std::path::PathBuf;
 use std::sync::Arc;

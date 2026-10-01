@@ -6,9 +6,26 @@ are intentionally kept outside the active Rust data directory and are not
 auto-converted.
 
 For behavior-level differences from Go, see the
-[behavior-parity matrix](behavior-parity/parity-matrix.md). The
+[parity matrix](parity-matrix.md). The
 [protocol inventory](protocol-inventory.md) is the normative source for live
-Twitch operation, playback, and transport contracts.
+Twitch operation, playback, and transport contracts, and every current setting
+is described in the [configuration reference](configuration.md).
+
+## Go-era settings
+
+All Go-era operational fields remain accepted unless they were unsafe or had no
+working Rust implementation:
+
+| Field group | Rust handling |
+| --- | --- |
+| Username, streamers, follower/game/watch selection | Preserved. |
+| Logging, emojis, timestamps, console username, privacy, Discord | Preserved. |
+| Drops, moments (`claim_moments` globally and per streamer), community goals, chat presence, `disable_at_in_nickname` | Improved; global and per-streamer controls are preserved. |
+| Raid observation and auto-join | Preserved. EventSub observes the raid lifecycle and PubSub supplies the legacy raid ID. |
+| Prediction and per-streamer override settings | Preserved. |
+| `password`, `disable_ssl_cert_verification`, `watch_queue_logging`, `auto_update`, `watch_streak_warm_start_cache`, `betting.make_predictions`, `watch_streams` | Migrated or rejected as listed below. |
+
+## Moving a data directory
 
 The Rust miner can reuse the Go layout when its data directory is mounted at
 `/data`, including a legacy host directory named `twitch-miner-go`. The name is

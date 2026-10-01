@@ -39,11 +39,11 @@ For an ordinary WATCH credit, `tm-pubsub` parses the authenticated
 the tracked streamer and emits no network effect. Predictions use the same
 boundary but can return an evaluation effect for `tm-app` to execute once.
 
-Source pointers: [runtime state](../../crates/tm-runtime/src/state.rs),
-[runtime handle](../../crates/tm-runtime/src/handle.rs),
-[PubSub parser](../../crates/tm-pubsub/src/parse.rs),
-[EventSub parser](../../crates/tm-pubsub/src/eventsub/protocol.rs), and
-[effect execution](../../crates/tm-app/src/runtime_effects.rs).
+Source pointers: [runtime state](../crates/tm-runtime/src/state.rs),
+[runtime handle](../crates/tm-runtime/src/handle.rs),
+[PubSub parser](../crates/tm-pubsub/src/parse.rs),
+[EventSub parser](../crates/tm-pubsub/src/eventsub/protocol.rs), and
+[effect execution](../crates/tm-app/src/runtime_effects.rs).
 
 ## Internal module layout
 
