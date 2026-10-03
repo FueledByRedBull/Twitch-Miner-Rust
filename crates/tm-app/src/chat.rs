@@ -190,10 +190,12 @@ pub(crate) fn spawn_chat_watcher_loop(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stop = stop;
+        let mut short_sessions = 0_u32;
         loop {
             if *stop.borrow() {
                 break;
             }
+            let session_started = std::time::Instant::now();
 
             let mut client = ChatClient::new(
                 &username,
@@ -221,9 +223,35 @@ pub(crate) fn spawn_chat_watcher_loop(
                 }
             }
 
-            if sleep_or_stop(&mut stop, std::time::Duration::from_secs(5)).await {
+            // A session that ends quickly (for example a rejected login) backs
+            // off exponentially; one that ran normally reconnects promptly.
+            if session_started.elapsed() < CHAT_STABLE_SESSION {
+                short_sessions = short_sessions.saturating_add(1);
+            } else {
+                short_sessions = 0;
+            }
+            if sleep_or_stop(&mut stop, chat_reconnect_delay(short_sessions)).await {
                 break;
             }
         }
     })
+}
+
+const CHAT_STABLE_SESSION: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn chat_reconnect_delay(short_sessions: u32) -> std::time::Duration {
+    let exponent = short_sessions.saturating_sub(1).min(6);
+    std::time::Duration::from_secs((5_u64 << exponent).min(300))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chat_reconnect_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn repeated_short_sessions_back_off_to_five_minutes() {
+        let delays = [0, 1, 2, 3, 7, 50].map(chat_reconnect_delay);
+        assert_eq!(delays, [5, 5, 10, 20, 300, 300].map(Duration::from_secs));
+    }
 }
