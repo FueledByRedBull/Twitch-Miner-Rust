@@ -74,8 +74,10 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
             .context("load Twitch client version")?;
     }
 
-    for streamer in &mut state.streamers {
-        bootstrap_streamer(
+    let configured = state.streamers.len();
+    let mut skipped = Vec::new();
+    for (index, streamer) in state.streamers.iter_mut().enumerate() {
+        if let Err(error) = bootstrap_streamer(
             streamer,
             twitch,
             user_id,
@@ -84,10 +86,38 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
             streak_cache,
             identity_cache,
         )
-        .await?;
+        .await
+        {
+            if !is_permanent_streamer_failure(&error) {
+                return Err(error);
+            }
+            tracing::warn!(
+                operation = "run",
+                error_class = "streamer-skipped",
+                %error,
+                "skipping a streamer that could not be loaded; it stays skipped until restart"
+            );
+            skipped.push(index);
+        }
+    }
+    if configured > 0 && skipped.len() == configured {
+        anyhow::bail!("no configured streamer could be loaded");
+    }
+    for index in skipped.into_iter().rev() {
+        state.streamers.remove(index);
     }
     state.capture_initial_points();
     Ok(state)
+}
+
+/// A renamed, banned, or malformed channel fails the same way on every retry,
+/// so it is skipped. Network, rate-limit, server, auth, and integrity failures
+/// are not specific to one streamer and still abort startup for a clean retry.
+fn is_permanent_streamer_failure(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<tm_twitch::TwitchClientError>() {
+        Some(error) => error.failure_class() == tm_twitch::TwitchFailureClass::Other,
+        None => true,
+    }
 }
 
 pub(crate) async fn load_targets(
@@ -543,5 +573,33 @@ mod tests {
             Some(String::from("renamed"))
         );
         Ok(())
+    }
+
+    #[test]
+    fn only_streamer_specific_failures_are_skipped() {
+        use tm_twitch::{TwitchClientError, TwitchFailureClass};
+        let remote = |failure| {
+            anyhow::Error::new(TwitchClientError::RemoteRequest {
+                context: "test",
+                failure,
+            })
+            .context("load channel id for tester")
+        };
+        assert!(super::is_permanent_streamer_failure(&anyhow::Error::new(
+            TwitchClientError::MissingField("data.user")
+        )));
+        assert!(super::is_permanent_streamer_failure(&anyhow::anyhow!(
+            "validate startup login"
+        )));
+        for failure in [
+            TwitchFailureClass::Unauthorized,
+            TwitchFailureClass::RateLimited,
+            TwitchFailureClass::ServerError,
+            TwitchFailureClass::Timeout,
+            TwitchFailureClass::ConnectionReset,
+            TwitchFailureClass::IntegrityRequired,
+        ] {
+            assert!(!super::is_permanent_streamer_failure(&remote(failure)));
+        }
     }
 }
