@@ -114,13 +114,26 @@ class SoakReviewTests(unittest.TestCase):
         self.assertIn("watch-slot-unhealthy:0", result["findings"])
         self.assertEqual(result["findings"]["watch-slot-unhealthy:0"]["level"], "failure")
 
-    def test_application_health_exit_is_retained_after_recovery(self):
-        result = review([sample(application_health_exit_code=0),
-                         sample(60, application_health_exit_code=1),
-                         sample(120, application_health_exit_code=0)])
-        self.assertIn("application-health", result["findings"])
-        self.assertEqual(result["findings"]["application-health"]["level"], "failure")
-        self.assertFalse(result["findings"]["application-health"]["active"])
+    def test_health_failure_run_matches_the_compose_healthcheck_retries(self):
+        compose = (SCRIPT.parents[1] / "deploy/docker-compose.bind-mount.yml").read_text(encoding="utf-8")
+        retries = re.search(r"healthcheck:.*?retries: (\d+)", compose, re.S)
+        self.assertIsNotNone(retries)
+        self.assertEqual(REVIEW.HEALTH_FAILURE_SAMPLES, int(retries[1]))
+
+    def test_isolated_application_health_failures_are_retained_for_review(self):
+        unhealthy = [60, 120, 240, 300, 420]  # never three samples in a row
+        result = review([sample(n * 60, application_health_exit_code=int(n * 60 in unhealthy))
+                         for n in range(9)])
+        finding = result["findings"]["application-health"]
+        self.assertEqual((finding["level"], finding["samples"], finding["active"]), ("review", 5, False))
+        self.assertTrue(result["coverage"]["complete"])
+
+    def test_sustained_application_health_failure_fails_and_stays_after_recovery(self):
+        result = review([sample(n * 60, application_health_exit_code=int(1 <= n <= 3))
+                         for n in range(6)])
+        finding = result["findings"]["application-health"]
+        self.assertEqual((finding["level"], finding["samples"], finding["active"]), ("failure", 3, False))
+        self.assertFalse(result["coverage"]["complete"])
 
     def test_cli_replay_persists_review_and_compares_unchanged_input(self):
         with tempfile.TemporaryDirectory() as folder:

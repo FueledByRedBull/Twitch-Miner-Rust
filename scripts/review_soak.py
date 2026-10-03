@@ -25,6 +25,9 @@ REQUIRED = (*IDENTITY, "utc", "monotonic_seconds", "observation_anchor_utc",
 UTC = dt.timezone.utc
 # Match tm-app/src/status.rs; Docker's retry grace does not waive task health.
 MAX_CONSECUTIVE_FAILURES = 5
+# Match the Compose healthcheck `retries`: `--health` is an instant probe, so a
+# reconnect can fail one sample. Only this many in a row is a soak failure.
+HEALTH_FAILURE_SAMPLES = 3
 
 
 def timestamp(value: str) -> dt.datetime:
@@ -75,6 +78,7 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
     selection_changes: list[dt.datetime] = []
     present_drops: set[str] = set()
     terminal = None
+    health_streak = 0
 
     def note(code: str, when: str, level: str = "review") -> None:
         item = findings.setdefault(code, dict(first_utc=when, last_utc=when,
@@ -86,6 +90,7 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
     def observe(cp: dict, expect_continuous_sample: bool = True) -> None:
         nonlocal last, previous_time, previous_mono, max_gap, max_drift, max_drought
         nonlocal full_windows, minimum_6h, baseline_task_names, selected_set, present_drops
+        nonlocal health_streak
         active.clear()
         when = cp.get("utc", previous_time.isoformat())
         for key in REQUIRED:
@@ -118,7 +123,12 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
         if "application_health_exit_code" in anchor and cp.get("application_health_exit_code") is None:
             note("missing-field:application-health", when, "evidence")
         if cp.get("application_health_exit_code", 0) != 0:
-            note("application-health", when, "failure")
+            health_streak += 1
+            note("application-health", when)
+            if health_streak >= HEALTH_FAILURE_SAMPLES:
+                findings["application-health"]["level"] = "failure"
+        else:
+            health_streak = 0
         if cp.get("status_fresh") is not True or not 0 <= cp.get("heartbeat_age_seconds", -1) <= 120:
             note("status-stale", when, "failure")
         if not cp.get("tasks"):

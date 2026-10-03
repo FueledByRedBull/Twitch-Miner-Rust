@@ -21,6 +21,9 @@
   seconds to five minutes) and no longer counts the rejection as activity.
 - Keeps transport crates at `info` logging under `debug`/`debug_deep`, so raw
   WebSocket frames carrying the PubSub token are never logged.
+- Scores a `--health` probe failure as a soak failure only after three samples
+  in a row, matching the Compose healthcheck's `retries: 3`; shorter runs remain
+  review findings. The release process now lists what fails a soak.
 - Corrects documentation on follower loading, task recovery, PubSub retry
   offsets and the canary-only Drops dashboard query.
 
