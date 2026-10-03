@@ -5,8 +5,6 @@ use tokio_tungstenite::tungstenite;
 pub enum PubSubError {
     #[error("no user id for pubsub")]
     MissingUserId,
-    #[error("pubsub topic capacity exceeded: configured {configured}, maximum {maximum}")]
-    CapacityExceeded { configured: usize, maximum: usize },
     #[error("invalid pubsub payload: {0}")]
     InvalidPayload(#[from] serde_json::Error),
     #[error("invalid pubsub text payload: {0}")]
