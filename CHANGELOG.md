@@ -5,6 +5,24 @@
 - Accepts EventSub reconnect URLs on any `twitch.tv` subdomain instead of only
   `eventsub.wss.twitch.tv`, so a Twitch handoff to another host keeps its
   subscriptions instead of forcing a fresh connection and resubscription.
+- Records a bet that Twitch refuses through `makePrediction.error` (for
+  example too few points) as rejected, instead of as placed.
+- Generates random device, client-session and transaction IDs. The session ID
+  sent to Twitch was previously always `0000000000000000`.
+- Reports a GraphQL integrity-check refusal as `integrity-required` instead of
+  a generic error count. The miner still sends no Client-Integrity token.
+- Skips a streamer whose channel cannot be loaded at startup, such as a renamed
+  or banned login, instead of aborting. Network, rate-limit, auth and integrity
+  failures still abort so the restart policy retries them.
+- Truncates PubSub topics at the 500-topic limit instead of disabling PubSub,
+  and subscribes each channel's `video-playback-by-id` presence topic, which is
+  listed last so it is dropped first.
+- Backs off IRC reconnects after short sessions such as a rejected login (five
+  seconds to five minutes) and no longer counts the rejection as activity.
+- Keeps transport crates at `info` logging under `debug`/`debug_deep`, so raw
+  WebSocket frames carrying the PubSub token are never logged.
+- Corrects documentation on follower loading, task recovery, PubSub retry
+  offsets and the canary-only Drops dashboard query.
 
 ## 0.3.0 - Unreleased
 

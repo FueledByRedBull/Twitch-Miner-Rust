@@ -115,6 +115,14 @@ value every ten hours. Discovery or rejection failures remain explicit and are
 covered by the canary; the miner does not guess alternate identities or
 credentials.
 
+The device ID and per-process `Client-Session-Id` are random hexadecimal values
+seeded from the operating system, so they differ across processes and installs.
+
+The miner sends no `Client-Integrity` header. Tokens minted outside a real
+browser are flagged as bots, so it does not try to obtain one. A GraphQL error
+reporting a failed integrity check is classified as `integrity-required`
+instead of a generic error, so status and logs show why Twitch refused.
+
 ## Watching and playback
 
 Playback priming deliberately remains uncached. The scheduler gives each
@@ -300,6 +308,10 @@ automatically replayed after an uncertain response. A release with a changed
 operation hash must add its sanitized fixture, update this inventory, and pass
 the canary before publication.
 
+A prediction whose response carries `data.makePrediction.error` is a typed
+rejection: the reservation is cleared and no result is recorded. Only an
+upper-case error code such as `NOT_ENOUGH_POINTS` is kept.
+
 Bonus claims whose connections fail before the mutation is sent can be retried
 after a later availability observation. Ambiguous outcomes remain reserved to
 avoid replaying a potentially completed claim.
@@ -412,8 +424,13 @@ community-goal changes. It is unofficial/deprecated, so LISTEN acknowledgement,
 message time, reconnect count, and fixed failure class are exposed separately
 from EventSub status. User topics alone receive the auth token, connections are
 limited to 50 topics, and failures cannot stop EventSub, polling, IRC, or drops.
+Each channel also gets an undocumented `video-playback-by-id` presence topic,
+listed after every other topic. Above the 500-topic limit (10 connections) the
+list is truncated with a warning, so presence topics are dropped first and the
+account topics are always kept.
 Server-requested reconnects use the clean-close retry policy: a five-second base
-plus bounded jitter, with backoff for repeated short-lived connections. A
+plus a deterministic per-connection offset of up to six seconds, with backoff
+for repeated short-lived connections. A
 connection lasting at least five minutes resets the retry count. Subscriptions
 must be acknowledged again before their capability is reported ready.
 
@@ -421,6 +438,9 @@ must be acknowledged again before their capability is reported ready.
 
 Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` through
 Rustls with WebPKI roots; the OAuth token is never sent over plaintext IRC.
+A session that ends within a minute, such as a rejected login, backs off
+exponentially from five seconds to five minutes. The rejection notice does not
+count as activity, so repeated rejections reach the task health threshold.
 
 ## Typing policy
 
