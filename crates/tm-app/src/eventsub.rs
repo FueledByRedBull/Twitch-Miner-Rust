@@ -374,6 +374,7 @@ fn classify_presence_poll_error(error: TwitchFailureClass) -> &'static str {
         TwitchFailureClass::Timeout => "timeout",
         TwitchFailureClass::ConnectionReset => "connection-reset",
         TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
+        TwitchFailureClass::IntegrityRequired => "integrity-required",
         TwitchFailureClass::Other => "contract-or-shape",
     }
 }

@@ -258,6 +258,18 @@ pub fn validate_gql_mutation_response(
     if errors.as_array().is_some_and(Vec::is_empty) {
         return Ok(());
     }
+    if errors.as_array().is_some_and(|errors| {
+        errors.iter().any(|error| {
+            error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(crate::responses::is_integrity_message)
+        })
+    }) {
+        return Err(TwitchClientError::IntegrityRequired {
+            context: context.to_string(),
+        });
+    }
     let count = errors.as_array().map_or(1, Vec::len);
     Err(TwitchClientError::GqlErrors {
         context: context.to_string(),

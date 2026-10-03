@@ -486,6 +486,7 @@ fn canary_failure_class(error: &anyhow::Error) -> &'static str {
             TwitchFailureClass::Timeout => "timeout",
             TwitchFailureClass::ConnectionReset => "connection-reset",
             TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
+            TwitchFailureClass::IntegrityRequired => "integrity-required",
             TwitchFailureClass::Other => "contract-or-shape",
         };
     }
@@ -552,6 +553,7 @@ mod tests {
                 TwitchFailureClass::PersistedQueryNotFound,
                 "persisted-query-not-found",
             ),
+            (TwitchFailureClass::IntegrityRequired, "integrity-required"),
             (TwitchFailureClass::Other, "contract-or-shape"),
         ] {
             let error = anyhow::Error::new(TwitchClientError::RemoteRequest {

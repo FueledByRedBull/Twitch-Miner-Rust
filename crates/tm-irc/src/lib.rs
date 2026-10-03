@@ -131,8 +131,13 @@ where
     }
 
     pub fn protocol_actions(&mut self, line: &str) -> Vec<ChatTransportAction> {
-        self.logger.activity();
-        match parse_line(line) {
+        let parsed = parse_line(line);
+        // A rejected login is not healthy traffic; counting it would reset the
+        // failure count that the reconnect after it records.
+        if parsed != ParsedLine::AuthenticationFailed {
+            self.logger.activity();
+        }
+        match parsed {
             ParsedLine::Ping { payload } => {
                 vec![ChatTransportAction::Write(format!("PONG{payload}\r\n"))]
             }
@@ -344,6 +349,10 @@ mod tests {
     }
 
     impl ChatLogger for StubLogger {
+        fn activity(&mut self) {
+            self.calls.push(String::from("activity"));
+        }
+
         fn printf(&mut self, message: &str) {
             self.calls.push(format!("printf:{message}"));
         }
@@ -391,6 +400,20 @@ mod tests {
         let output = format!("{client:?}");
         assert!(!output.contains("chat-secret-token"));
         assert!(output.contains("<redacted>"));
+    }
+
+    #[test]
+    fn rejected_login_is_not_recorded_as_activity() {
+        let mut client = ChatClient::new("user", "token", "chan", StubLogger::default(), false);
+        client.protocol_actions("PING :tmi.twitch.tv");
+        client.protocol_actions("NOTICE * :Login authentication failed");
+        let activity = client
+            .logger
+            .calls
+            .iter()
+            .filter(|call| *call == "activity")
+            .count();
+        assert_eq!(activity, 1);
     }
 
     #[test]

@@ -38,7 +38,7 @@ which is secret), optional `log/` files, `streak-cache.json`,
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `username` | placeholder | Your Twitch login, not your display name: ASCII letters, digits, and underscores, at most 25 characters, normalized to lowercase. Windows device names such as `CON`, `AUX`, `COM1`, and `LPT1` are rejected on every platform so the data directory stays portable. Required. |
-| `streamers` | `[]` | Channels to watch. Their order is the `ORDER` priority. When the list is empty, the miner loads up to 100 channels you follow. |
+| `streamers` | `[]` | Channels to watch. Their order is the `ORDER` priority. When the list is empty, the miner loads every channel you follow. |
 | `streamers_exclude` | `[]` | Logins that are never watched. |
 | `followers_order` | `DESC` | Order of followed channels when `streamers` is empty: `ASC` or `DESC`. |
 | `game_priority` | `[]` | Games to prefer, in order. |

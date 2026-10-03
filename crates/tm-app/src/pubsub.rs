@@ -459,16 +459,12 @@ fn pubsub_event_topic_class(event: &tm_domain::MinerEvent) -> &'static str {
 }
 
 fn failed_pubsub_setup_report(error: &tm_pubsub::PubSubError) -> tm_pubsub::PubSubSetupReport {
-    let (total_topics, configured_topics) = match error {
-        tm_pubsub::PubSubError::CapacityExceeded { configured, .. } => (*configured, *configured),
-        _ => (0, 1),
-    };
     tm_pubsub::PubSubSetupReport {
         connection_count: 0,
-        total_topics,
+        total_topics: 0,
         capabilities: vec![tm_pubsub::PubSubCapabilityStatus {
             topic_class: String::from("transport-setup"),
-            configured_topics,
+            configured_topics: 1,
             acknowledged_topics: 0,
             last_message_unix: None,
             reconnects: 0,
@@ -697,7 +693,6 @@ fn pubsub_connection_failure_class(
 fn pubsub_error_class(error: &tm_pubsub::PubSubError) -> &'static str {
     match error {
         tm_pubsub::PubSubError::MissingUserId => "configuration",
-        tm_pubsub::PubSubError::CapacityExceeded { .. } => "capacity",
         tm_pubsub::PubSubError::InvalidPayload(_)
         | tm_pubsub::PubSubError::InvalidText(_)
         | tm_pubsub::PubSubError::Protocol(_) => "protocol",
@@ -896,13 +891,6 @@ mod tests {
         vec![
             (tm_pubsub::PubSubError::MissingUserId, "configuration"),
             (
-                tm_pubsub::PubSubError::CapacityExceeded {
-                    configured: 501,
-                    maximum: 500,
-                },
-                "capacity",
-            ),
-            (
                 tm_pubsub::PubSubError::InvalidPayload(
                     serde_json::from_str::<serde_json::Value>("not-json").unwrap_err(),
                 ),
@@ -936,22 +924,6 @@ mod tests {
         let outcome = classify_pubsub_connection_result(&result, 1, &topics, 1);
 
         assert!(matches!(outcome, PubSubConnectionOutcome::Reconnect(_)));
-    }
-
-    #[test]
-    fn capacity_failure_is_visible_without_topic_identifiers() {
-        let report = failed_pubsub_setup_report(&tm_pubsub::PubSubError::CapacityExceeded {
-            configured: 501,
-            maximum: 500,
-        });
-
-        assert_eq!(report.connection_count, 0);
-        assert_eq!(report.total_topics, 501);
-        assert_eq!(report.capabilities[0].topic_class, "transport-setup");
-        assert_eq!(
-            report.capabilities[0].failure_class.as_deref(),
-            Some("capacity")
-        );
     }
 
     #[test]

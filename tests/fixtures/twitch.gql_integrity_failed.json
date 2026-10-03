@@ -1,0 +1,9 @@
+{
+  "errors": [
+    {
+      "message": "failed integrity check",
+      "path": ["currentUser", "inventory"]
+    }
+  ],
+  "data": null
+}

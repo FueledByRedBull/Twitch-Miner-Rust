@@ -155,7 +155,7 @@
     "expected": {
       "presence_source": "eventsub+gql-polling",
       "prediction_source": "pubsub-compatibility",
-      "pubsub_presence": false,
+      "pubsub_presence": true,
       "pubsub_prediction_channel": true,
       "eventsub_prediction_subscriptions": 0
     }
@@ -163,8 +163,8 @@
   "pubsub_batching": {
     "streamer_count": 30,
     "expected": {
-      "topic_count": 122,
-      "batch_sizes": [50, 50, 22]
+      "topic_count": 152,
+      "batch_sizes": [50, 50, 50, 2]
     }
   },
   "eventsub_capacity": {

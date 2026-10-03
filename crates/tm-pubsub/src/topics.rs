@@ -49,11 +49,13 @@ pub fn build_topics(user_id: &str, streamers: &[Streamer]) -> Result<Vec<String>
         push_unique(format!("predictions-user-v1.{}", user_id.trim()));
     }
 
+    let mut presence = Vec::new();
     for streamer in streamers {
         if streamer.channel_id.trim().is_empty() {
             continue;
         }
         let channel_id = streamer.channel_id.trim();
+        presence.push(format!("video-playback-by-id.{channel_id}"));
         if streamer.settings.follow_raid {
             push_unique(format!("raid.{channel_id}"));
         }
@@ -67,7 +69,20 @@ pub fn build_topics(user_id: &str, streamers: &[Streamer]) -> Result<Vec<String>
             push_unique(format!("community-points-channel-v1.{channel_id}"));
         }
     }
+    // Presence also arrives through EventSub and GQL polling, so these topics
+    // come last and are the first dropped when the connection limit is reached.
+    for topic in presence {
+        push_unique(topic);
+    }
 
+    if topics.len() > PUBSUB_MAX_TOPICS {
+        tracing::warn!(
+            configured = topics.len(),
+            maximum = PUBSUB_MAX_TOPICS,
+            "PubSub topic limit reached; the lowest-priority topics are not subscribed"
+        );
+        topics.truncate(PUBSUB_MAX_TOPICS);
+    }
     Ok(topics)
 }
 
@@ -75,17 +90,7 @@ pub fn build_topic_batches(
     user_id: &str,
     streamers: &[Streamer],
 ) -> Result<Vec<Vec<String>>, PubSubError> {
-    checked_topic_batches(&build_topics(user_id, streamers)?)
-}
-
-fn checked_topic_batches(topics: &[String]) -> Result<Vec<Vec<String>>, PubSubError> {
-    if topics.len() > PUBSUB_MAX_TOPICS {
-        return Err(PubSubError::CapacityExceeded {
-            configured: topics.len(),
-            maximum: PUBSUB_MAX_TOPICS,
-        });
-    }
-    Ok(chunk_topics(topics))
+    Ok(chunk_topics(&build_topics(user_id, streamers)?))
 }
 
 #[must_use]

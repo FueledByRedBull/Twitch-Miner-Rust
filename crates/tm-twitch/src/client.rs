@@ -19,17 +19,18 @@ use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
     channel_points_context_from_typed, decode_gql_data, followers_page_from_typed,
     inventory_snapshot_from_typed, is_persisted_query_not_found, recent_clips_from_typed,
-    stream_info_from_typed, user_contributions_from_typed, validate_typed_claim_bonus_response,
-    validate_typed_claim_drop_response, validate_typed_community_goal_response,
-    watch_streak_milestone_from_typed,
+    stream_info_from_typed, user_contributions_from_typed, validate_make_prediction_response,
+    validate_typed_claim_bonus_response, validate_typed_claim_drop_response,
+    validate_typed_community_goal_response, watch_streak_milestone_from_typed,
 };
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
     ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
     EmptyMutationData, FollowersData, GqlPersistedOperation, InventoryData, InventoryDrop,
-    InventorySnapshot, LiveStatusData, PlaybackAccessTokenData, RecentClip, RecentClipsData,
-    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
-    UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard, WatchStreakMilestone,
+    InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip,
+    RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
+    WatchStreakMilestone,
 };
 use crate::{operations, CLIENT_ID};
 
@@ -626,7 +627,7 @@ impl TwitchClient {
                 "event_id, outcome_id, and points must be between 10 and 250000",
             ));
         }
-        let _: EmptyMutationData = self
+        let response: MakePredictionData = self
             .post_mutation_typed(&operations::make_prediction(
                 event_id,
                 outcome_id,
@@ -634,7 +635,7 @@ impl TwitchClient {
                 &generate_transaction_id(),
             ))
             .await?;
-        Ok(())
+        validate_make_prediction_response(response)
     }
 
     pub async fn fetch_inventory_typed(&self) -> Result<Vec<InventoryDrop>, TwitchClientError> {

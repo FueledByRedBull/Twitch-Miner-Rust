@@ -1086,6 +1086,7 @@ fn twitch_error_class(error: &TwitchClientError) -> &'static str {
         TwitchFailureClass::Timeout => "timeout",
         TwitchFailureClass::ConnectionReset => "connection-reset",
         TwitchFailureClass::PersistedQueryNotFound => "persisted-query-not-found",
+        TwitchFailureClass::IntegrityRequired => "integrity-required",
         TwitchFailureClass::Other => {
             if matches!(error, TwitchClientError::MutationRejected { .. }) {
                 "mutation-rejected"

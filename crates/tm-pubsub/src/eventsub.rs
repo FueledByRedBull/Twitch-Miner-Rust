@@ -1006,9 +1006,11 @@ fn validate_reconnect_url(reconnect_url: &str) -> Result<(), EventSubError> {
             "invalid EventSub reconnect URL: scheme",
         ));
     }
+    // Twitch requires the reconnect URL to be used as is and does not promise the
+    // original host, so any Twitch subdomain is accepted; other hosts are not.
     if !url
         .host_str()
-        .is_some_and(|host| host.eq_ignore_ascii_case("eventsub.wss.twitch.tv"))
+        .is_some_and(|host| host.to_ascii_lowercase().ends_with(".twitch.tv"))
     {
         return Err(EventSubError::Protocol(
             "invalid EventSub reconnect URL: host",
