@@ -2436,3 +2436,74 @@ fn channel_campaign_requirements_exclude_subscription_and_non_watch_rewards() {
         vec!["mixed", "unknown"]
     );
 }
+
+#[test]
+fn generated_ids_are_random_hex_of_the_requested_length() {
+    let sessions = (0..64)
+        .map(|_| crate::generate_client_session_id())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(sessions.len(), 64);
+    for id in &sessions {
+        assert_eq!(id.len(), 16);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(id, "0000000000000000");
+    }
+    let device = crate::generate_device_id();
+    assert_eq!(device.len(), 32);
+    assert!(!device.starts_with("0000000000000000"));
+    assert_ne!(
+        crate::generate_transaction_id(),
+        crate::generate_transaction_id()
+    );
+}
+
+#[test]
+fn make_prediction_response_error_is_a_typed_rejection() {
+    let decode = |value: serde_json::Value| {
+        crate::responses::validate_make_prediction_response(serde_json::from_value(value).unwrap())
+    };
+    assert!(decode(protocol_fixture("twitch.empty_mutation_success.json")["data"].clone()).is_ok());
+    let rejected = decode(protocol_fixture("twitch.make_prediction_rejected.json")["data"].clone());
+    assert!(matches!(
+        rejected,
+        Err(TwitchClientError::MutationRejected { detail, .. }) if detail.ends_with("NOT_ENOUGH_POINTS")
+    ));
+    assert!(decode(serde_json::json!({})).is_ok());
+    assert!(decode(serde_json::json!({"makePrediction": {"error": null}})).is_ok());
+    for (error, expected) in [
+        (
+            serde_json::json!({"code": "NOT_ENOUGH_POINTS"}),
+            "NOT_ENOUGH_POINTS",
+        ),
+        (serde_json::json!({"code": "event <script>"}), "UNKNOWN"),
+        (serde_json::json!({}), "UNKNOWN"),
+    ] {
+        let rejection =
+            decode(serde_json::json!({"makePrediction": {"error": error}})).unwrap_err();
+        assert!(matches!(
+            &rejection,
+            TwitchClientError::MutationRejected { context, detail }
+                if context == "MakePrediction" && detail.ends_with(expected)
+        ));
+    }
+}
+
+#[test]
+fn integrity_failures_are_classified_separately_from_other_gql_errors() {
+    let integrity = protocol_fixture("twitch.gql_integrity_failed.json");
+    let error = decode_gql_data::<serde_json::Value>(&integrity, "Inventory").unwrap_err();
+    assert!(
+        matches!(&error, TwitchClientError::IntegrityRequired { context } if context == "Inventory")
+    );
+    assert_eq!(error.failure_class(), TwitchFailureClass::IntegrityRequired);
+    assert!(matches!(
+        crate::parsers::validate_gql_mutation_response("JoinRaid", &integrity),
+        Err(TwitchClientError::IntegrityRequired { .. })
+    ));
+
+    let other = serde_json::json!({"errors": [{"message": "service timeout"}], "data": null});
+    assert!(matches!(
+        decode_gql_data::<serde_json::Value>(&other, "Inventory"),
+        Err(TwitchClientError::GqlErrors { .. })
+    ));
+}

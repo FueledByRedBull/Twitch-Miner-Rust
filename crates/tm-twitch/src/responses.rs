@@ -21,6 +21,12 @@ pub(crate) fn is_persisted_query_not_found(payload: &serde_json::Value) -> bool 
         })
 }
 
+/// Twitch reports a missing or rejected Client-Integrity token as a GraphQL
+/// error whose message contains "integrity" (e.g. "failed integrity check").
+pub(crate) fn is_integrity_message(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("integrity")
+}
+
 pub(crate) fn decode_gql_data<T>(
     payload: &serde_json::Value,
     context: &'static str,
@@ -41,12 +47,43 @@ where
         }
     })?;
     if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+        if errors
+            .iter()
+            .any(|error| error.message.as_deref().is_some_and(is_integrity_message))
+        {
+            return Err(TwitchClientError::IntegrityRequired {
+                context: context.to_string(),
+            });
+        }
         return Err(TwitchClientError::GqlErrors {
             context: context.to_string(),
             errors: format!("{} error(s)", errors.len()),
         });
     }
     response.data.ok_or(TwitchClientError::MissingField("data"))
+}
+
+/// Twitch reports a refused bet (for example a locked event or too few points)
+/// inside `data.makePrediction.error` with no top-level GraphQL error.
+pub(crate) fn validate_make_prediction_response(
+    response: crate::types::MakePredictionData,
+) -> Result<(), TwitchClientError> {
+    let Some(error) = response.make_prediction.and_then(|payload| payload.error) else {
+        return Ok(());
+    };
+    // Only a short upper-case enum code is echoed; anything else is withheld.
+    let code = error
+        .code
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 64
+                && code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+        })
+        .unwrap_or_else(|| String::from("UNKNOWN"));
+    Err(TwitchClientError::MutationRejected {
+        context: String::from("MakePrediction"),
+        detail: format!("prediction rejected: {code}"),
+    })
 }
 
 pub(crate) fn validate_typed_claim_bonus_response(

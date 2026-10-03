@@ -1,0 +1,10 @@
+{
+  "data": {
+    "makePrediction": {
+      "prediction": null,
+      "error": {
+        "code": "NOT_ENOUGH_POINTS"
+      }
+    }
+  }
+}
