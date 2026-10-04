@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - Unreleased
 
 - Accepts EventSub reconnect URLs on any `twitch.tv` subdomain instead of only
   `eventsub.wss.twitch.tv`, so a Twitch handoff to another host keeps its
@@ -27,7 +27,7 @@
 - Corrects documentation on follower loading, task recovery, PubSub retry
   offsets and the canary-only Drops dashboard query.
 
-## 0.3.0 - Unreleased
+## 0.3.0 - 2026-10-04
 
 - Matches the built-in defaults to `config.example.json`: predictions and raid
   following are off and log anonymization is on. Configurations already written
