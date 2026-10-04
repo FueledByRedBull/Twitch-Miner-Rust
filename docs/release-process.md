@@ -225,6 +225,30 @@ input options, and `python -B -m unittest scripts.tests.test_review_soak` for it
 synthetic regression tests. Keep `--output-dir` in a durable evidence directory
 outside build output such as `target/`.
 
+### What fails a soak
+
+A finding at the `failure` level, or missing evidence, makes
+`coverage.complete` false. Recovery does not clear it. These are failures:
+
+- a container restart, or Docker reporting the container as not healthy;
+- a change of image, revision, container or runtime start, anchor, DNS override,
+  or clock continuity;
+- stale status, or a heartbeat older than 120 seconds;
+- a task or watch slot at five consecutive failures, or more than two selected
+  watch slots;
+- `--health` failing in three samples in a row.
+
+Missing evidence has the same effect: a gap of more than 90 seconds between
+samples, a missing required field, a changed task list, or a collector record
+that is not a checkpoint. A six-hour watch total below the threshold, a watch
+drought, and a single failing task or transport are `review` findings.
+
+`--health` is an instant probe: it fails while a transport is reconnecting,
+before its topics are acknowledged again. The Compose healthcheck therefore
+needs three failed probes (`retries: 3`) before Docker reports unhealthy, and
+the review applies the same threshold. Shorter runs stay in the findings at the
+`review` level, with their sample count, so they are judged and not hidden.
+
 Review identity, continuity, coverage, historical findings, earnings, Drops and
 the milestone together. Failed or missing probes are unknown evidence. Recovered
 failures remain recorded; Docker health does not override direct application

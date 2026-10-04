@@ -59,6 +59,11 @@ pub enum TwitchClientError {
     PersistedQueryNotFound { operation: String },
     #[error("mutation rejected for {context}: {detail}")]
     MutationRejected { context: String, detail: String },
+    /// Twitch refused the request for a missing or rejected Client-Integrity
+    /// token. The miner cannot mint one: tokens minted outside a browser are
+    /// flagged as bots, so this is reported rather than retried.
+    #[error("twitch integrity check failed for {context}")]
+    IntegrityRequired { context: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +74,7 @@ pub enum TwitchFailureClass {
     Timeout,
     ConnectionReset,
     PersistedQueryNotFound,
+    IntegrityRequired,
     Other,
 }
 
@@ -91,6 +97,7 @@ impl TwitchClientError {
             }
             Self::PlaybackRequest { failure, .. } | Self::RemoteRequest { failure, .. } => *failure,
             Self::PersistedQueryNotFound { .. } => TwitchFailureClass::PersistedQueryNotFound,
+            Self::IntegrityRequired { .. } => TwitchFailureClass::IntegrityRequired,
             _ => TwitchFailureClass::Other,
         }
     }
@@ -217,8 +224,7 @@ pub(crate) struct GqlResponse<T> {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct GqlError {
-    #[serde(rename = "message")]
-    pub(crate) _message: Option<String>,
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -748,6 +754,22 @@ pub(crate) struct UserContributionGoal {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct EmptyMutationData {}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct MakePredictionData {
+    #[serde(rename = "makePrediction")]
+    pub(crate) make_prediction: Option<MakePredictionPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MakePredictionPayload {
+    pub(crate) error: Option<MakePredictionError>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MakePredictionError {
+    pub(crate) code: Option<String>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ClaimBonusData {

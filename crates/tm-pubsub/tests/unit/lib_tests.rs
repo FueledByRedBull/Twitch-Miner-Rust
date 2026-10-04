@@ -26,7 +26,7 @@ fn builds_topics_from_streamer_settings() {
     let topics = build_topics("user-1", &[streamer("100"), streamer("200")]).unwrap();
     assert!(topics.contains(&"community-points-user-v1.user-1".to_string()));
     assert!(topics.contains(&"predictions-user-v1.user-1".to_string()));
-    assert!(!topics.contains(&"video-playback-by-id.100".to_string()));
+    assert!(topics.contains(&"video-playback-by-id.100".to_string()));
     assert!(topics.contains(&"raid.100".to_string()));
     assert!(topics.contains(&"predictions-channel-v1.100".to_string()));
     assert!(topics.contains(&"community-moments-channel-v1.100".to_string()));
@@ -53,12 +53,18 @@ fn omits_community_goal_topic_when_feature_is_disabled() {
 }
 
 #[test]
-fn viewer_compatible_topics_keep_presence_on_eventsub() {
-    let topics = build_topics("user-1", &[streamer("100")]).unwrap();
+fn presence_topics_follow_every_channel_feature_topic() {
+    let topics = build_topics("user-1", &[streamer("100"), streamer("200")]).unwrap();
 
-    assert!(!topics.contains(&"video-playback-by-id.100".to_string()));
+    assert_eq!(
+        topics[topics.len() - 2..],
+        [
+            String::from("video-playback-by-id.100"),
+            String::from("video-playback-by-id.200")
+        ]
+    );
     assert!(topics.contains(&"predictions-user-v1.user-1".to_string()));
-    assert!(topics.contains(&"predictions-channel-v1.100".to_string()));
+    assert!(topics.contains(&"predictions-channel-v1.200".to_string()));
 }
 
 #[test]
@@ -75,9 +81,9 @@ fn builds_topic_batches_with_auth_topic_and_fifty_max_topics() {
         .collect::<Vec<_>>();
 
     let batches = build_topic_batches("user-1", &streamers).unwrap();
-    assert_eq!(batches.len(), 2);
+    assert_eq!(batches.len(), 3);
     assert_eq!(batches[0].len(), 50);
-    assert_eq!(batches[1].len(), 2);
+    assert_eq!(batches[2].len(), 3);
     assert_eq!(batches[0][0], "community-points-user-v1.user-1");
     assert!(!batches[1]
         .iter()
@@ -85,7 +91,7 @@ fn builds_topic_batches_with_auth_topic_and_fifty_max_topics() {
 }
 
 #[test]
-fn topic_batches_fail_closed_above_ten_connections() {
+fn topic_batches_keep_priority_topics_within_ten_connections() {
     let within_budget = (0..99)
         .map(|index| Streamer {
             channel_id: format!("channel-{index}"),
@@ -112,13 +118,22 @@ fn topic_batches_fail_closed_above_ten_connections() {
             ..Streamer::default()
         })
         .collect::<Vec<_>>();
-    assert!(matches!(
-        build_topic_batches("user-1", &over_budget),
-        Err(PubSubError::CapacityExceeded {
-            configured: 502,
-            maximum: PUBSUB_MAX_TOPICS
-        })
-    ));
+    let topics = build_topic_batches("user-1", &over_budget)
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    // Truncation keeps the account topic and channel features and drops the
+    // presence topics that EventSub and polling also cover.
+    assert_eq!(topics.len(), PUBSUB_MAX_TOPICS);
+    assert_eq!(topics[0], "community-points-user-v1.user-1");
+    assert!(topics
+        .iter()
+        .all(|topic| !topic.starts_with("video-playback-by-id.")));
+    assert_eq!(
+        topics.last().unwrap(),
+        "community-points-channel-v1.channel-498"
+    );
 }
 
 #[test]

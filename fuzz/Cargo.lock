@@ -1079,7 +1079,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tm-auth"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "tm-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs",
  "serde",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "tm-domain"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "tm-pubsub"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "tm-twitch"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -1167,9 +1167,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",

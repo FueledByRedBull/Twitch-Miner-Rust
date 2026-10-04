@@ -31,9 +31,10 @@ self-supervising service on a Raspberry Pi, a server, or your desktop.
   Discord notifications.
 - **Safe defaults**: device-code login (no password), private credential files,
   always-verified TLS, and a privacy mode for logs.
-- **Unattended operation**: built-in health check, sanitized status output, and
-  automatic task recovery, shipped as a static binary in a `scratch` image for
-  AMD64 and ARM64.
+- **Unattended operation**: built-in health check, sanitized status output,
+  transports that reconnect on their own, and a clean exit for the container's
+  restart policy if a task stops. Shipped as a static binary in a `scratch`
+  image for AMD64 and ARM64.
 
 ## Quick start (Docker)
 

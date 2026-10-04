@@ -385,13 +385,18 @@ pub fn log_file_path(base_dir: impl AsRef<Path>, username: &str, anonymize: bool
 }
 
 pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityError> {
-    let filter = if deep_debug_enabled(&options.settings) {
-        EnvFilter::new("trace")
+    let level = if deep_debug_enabled(&options.settings) {
+        "trace"
     } else if options.settings.debug {
-        EnvFilter::new("debug")
+        "debug"
     } else {
-        EnvFilter::new("info")
+        "info"
     };
+    // Transport crates log raw frames and headers at trace/debug, which would
+    // include the PubSub LISTEN auth token; they stay at info at every level.
+    let filter = EnvFilter::new(format!(
+        "{level},tungstenite=info,tokio_tungstenite=info,hyper=info,hyper_util=info,h2=info,reqwest=info,rustls=info"
+    ));
 
     let event_format = GoStyleEventFormat {
         show_seconds: options.settings.show_seconds,
