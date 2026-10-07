@@ -113,11 +113,23 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
 /// A renamed, banned, or malformed channel fails the same way on every retry,
 /// so it is skipped. Network, rate-limit, server, auth, and integrity failures
 /// are not specific to one streamer and still abort startup for a clean retry.
+/// So does a connection dropped mid-response or a truncated body.
 fn is_permanent_streamer_failure(error: &anyhow::Error) -> bool {
-    match error.downcast_ref::<tm_twitch::TwitchClientError>() {
+    use tm_twitch::TwitchClientError;
+    match error.downcast_ref::<TwitchClientError>() {
+        Some(TwitchClientError::Http(_) | TwitchClientError::Json(_)) => false,
         Some(error) => error.failure_class() == tm_twitch::TwitchFailureClass::Other,
         None => true,
     }
+}
+
+/// Startup claims and contributions are opportunistic: Twitch declining one
+/// says nothing about whether the channel can be mined.
+fn is_rejected_mutation(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<tm_twitch::TwitchClientError>(),
+        Some(tm_twitch::TwitchClientError::MutationRejected { .. })
+    )
 }
 
 pub(crate) async fn load_targets(
@@ -225,26 +237,41 @@ async fn bootstrap_channel_context(
 
     if streamer.can_earn_channel_points() {
         if let Some(claim_id) = context.claim_id.as_deref() {
-            twitch
+            let claimed = twitch
                 .claim_bonus(&streamer.channel_id, claim_id, user_id)
                 .await
-                .with_context(|| format!("claim startup bonus for {}", streamer.username))?;
-            if observability.show_claimed_bonus {
-                let message = observability.bonus_claim_message(streamer, true);
-                tracing::info!(operation = "claim_bonus", "{message}");
-                observability.spawn_event(DiscordEvent::BonusClaim, message);
+                .with_context(|| format!("claim startup bonus for {}", streamer.username));
+            match claimed {
+                Err(error) if is_rejected_mutation(&error) => {
+                    tracing::warn!(error_class = "startup-claim-rejected", %error, "startup bonus claim was rejected");
+                }
+                Err(error) => return Err(error),
+                Ok(_) => {
+                    if observability.show_claimed_bonus {
+                        let message = observability.bonus_claim_message(streamer, true);
+                        tracing::info!(operation = "claim_bonus", "{message}");
+                        observability.spawn_event(DiscordEvent::BonusClaim, message);
+                    }
+                    context = twitch
+                        .fetch_channel_points_context(&streamer.username)
+                        .await
+                        .with_context(|| {
+                            format!("refresh claimed bonus context for {}", streamer.username)
+                        })?;
+                    apply_context_to_streamer(streamer, &context);
+                }
             }
-            context = twitch
-                .fetch_channel_points_context(&streamer.username)
-                .await
-                .with_context(|| {
-                    format!("refresh claimed bonus context for {}", streamer.username)
-                })?;
-            apply_context_to_streamer(streamer, &context);
         }
     }
 
-    if contribute_streamer_community_goals(twitch, streamer).await? {
+    let contributed = match contribute_streamer_community_goals(twitch, streamer).await {
+        Err(error) if is_rejected_mutation(&error) => {
+            tracing::warn!(error_class = "startup-goal-rejected", %error, "startup community goal contribution was rejected");
+            false
+        }
+        result => result?,
+    };
+    if contributed {
         context = twitch
             .fetch_channel_points_context(&streamer.username)
             .await
@@ -591,6 +618,16 @@ mod tests {
         assert!(super::is_permanent_streamer_failure(&anyhow::anyhow!(
             "validate startup login"
         )));
+        let truncated = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert!(!super::is_permanent_streamer_failure(&anyhow::Error::new(
+            TwitchClientError::Json(truncated)
+        )));
+        let rejected = anyhow::Error::new(TwitchClientError::MutationRejected {
+            context: String::from("test"),
+            detail: String::from("test"),
+        })
+        .context("claim startup bonus for tester");
+        assert!(super::is_rejected_mutation(&rejected));
         for failure in [
             TwitchFailureClass::Unauthorized,
             TwitchFailureClass::RateLimited,

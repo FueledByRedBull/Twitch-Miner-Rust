@@ -28,6 +28,7 @@ MAX_CONSECUTIVE_FAILURES = 5
 # Match the Compose healthcheck `retries`: `--health` is an instant probe, so a
 # reconnect can fail one sample. Only this many in a row is a soak failure.
 HEALTH_FAILURE_SAMPLES = 3
+LEVELS = ("review", "evidence", "failure")
 
 
 def timestamp(value: str) -> dt.datetime:
@@ -329,6 +330,9 @@ def compare(report: dict, previous: dict | None) -> dict:
             current["first_utc"] = min(current["first_utc"], finding["first_utc"], key=timestamp)
             current["last_utc"] = max(current["last_utc"], finding["last_utc"], key=timestamp)
             current["samples"] = max(current["samples"], finding["samples"])
+            # An established level never downgrades: the review-time snapshot
+            # that completed a failing run is not in the stored history.
+            current["level"] = max(current["level"], finding["level"], key=LEVELS.index)
     report["coverage"]["complete"] = report["coverage"]["complete"] and not any(
         v["level"] in ("evidence", "failure") for v in report["findings"].values())
     for field in ("first_unclaimed", "first_claimed"):

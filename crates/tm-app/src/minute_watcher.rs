@@ -858,7 +858,9 @@ async fn refresh_watch_selection_metadata_inner(
     let should_claim_drops = streamers
         .iter()
         .any(|streamer| streamer.settings.claim_drops);
-    let mut inventory_drops = Vec::new();
+    // `None` when the inventory read failed: eligibility then keeps its
+    // previous value, because a failed read is not evidence of no rewards.
+    let mut inventory_drops = None;
     let excluded_campaign_ids = Arc::new(
         if streamers.iter().any(|streamer| {
             streamer.is_online
@@ -894,7 +896,7 @@ async fn refresh_watch_selection_metadata_inner(
                             );
                         }
                     }
-                    inventory_drops = snapshot.drops.clone();
+                    inventory_drops = Some(snapshot.drops.clone());
                     excluded_drop_campaign_ids(snapshot)
                 }
                 Err(error) => {
@@ -986,16 +988,18 @@ async fn refresh_watch_selection_metadata_inner(
                 expected_generation,
             )
             .await?;
-            refresh_drop_campaign_eligibility(
-                &runtime,
-                &twitch,
-                &streamer,
-                &info,
-                &excluded_campaign_ids,
-                &inventory_drops,
-                now,
-            )
-            .await?;
+            if let Some(inventory_drops) = inventory_drops.as_deref() {
+                refresh_drop_campaign_eligibility(
+                    &runtime,
+                    &twitch,
+                    &streamer,
+                    &info,
+                    &excluded_campaign_ids,
+                    inventory_drops,
+                    now,
+                )
+                .await?;
+            }
             log_stream_presence_changes(
                 &observability,
                 &streamer,

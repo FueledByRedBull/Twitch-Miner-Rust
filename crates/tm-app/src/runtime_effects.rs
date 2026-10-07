@@ -1072,10 +1072,18 @@ async fn fail_prediction_placement(
 }
 
 fn prediction_placement_is_ambiguous(error: &TwitchClientError) -> bool {
-    // Only Twitch's typed rejection is authoritative. A malformed/truncated
-    // response, auth/rate-limit response, or transport error may all follow a
-    // mutation that Twitch accepted before the response was lost.
-    !matches!(error, TwitchClientError::MutationRejected { .. })
+    // A malformed/truncated response, auth/rate-limit response, or transport
+    // error may all follow a mutation that Twitch accepted before the response
+    // was lost. Only a typed rejection, or a failure that shows the mutation
+    // never ran, is authoritative: a connect failure precedes sending it, and
+    // an integrity or unknown-query refusal is Twitch declining to execute it.
+    !match error {
+        TwitchClientError::MutationRejected { .. }
+        | TwitchClientError::IntegrityRequired { .. }
+        | TwitchClientError::PersistedQueryNotFound { .. } => true,
+        TwitchClientError::Http(error) => error.is_connect(),
+        _ => false,
+    }
 }
 
 fn twitch_error_class(error: &TwitchClientError) -> &'static str {
@@ -1196,6 +1204,22 @@ mod tests {
         assert!(restored.bet_placed);
         assert!(!restored.bet_confirmed);
         assert_eq!(restored.decision, original);
+    }
+
+    #[test]
+    fn only_possibly_executed_placements_are_ambiguous() {
+        let ambiguous = super::prediction_placement_is_ambiguous;
+        assert!(!ambiguous(&TwitchClientError::IntegrityRequired {
+            context: String::from("MakePrediction"),
+        }));
+        assert!(!ambiguous(&TwitchClientError::PersistedQueryNotFound {
+            operation: String::from("MakePrediction"),
+        }));
+        assert!(ambiguous(&TwitchClientError::UnexpectedStatus {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            context: "MakePrediction",
+        }));
+        assert!(ambiguous(&TwitchClientError::MissingField("data")));
     }
 
     #[tokio::test]

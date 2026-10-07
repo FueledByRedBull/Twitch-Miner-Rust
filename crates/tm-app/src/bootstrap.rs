@@ -246,11 +246,13 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     let prompt = auth_client
         .request_device_code_with_scope(&device_id, &scopes)
         .await?;
+    // The code goes in the message itself: anonymized logs drop every field,
+    // and the login cannot be completed without it.
     tracing::info!(
-        verification_uri = %prompt.verification_uri,
-        user_code = %prompt.user_code,
         expires_in_seconds = prompt.expires_in.as_secs(),
-        "complete Twitch device login"
+        "complete Twitch device login: open {} and enter code {}",
+        prompt.verification_uri,
+        prompt.user_code
     );
     let started = tokio::time::Instant::now();
     let mut poll_interval = prompt.interval;
