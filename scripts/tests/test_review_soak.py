@@ -272,6 +272,14 @@ class SoakReviewTests(unittest.TestCase):
         self.assertIn("restart", result["findings"])
         self.assertTrue(result["decision_required"])
 
+    def test_health_failure_completed_by_a_review_snapshot_survives_the_next_review(self):
+        failing = [sample(n * 60, application_health_exit_code=int(n >= 1)) for n in range(4)]
+        previous = review(failing[:3], current=failing[3])
+        self.assertEqual(previous["findings"]["application-health"]["level"], "failure")
+        result = REVIEW.compare(review(failing[:3] + [sample(180), sample(240)]), previous)
+        self.assertEqual(result["findings"]["application-health"]["level"], "failure")
+        self.assertFalse(result["coverage"]["complete"])
+
     def test_prior_evidence_problem_cannot_become_complete_when_its_row_disappears(self):
         previous = review([], current=sample(60), records=[record(sample()),
                           {"kind": "probe-error", "collected_at": sample(30)["utc"]}, record(sample(60))])

@@ -228,10 +228,6 @@ pub fn parse_line(line: &str) -> ParsedLine {
         return ParsedLine::Other;
     }
 
-    if contains_ignore_case(line, "authentication failed") {
-        return ParsedLine::AuthenticationFailed;
-    }
-
     if let Some(payload) = line.strip_prefix("PING") {
         return ParsedLine::Ping {
             payload: payload.to_string(),
@@ -239,6 +235,11 @@ pub fn parse_line(line: &str) -> ParsedLine {
     }
 
     if !line.contains("PRIVMSG") {
+        // Only a server line can reject the login; chat text saying the same
+        // words is an ordinary message.
+        if contains_ignore_case(line, "authentication failed") {
+            return ParsedLine::AuthenticationFailed;
+        }
         return ParsedLine::Other;
     }
 
@@ -441,6 +442,16 @@ mod tests {
                 payload: String::from(" :tmi.twitch.tv"),
             }
         );
+    }
+
+    #[test]
+    fn parse_line_keeps_chat_text_about_auth_failure_as_a_message() {
+        assert!(matches!(
+            parse_line(
+                ":nick!nick@nick.tmi.twitch.tv PRIVMSG #chan :login authentication failed lol"
+            ),
+            ParsedLine::PrivMsg { .. }
+        ));
     }
 
     #[test]

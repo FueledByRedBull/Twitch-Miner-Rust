@@ -1,6 +1,28 @@
 # Changelog
 
-## 0.3.1 - Unreleased
+## 0.3.2 - Unreleased
+
+- Shows the device-login code in the log message itself. With
+  `anonymize_logs` on, which is the default, the code was dropped with the
+  other log fields and the login could not be completed.
+- Keeps a channel's Drops eligibility when the inventory read fails, instead
+  of treating the failed read as an empty inventory and releasing the channel.
+- Frees a prediction's journal slot when Twitch provably never executed the
+  bet: a connect failure, an integrity refusal or an unknown persisted query.
+  Outcomes that may have been accepted stay reserved as before.
+- Aborts startup for a clean retry on a dropped connection or truncated
+  response instead of skipping the streamer until restart, and no longer skips
+  a streamer because Twitch rejected its startup bonus claim or community goal
+  contribution.
+- Reads an IRC login rejection only from a server line, so a chat message
+  containing "authentication failed" no longer closes the chat connection.
+- `deploy-with-rollback.ps1` starts the rollback service again when its
+  pre-canary stop does not end cleanly, instead of leaving it stopped and
+  reporting it unchanged.
+- `review_soak.py` keeps an established finding level across reviews, so a
+  health failure completed by a review-time sample is not downgraded later.
+
+## 0.3.1 - 2026-10-07
 
 - Accepts EventSub reconnect URLs on any `twitch.tv` subdomain instead of only
   `eventsub.wss.twitch.tv`, so a Twitch handoff to another host keeps its

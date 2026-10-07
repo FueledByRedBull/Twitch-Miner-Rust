@@ -539,7 +539,19 @@ try {
         Copy-Item -LiteralPath $resolvedState -Destination $resolvedStateBackup -ErrorAction Stop
         Protect-PrivateFile $resolvedStateBackup
     }
-    Stop-RollbackForExclusiveCanary
+    try {
+        Stop-RollbackForExclusiveCanary
+    } catch {
+        # The stop can succeed before its exit-state check fails. Nothing else
+        # has changed yet, so start the same service again instead of leaving
+        # the host without a miner.
+        $stopFailure = $_.Exception.Message
+        Invoke-Docker @(
+            'compose', '-f', $resolvedCompose, 'up', '-d', $Service
+        ) "Rollback service could not be restarted after a failed stop ($stopFailure)"
+        Test-DeployedService $RollbackRevision 'Rollback'
+        throw "$stopFailure The rollback service was started again."
+    }
     $rollbackRecoveryRequired = $true
     Backup-RuntimeData
     Test-ImageCanary $CandidateImage
@@ -558,7 +570,7 @@ try {
 } catch {
     $candidateFailure = $_
     if (-not $rollbackRecoveryRequired) {
-        throw "Candidate preflight failed; the running service was unchanged. $($candidateFailure.Exception.Message)"
+        throw "Candidate preflight failed; no candidate was deployed. $($candidateFailure.Exception.Message)"
     }
     try {
         Restore-RollbackService
