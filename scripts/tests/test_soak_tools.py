@@ -59,6 +59,23 @@ class SoakToolTests(unittest.TestCase):
         self.assertEqual(COLLECT.continuity(anchor, dict(checkpoint, runtime_started=2)), "runtime_started")
         self.assertEqual(COLLECT.continuity(anchor, dict(checkpoint, monotonic_seconds=73)), "clock-continuity")
 
+    def test_restarted_collector_appends_a_continuity_failure(self):
+        import tempfile
+        anchor = dict(image="image", revision="revision", container_started="start", runtime_started=1,
+                      monotonic_seconds=10, observation_anchor_utc="2026-01-01T00:00:00+00:00")
+        rebooted = dict(anchor, runtime_started=2, monotonic_seconds=5, soak_elapsed_wall_seconds=600)
+        probe = types.SimpleNamespace(returncode=0, stdout=json.dumps(rebooted))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "soak-anchor.json").write_text(json.dumps(anchor), encoding="utf-8")
+            history = root / "minute-checkpoints.jsonl"
+            history.write_text('{"kind": "checkpoint"}\n', encoding="utf-8")
+            with mock.patch.object(COLLECT.subprocess, "run", return_value=probe), \
+                    mock.patch.object(sys, "argv", ["soak_collect.py", str(root / "soak-anchor.json"), "checker"]):
+                COLLECT.main()
+            kinds = [json.loads(line)["kind"] for line in history.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(kinds, ["checkpoint", "continuity-failure"])
+
     def test_anchor_waits_for_a_fully_earning_runtime(self):
         ready = sample(60, application_health_exit_code=0)
         self.assertTrue(START.earning(ready))

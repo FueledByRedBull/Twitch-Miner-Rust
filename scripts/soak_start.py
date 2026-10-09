@@ -5,6 +5,9 @@ Run on the soak host after a guarded deploy. The evidence directory must exist,
 name the short revision, and hold no anchor yet. Writes anchor-prerequisites.json,
 soak-anchor.json, collector-output.log and soak-start.json there. The anchor
 waits for fresh server credit on every watch slot; it never grants acceptance.
+With SOAK_COLLECTOR_UNIT set to a systemd user template unit (see
+deploy/twitch-miner-soak@.service), the collector runs as that unit and
+restarts after a reboot; otherwise it runs as a detached process.
 """
 import datetime as dt
 import json
@@ -68,10 +71,15 @@ def main():
         json.dump(anchor, handle, indent=2)
         handle.flush()
         os.fsync(handle.fileno())
-    with (evidence / 'collector-output.log').open('x') as output:
-        collector = subprocess.Popen([sys.executable, str(COLLECTOR), str(evidence / 'soak-anchor.json'), str(CHECKER)],
-                                     stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
-    summary = dict(anchor, collector_pid=collector.pid,
+    unit = os.environ.get('SOAK_COLLECTOR_UNIT')
+    if unit:
+        collector = f'{unit}@{evidence.name}.service'
+        subprocess.run(['systemctl', '--user', 'enable', '--now', collector], check=True)
+    else:
+        with (evidence / 'collector-output.log').open('x') as output:
+            collector = subprocess.Popen([sys.executable, str(COLLECTOR), str(evidence / 'soak-anchor.json'), str(CHECKER)],
+                                         stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True).pid
+    summary = dict(anchor, collector=collector,
                    earliest_review_utc=(now + dt.timedelta(seconds=259200)).isoformat(),
                    pre_anchor_warnings=cp['warnings'], pre_anchor_errors=cp['errors'],
                    pre_anchor_watch_timeouts=cp['watch_timeouts'], evidence=str(evidence))

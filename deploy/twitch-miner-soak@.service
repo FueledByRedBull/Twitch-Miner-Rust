@@ -1,0 +1,19 @@
+# systemd user unit for the soak collector, so a host reboot leaves a recorded
+# continuity failure instead of a silent gap. The instance name is the evidence
+# directory name. Adjust the two paths to where the soak tools and evidence live.
+#
+#   cp deploy/twitch-miner-soak@.service ~/.config/systemd/user/
+#   sudo loginctl enable-linger "$USER"
+#   SOAK_COLLECTOR_UNIT=twitch-miner-soak python3 soak_start.py <evidence-dir> <image> <revision>
+[Unit]
+Description=Twitch miner soak collector (%i)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/twitch-miner-ops/tools/soak_collect.py %h/release-evidence/%i/soak-anchor.json %h/twitch-miner-ops/tools/soak_checkpoint.py
+Restart=on-failure
+RestartSec=30
+# A finished or deliberately stopped collector must not start again at boot.
+ExecStopPost=/bin/sh -c '[ "$SERVICE_RESULT" != success ] || systemctl --user disable %n'
+
+[Install]
+WantedBy=default.target
