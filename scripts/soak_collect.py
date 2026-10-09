@@ -1,8 +1,10 @@
 """Collect sanitized minute checkpoints on the soak host for one bounded soak.
 
 Usage: python3 soak_collect.py <soak-anchor.json> <soak_checkpoint.py>
-Writes minute-checkpoints.jsonl beside the anchor and stops at the end of the
-72-hour window or on the first continuity failure. It never grants acceptance.
+Appends to minute-checkpoints.jsonl beside the anchor and stops at the end of
+the 72-hour window or on the first continuity failure. A restarted collector
+continues the same file, so a host reboot is recorded as a continuity failure.
+It never grants acceptance.
 """
 import datetime as dt
 import json
@@ -29,7 +31,7 @@ def main():
     anchor = json.loads(path.read_text())
     helper = sys.argv[2]
     output = path.with_name('minute-checkpoints.jsonl')
-    with output.open('x') as handle:
+    with output.open('a') as handle:
         while True:
             cycle = time.monotonic()
             record = {'collected_at': dt.datetime.now(dt.timezone.utc).isoformat()}

@@ -209,7 +209,13 @@ one directory there:
   server credit, writes the anchor, and starts the collector.
 - `scripts/soak_collect.py` appends one checkpoint per minute to
   `minute-checkpoints.jsonl` and stops after 72 hours or at the first identity or
-  clock discontinuity.
+  clock discontinuity. Started again, it continues the same file.
+
+By default the collector is a detached process, which a host reboot ends without
+a record. To have the reboot recorded as a continuity failure, install
+`deploy/twitch-miner-soak@.service` as a systemd user unit, enable lingering for
+that user, and set `SOAK_COLLECTOR_UNIT=twitch-miner-soak` when running
+`soak_start.py`. The restart still fails the soak.
 
 `scripts/soak_dns_path.py` is an optional one-shot probe for DNS interception
 on the host path. Run `python -B -m unittest scripts.tests.test_soak_tools` after
