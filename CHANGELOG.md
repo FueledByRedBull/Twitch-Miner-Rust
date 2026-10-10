@@ -5,7 +5,8 @@
 - The soak collector continues an existing history when started again, and
   `deploy/twitch-miner-soak@.service` runs it as a systemd user unit, so a host
   reboot is recorded as a continuity failure instead of ending collection
-  silently. `soak_start.py` uses the unit when `SOAK_COLLECTOR_UNIT` is set and
+  silently. The unit stays enabled across a clean shutdown and disables itself
+  only when the collector finishes. `soak_start.py` uses the unit when `SOAK_COLLECTOR_UNIT` is set and
   reports `collector` in place of `collector_pid`.
 
 ## 0.3.2 - Unreleased

@@ -12,8 +12,9 @@ Description=Twitch miner soak collector (%i)
 ExecStart=/usr/bin/python3 %h/twitch-miner-ops/tools/soak_collect.py %h/release-evidence/%i/soak-anchor.json %h/twitch-miner-ops/tools/soak_checkpoint.py
 Restart=on-failure
 RestartSec=30
-# A finished or deliberately stopped collector must not start again at boot.
-ExecStopPost=/bin/sh -c '[ "$SERVICE_RESULT" != success ] || systemctl --user disable %n'
+# A collector that finished on its own must not start again at boot. One that
+# was stopped, as at shutdown, stays enabled so the next boot is recorded.
+ExecStopPost=/bin/sh -c '[ "$EXIT_CODE" != exited ] || [ "$EXIT_STATUS" != 0 ] || systemctl --user disable %n'
 
 [Install]
 WantedBy=default.target
