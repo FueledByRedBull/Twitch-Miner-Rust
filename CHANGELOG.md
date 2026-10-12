@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Reuses the validated media-playlist URL for the same channel and broadcast,
+  so most watch ticks send two playback requests (media playlist, newest
+  segment) instead of four. The URL is dropped on a broadcast change, shortly
+  before the playback token expires, and after a failed tick, which then runs
+  one full preflight. Playlist contents and segment URLs are still fetched
+  every tick. `--status` reports `playback_full_preflights` and
+  `playback_cached_ticks` for the current session.
 - The soak collector continues an existing history when started again, and
   `deploy/twitch-miner-soak@.service` runs it as a systemd user unit, so a host
   reboot is recorded as a continuity failure instead of ending collection

@@ -742,6 +742,9 @@ async fn watch_streamer_login(
         )
         .await,
     );
+    context
+        .health
+        .record_playback_ticks(context.twitch.playback_tick_counts());
     // Request work consumes the interval; an overrun starts a fresh attempt,
     // without accumulating missed ticks to replay.
     if sleep_or_stop(stop, interval.saturating_sub(started.elapsed())).await {
@@ -1134,7 +1137,7 @@ pub(crate) async fn send_minute_watched_for_streamer(
     stream.payload = vec![build_minute_watched_event(&streamer, &stream, user_id)];
 
     twitch
-        .prime_live_playback(&streamer.username)
+        .prime_live_playback(&streamer.username, &stream.broadcast_id)
         .await
         .with_context(|| format!("prime live playback for {}", streamer.username))?;
 
