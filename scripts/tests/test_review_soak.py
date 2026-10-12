@@ -120,6 +120,21 @@ class SoakReviewTests(unittest.TestCase):
         self.assertIsNotNone(retries)
         self.assertEqual(REVIEW.HEALTH_FAILURE_SAMPLES, int(retries[1]))
 
+    def test_opportunity_counts_ready_time_and_the_part_that_held_a_slot(self):
+        idle = sample(120, watch_slots=[])
+        down = sample(180, application_health_exit_code=1)
+        result = review([sample(), sample(60), idle, down, sample(240)])
+        self.assertEqual(result["opportunity"], dict(eligible_seconds=180.0, live_seconds=120.0))
+
+    def test_resource_use_spans_the_window_and_is_absent_without_measurements(self):
+        def used(seconds, cpu, peak):
+            return sample(seconds, resource_use=dict(cpu_usage_seconds=cpu, memory_peak_bytes=peak,
+                                                     memory_current_bytes=1, data_dir_bytes=500 + seconds))
+        result = review([used(0, 10.0, 2000), used(60, 12.5, 3000), used(120, 14.0, 3000)])
+        self.assertEqual(result["resource_use"], dict(samples=3, max_rss_bytes=3000, cpu_seconds=4.0,
+                                                      disk_bytes=620, result="pass"))
+        self.assertEqual(review([sample(), sample(60)])["resource_use"]["result"], "not-measured")
+
     def test_isolated_application_health_failures_are_retained_for_review(self):
         unhealthy = [60, 120, 240, 300, 420]  # never three samples in a row
         result = review([sample(n * 60, application_health_exit_code=int(n * 60 in unhealthy))

@@ -26,6 +26,34 @@ def run(*args):
     return p.stdout
 
 
+def resource_use(container):
+    """Container memory, CPU and data-directory use; None where the host does not expose it."""
+    def read(name):
+        # cgroup v2, under the systemd or the cgroupfs driver.
+        for base in (f"/sys/fs/cgroup/system.slice/docker-{container.get('Id')}.scope", f"/sys/fs/cgroup/docker/{container.get('Id')}"):
+            try:
+                with open(f'{base}/{name}') as handle:
+                    return handle.read()
+            except OSError:
+                continue
+        return None
+
+    def number(name):
+        text = read(name)
+        return int(text) if text and text.strip().isdigit() else None
+
+    cpu = re.search(r'^usage_usec (\d+)$', read('cpu.stat') or '', re.M)
+    data = next((m.get('Source') for m in container.get('Mounts', []) if m.get('Destination') == '/data'), None)
+    size = None
+    if data:
+        try:
+            size = sum(os.path.getsize(os.path.join(root, name)) for root, _, names in os.walk(data) for name in names)
+        except OSError:
+            size = None
+    return {'memory_current_bytes': number('memory.current'), 'memory_peak_bytes': number('memory.peak'),
+            'cpu_usage_seconds': int(cpu[1]) / 1e6 if cpu else None, 'data_dir_bytes': size}
+
+
 def main():
     c = json.loads(run('docker', 'inspect', CONTAINER))[0]
     s = json.loads(run('docker', 'exec', CONTAINER, '/twitch-miner', '--status'))
@@ -122,6 +150,7 @@ def main():
         summary['reward_cadence'][reason] = {'adjacent_same_channel_gaps': len(gaps),
                                              'maximum_included_gap_seconds': ceiling, 'median_seconds': statistics.median(gaps) if gaps else None}
     summary['historical_slot_eligibility_and_multiplier_minutes_available'] = False
+    summary['resource_use'] = resource_use(c)
     print(json.dumps(summary, sort_keys=True))
 
 

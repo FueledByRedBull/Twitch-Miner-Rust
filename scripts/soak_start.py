@@ -10,6 +10,7 @@ deploy/twitch-miner-soak@.service), the collector runs as that unit and
 restarts after a reboot; otherwise it runs as a detached process.
 """
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -63,6 +64,10 @@ def main():
         raise RuntimeError('earning anchor gate timed out')
 
     now = dt.datetime.now(dt.timezone.utc)
+    # A digest of the configuration binds the canary and the soak to one
+    # configuration without recording any of its contents.
+    config = Path(os.environ.get('SOAK_CONFIG_PATH', ''))
+    fingerprint = hashlib.sha256(config.read_bytes()).hexdigest() if config.is_file() else None
     anchor = {k: cp[k] for k in ('image', 'revision', 'container_started', 'runtime_started')}
     anchor.update(observation_anchor_utc=now.isoformat(), monotonic_seconds=time.monotonic(),
                   application_health_exit_code=0, dns_override_matches=True)
@@ -79,7 +84,7 @@ def main():
         with (evidence / 'collector-output.log').open('x') as output:
             collector = subprocess.Popen([sys.executable, str(COLLECTOR), str(evidence / 'soak-anchor.json'), str(CHECKER)],
                                          stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True).pid
-    summary = dict(anchor, collector=collector,
+    summary = dict(anchor, collector=collector, config_fingerprint=fingerprint,
                    earliest_review_utc=(now + dt.timedelta(seconds=259200)).isoformat(),
                    pre_anchor_warnings=cp['warnings'], pre_anchor_errors=cp['errors'],
                    pre_anchor_watch_timeouts=cp['watch_timeouts'], evidence=str(evidence))

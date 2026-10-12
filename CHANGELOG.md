@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 - Unreleased
 
 - Reuses the validated media-playlist URL for the same channel and broadcast,
   so most watch ticks send two playback requests (media playlist, newest
@@ -10,6 +10,12 @@
   preflight. Playlist contents and segment URLs are still fetched every tick.
   `--status` reports `playback_full_preflights` and `playback_cached_ticks`,
   which count this session's ticks whose playback requests succeeded.
+- Adds the soak measurements the promotion evidence gate requires: per-sample
+  container memory, CPU and data size; eligible and live opportunity time in
+  the review; `soak_inject_failure.py` for one recorded network cut; and
+  `soak_rollback_check.py`, which runs the rollback image against the
+  pre-deploy snapshot and the live data without stopping the miner.
+  `soak_start.py` records a configuration digest when `SOAK_CONFIG_PATH` is set.
 - The soak collector continues an existing history when started again, and
   `deploy/twitch-miner-soak@.service` runs it as a systemd user unit, so a host
   reboot is recorded as a continuity failure instead of ending collection
@@ -17,7 +23,10 @@
   only when the collector finishes. `soak_start.py` uses the unit when `SOAK_COLLECTOR_UNIT` is set and
   reports `collector` in place of `collector_pid`.
 
-## 0.3.2 - Unreleased
+## 0.3.2 - Not released
+
+Deployed and soaked for 61 of the required 72 hours, then superseded. It was
+never tagged; these changes ship in 0.3.3.
 
 - Shows the device-login code in the log message itself. With
   `anonymize_logs` on, which is the default, the code was dropped with the
