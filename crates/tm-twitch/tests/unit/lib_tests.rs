@@ -1618,11 +1618,13 @@ fn spawn_playback_server(
 
 /// Serves exactly `request_count` requests. The playback token states
 /// `token_expires`, and the media-playlist request with the 1-based number
-/// `failing_variant_request` answers 404.
+/// `failing_variant_request` answers 404, after half a second when
+/// `stall_failing_request` is set.
 fn spawn_caching_playback_server(
     request_count: usize,
     token_expires: u64,
     failing_variant_request: Option<usize>,
+    stall_failing_request: bool,
 ) -> (
     TwitchEndpoints,
     Arc<std::sync::Mutex<Vec<String>>>,
@@ -1657,6 +1659,9 @@ fn spawn_caching_playback_server(
                 variant_requests += 1;
                 if failing_variant_request == Some(variant_requests) {
                     status = "404 Not Found";
+                    if stall_failing_request {
+                        thread::sleep(Duration::from_millis(500));
+                    }
                 }
                 String::from(
                     "#EXTM3U\n#EXTINF:2.0,\n/older-segment.ts\n#EXTINF:2.0,\n/segment.ts\n",
@@ -1670,7 +1675,8 @@ fn spawn_caching_playback_server(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            stream.write_all(response.as_bytes()).unwrap();
+            // A cancelled client has already closed its side.
+            let _ = stream.write_all(response.as_bytes());
         }
     });
     (
@@ -1722,7 +1728,7 @@ fn playback_test_client(endpoints: TwitchEndpoints) -> TwitchClient {
 async fn playback_reuses_the_media_playlist_until_the_broadcast_changes() {
     // Client version, one full preflight, one cached tick, one full preflight.
     let (endpoints, requests, server) =
-        spawn_caching_playback_server(1 + 4 + 2 + 4, unix_now() + 3600, None);
+        spawn_caching_playback_server(1 + 4 + 2 + 4, unix_now() + 3600, None, false);
     let client = playback_test_client(endpoints);
 
     client.prime_live_playback("tester", "first").await.unwrap();
@@ -1743,7 +1749,7 @@ async fn playback_reuses_the_media_playlist_until_the_broadcast_changes() {
 #[tokio::test]
 async fn playback_does_not_reuse_a_playlist_whose_token_is_about_to_expire() {
     let (endpoints, requests, server) =
-        spawn_caching_playback_server(1 + 4 + 4, unix_now() + 30, None);
+        spawn_caching_playback_server(1 + 4 + 4, unix_now() + 30, None, false);
     let client = playback_test_client(endpoints);
 
     client.prime_live_playback("tester", "first").await.unwrap();
@@ -1760,7 +1766,7 @@ async fn playback_does_not_reuse_a_playlist_whose_token_is_about_to_expire() {
 async fn failed_cached_playlist_gets_one_full_preflight() {
     // The second tick's cached playlist request fails, then a full preflight runs.
     let (endpoints, requests, server) =
-        spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2));
+        spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), false);
     let client = playback_test_client(endpoints);
 
     client.prime_live_playback("tester", "first").await.unwrap();
@@ -1771,6 +1777,30 @@ async fn failed_cached_playlist_gets_one_full_preflight() {
         playback_request_counts(&requests.lock().unwrap()),
         [2, 2, 3, 2]
     );
+}
+
+#[tokio::test]
+async fn cancelled_cached_tick_does_not_keep_the_cached_playlist() {
+    // The second tick is cancelled while its cached playlist request stalls.
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), true);
+    let client = playback_test_client(endpoints);
+
+    client.prime_live_playback("tester", "first").await.unwrap();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        client.prime_live_playback("tester", "first"),
+    )
+    .await
+    .unwrap_err();
+    client.prime_live_playback("tester", "first").await.unwrap();
+
+    assert_eq!(
+        playback_request_counts(&requests.lock().unwrap()),
+        [2, 2, 3, 2]
+    );
+    assert_eq!(client.playback_tick_counts(), (2, 0));
+    server.join().unwrap();
 }
 
 fn read_http_request(stream: &mut TcpStream) {

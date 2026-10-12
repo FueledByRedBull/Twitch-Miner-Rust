@@ -137,12 +137,14 @@ newest-complete-segment HEAD before the spade POST. The media-playlist URL that
 passed it is then reused for the same channel and broadcast, so later ticks
 perform only the media-playlist GET and the segment HEAD. The URL is dropped
 when the broadcast ID changes, 60 seconds before the playback token's stated
-`expires` time, and when a tick using it fails; that tick then runs one full
-preflight and reports its result. A token without a readable expiry, or a
+`expires` time or after an hour if that is sooner, and when a playback request
+using it fails or the tick is cancelled; a failed request then runs one full
+preflight in the same tick and reports its result. A token without a readable expiry, or a
 stream without a broadcast ID, is never cached. Playlist contents and segment
 URLs rotate and are fetched every tick. An earlier broadcast cache was removed
 because local request savings did not establish credited WATCH/WATCH_STREAK
-equivalence; this one is accepted only with that evidence from its own soak.
+equivalence; this one must not be released without that evidence from its own
+soak.
 The three HLS reads reuse the standard three-attempt read policy for connection
 resets, timeouts, HTTP 429, and HTTP 5xx; other HTTP 4xx responses fail without
 retry. Failures retain only the fixed playback stage and sanitized failure class.
