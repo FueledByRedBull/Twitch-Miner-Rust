@@ -988,7 +988,7 @@ async fn playback_network_errors_do_not_expose_tokenized_urls() {
         },
     );
 
-    let error = client.prime_live_playback("tester").await.unwrap_err();
+    let error = client.prime_live_playback("tester", "").await.unwrap_err();
     let message = error.to_string();
     assert!(matches!(error, TwitchClientError::PlaybackRequest { .. }));
     assert!(!message.contains("secret-signature"));
@@ -1029,7 +1029,7 @@ async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
         (200, ""),
     ]);
     client_for(&base_url)
-        .prime_live_playback("tester")
+        .prime_live_playback("tester", "")
         .await
         .unwrap();
     assert_eq!(requests.load(Ordering::SeqCst), 6);
@@ -1038,7 +1038,7 @@ async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
     let (base_url, requests, server) =
         spawn_http_server([(200, build_id), (200, token), (400, "")]);
     let error = client_for(&base_url)
-        .prime_live_playback("tester")
+        .prime_live_playback("tester", "")
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1154,7 +1154,7 @@ async fn remote_document_redirects_are_rejected_without_following_escape_target(
 }
 
 #[tokio::test]
-async fn playback_priming_repeats_all_four_requests_on_every_tick() {
+async fn playback_priming_without_a_broadcast_repeats_all_four_requests() {
     let (endpoints, requests, server) = spawn_playback_server(2, false);
     let client = TwitchClient::with_client_and_endpoints(
         reqwest::Client::builder()
@@ -1166,8 +1166,8 @@ async fn playback_priming_repeats_all_four_requests_on_every_tick() {
         endpoints,
     );
 
-    client.prime_live_playback("tester").await.unwrap();
-    client.prime_live_playback("tester").await.unwrap();
+    client.prime_live_playback("tester", "").await.unwrap();
+    client.prime_live_playback("tester", "").await.unwrap();
     server.join().unwrap();
 
     let requests = requests.lock().unwrap();
@@ -1225,7 +1225,7 @@ async fn playback_query_is_sent_only_after_persisted_hash_miss() {
         endpoints,
     );
 
-    client.prime_live_playback("tester").await.unwrap();
+    client.prime_live_playback("tester", "").await.unwrap();
     server.join().unwrap();
 
     let requests = requests.lock().unwrap();
@@ -1614,6 +1614,193 @@ fn spawn_playback_server(
         requests,
         server,
     )
+}
+
+/// Serves exactly `request_count` requests. The playback token states
+/// `token_expires`, and the media-playlist request with the 1-based number
+/// `failing_variant_request` answers 404, after half a second when
+/// `stall_failing_request` is set.
+fn spawn_caching_playback_server(
+    request_count: usize,
+    token_expires: u64,
+    failing_variant_request: Option<usize>,
+    stall_failing_request: bool,
+) -> (
+    TwitchEndpoints,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let server = thread::spawn(move || {
+        let mut variant_requests = 0_usize;
+        for _ in 0..request_count {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 8192];
+            let read = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            recorded.lock().unwrap().push(request.clone());
+            let mut status = "200 OK";
+            let body = if request.starts_with("GET / ") {
+                String::from(
+                    r#"<script>window.__twilightBuildID = "ef928475-9403-42f2-8a34-55784bd08e16"</script>"#,
+                )
+            } else if request.contains(r#""operationName":"PlaybackAccessToken""#) {
+                serde_json::json!({"data": {"streamPlaybackAccessToken": {
+                    "signature": "sig",
+                    "value": format!(r#"{{"expires":{token_expires}}}"#),
+                }}})
+                .to_string()
+            } else if request.starts_with("GET /hls/tester.m3u8") {
+                String::from("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200,CODECS=\"avc1.4d401e,mp4a.40.2\",RESOLUTION=640x360\n/variant.m3u8\n")
+            } else if request.starts_with("GET /variant.m3u8") {
+                variant_requests += 1;
+                if failing_variant_request == Some(variant_requests) {
+                    status = "404 Not Found";
+                    if stall_failing_request {
+                        thread::sleep(Duration::from_millis(500));
+                    }
+                }
+                String::from(
+                    "#EXTM3U\n#EXTINF:2.0,\n/older-segment.ts\n#EXTINF:2.0,\n/segment.ts\n",
+                )
+            } else if request.starts_with("HEAD /segment.ts") {
+                String::new()
+            } else {
+                panic!("unexpected playback request: {request}");
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            // A cancelled client has already closed its side.
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (
+        TwitchEndpoints {
+            twitch_url: format!("http://{address}"),
+            gql_url: format!("http://{address}/gql"),
+            playback_url: format!("http://{address}/hls/"),
+        },
+        requests,
+        server,
+    )
+}
+
+fn playback_request_counts(requests: &[String]) -> [usize; 4] {
+    [
+        r#""operationName":"PlaybackAccessToken""#,
+        "GET /hls/tester.m3u8",
+        "GET /variant.m3u8",
+        "HEAD /segment.ts",
+    ]
+    .map(|marker| {
+        requests
+            .iter()
+            .filter(|request| request.contains(marker))
+            .count()
+    })
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn playback_test_client(endpoints: TwitchEndpoints) -> TwitchClient {
+    TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        endpoints,
+    )
+}
+
+#[tokio::test]
+async fn playback_reuses_the_media_playlist_until_the_broadcast_changes() {
+    // Client version, one full preflight, one cached tick, one full preflight.
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 2 + 4, unix_now() + 3600, None, false);
+    let client = playback_test_client(endpoints);
+
+    client.prime_live_playback("tester", "first").await.unwrap();
+    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "second")
+        .await
+        .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(
+        playback_request_counts(&requests.lock().unwrap()),
+        [2, 2, 3, 3]
+    );
+    assert_eq!(client.playback_tick_counts(), (2, 1));
+}
+
+#[tokio::test]
+async fn playback_does_not_reuse_a_playlist_whose_token_is_about_to_expire() {
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 4, unix_now() + 30, None, false);
+    let client = playback_test_client(endpoints);
+
+    client.prime_live_playback("tester", "first").await.unwrap();
+    client.prime_live_playback("tester", "first").await.unwrap();
+    server.join().unwrap();
+
+    assert_eq!(
+        playback_request_counts(&requests.lock().unwrap()),
+        [2, 2, 2, 2]
+    );
+}
+
+#[tokio::test]
+async fn failed_cached_playlist_gets_one_full_preflight() {
+    // The second tick's cached playlist request fails, then a full preflight runs.
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), false);
+    let client = playback_test_client(endpoints);
+
+    client.prime_live_playback("tester", "first").await.unwrap();
+    client.prime_live_playback("tester", "first").await.unwrap();
+    server.join().unwrap();
+
+    assert_eq!(
+        playback_request_counts(&requests.lock().unwrap()),
+        [2, 2, 3, 2]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_cached_tick_does_not_keep_the_cached_playlist() {
+    // The second tick is cancelled while its cached playlist request stalls.
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), true);
+    let client = playback_test_client(endpoints);
+
+    client.prime_live_playback("tester", "first").await.unwrap();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        client.prime_live_playback("tester", "first"),
+    )
+    .await
+    .unwrap_err();
+    client.prime_live_playback("tester", "first").await.unwrap();
+
+    assert_eq!(
+        playback_request_counts(&requests.lock().unwrap()),
+        [2, 2, 3, 2]
+    );
+    assert_eq!(client.playback_tick_counts(), (2, 0));
+    server.join().unwrap();
 }
 
 fn read_http_request(stream: &mut TcpStream) {

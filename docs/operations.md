@@ -157,6 +157,10 @@ cookies, tokens, request headers, or raw account payloads.
 activity, consecutive failures, and the last redacted error class. Counters
 cover claims, bets, reconnects, and refreshes; `successful_refreshes` counts
 complete channel-points context refresh cycles, not OAuth token refreshes.
+`playback_full_preflights` and `playback_cached_ticks` count this session's
+ticks whose playback requests succeeded, by whether they ran the full preflight
+or reused a cached media playlist. They say nothing about the watch event that
+follows, and restart at zero with the process.
 Runtime measurements cover queue depth, processed events, and local
 transport-to-state latency.
 

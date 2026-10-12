@@ -125,16 +125,26 @@ instead of a generic error, so status and logs show why Twitch refused.
 
 ## Watching and playback
 
-Playback priming deliberately remains uncached. The scheduler gives each
+Playback priming reuses only the media-playlist URL. The scheduler gives each
 selected channel a nominal 20-second interval; with the normal two slots it
 serializes attempts at nominal 10-second intervals. Snapshot and request time
 consume that interval, and only the remaining time is slept. An overrun starts
 the next attempt without replaying missed ticks; it does not queue catch-up
 requests. Watch-selection work can still add time between passes.
-Every tick performs one `PlaybackAccessToken` GQL request, one master-playlist
-GET, one selected media-playlist GET, and one newest-complete-segment HEAD before
-the spade POST. Local request-count savings did not establish credited
-WATCH/WATCH_STREAK equivalence, so the experimental broadcast cache was removed.
+A full preflight performs one `PlaybackAccessToken` GQL request, one
+master-playlist GET, one selected media-playlist GET, and one
+newest-complete-segment HEAD before the spade POST. The media-playlist URL that
+passed it is then reused for the same channel and broadcast, so later ticks
+perform only the media-playlist GET and the segment HEAD. The URL is dropped
+when the broadcast ID changes, 60 seconds before the playback token's stated
+`expires` time or after an hour if that is sooner, and when a playback request
+using it fails or the tick is cancelled; a failed request then runs one full
+preflight in the same tick and reports its result. A token without a readable expiry, or a
+stream without a broadcast ID, is never cached. Playlist contents and segment
+URLs rotate and are fetched every tick. An earlier broadcast cache was removed
+because local request savings did not establish credited WATCH/WATCH_STREAK
+equivalence; this one must not be released without that evidence from its own
+soak.
 The three HLS reads reuse the standard three-attempt read policy for connection
 resets, timeouts, HTTP 429, and HTTP 5xx; other HTTP 4xx responses fail without
 retry. Failures retain only the fixed playback stage and sanitized failure class.

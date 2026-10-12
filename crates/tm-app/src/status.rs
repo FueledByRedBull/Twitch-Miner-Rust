@@ -57,6 +57,12 @@ struct StatusCounters {
     last_error_class: Option<String>,
     #[serde(default)]
     drop_progress: Vec<DropProgressSnapshot>,
+    /// Successful playback ticks in this session that ran the full preflight.
+    #[serde(default)]
+    playback_full_preflights: u64,
+    /// Successful playback ticks in this session that reused a cached playlist.
+    #[serde(default)]
+    playback_cached_ticks: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -189,6 +195,15 @@ impl HealthTracker {
 
     pub(crate) fn record_bet(&self) {
         self.increment(|counters| &mut counters.bets);
+    }
+
+    pub(crate) fn record_playback_ticks(&self, (full_preflights, cached_ticks): (u64, u64)) {
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counters.playback_full_preflights = full_preflights.min(MAX_COUNTER_VALUE);
+        counters.playback_cached_ticks = cached_ticks.min(MAX_COUNTER_VALUE);
     }
 
     pub(crate) fn record_refresh(&self) {

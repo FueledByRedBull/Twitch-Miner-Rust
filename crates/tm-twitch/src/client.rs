@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -56,6 +57,10 @@ pub struct TwitchClient {
     device_id: String,
     user_agent: String,
     client_version: Mutex<CachedClientVersion>,
+    /// Keyed by channel login, so it is bounded by the channels ever watched.
+    playback_playlists: Mutex<std::collections::HashMap<String, CachedMediaPlaylist>>,
+    playback_full_preflights: AtomicU64,
+    playback_cached_ticks: AtomicU64,
     endpoints: TwitchEndpoints,
 }
 
@@ -78,6 +83,25 @@ impl fmt::Debug for TwitchClient {
             .finish_non_exhaustive()
     }
 }
+
+/// A media-playlist URL that passed the full playback preflight. It carries
+/// playback credentials, so it has no `Debug` and is never logged.
+struct CachedMediaPlaylist {
+    broadcast_id: String,
+    url: reqwest::Url,
+    expires_at_unix: u64,
+}
+
+/// The one field read from the JSON inside a playback token's value.
+#[derive(serde::Deserialize)]
+struct PlaybackTokenClaims {
+    expires: u64,
+}
+
+/// A cached playlist is dropped this long before its token expires.
+const PLAYBACK_TOKEN_EXPIRY_MARGIN_SECONDS: u64 = 60;
+/// Upper bound on reuse, whatever expiry the token states.
+const PLAYBACK_PLAYLIST_MAX_AGE_SECONDS: u64 = 60 * 60;
 
 #[derive(Debug, Clone)]
 struct CachedClientVersion {
@@ -167,6 +191,9 @@ impl TwitchClient {
                 fetched_at: None,
                 ttl: Duration::from_secs(10 * 60 * 60),
             }),
+            playback_playlists: Mutex::default(),
+            playback_full_preflights: AtomicU64::new(0),
+            playback_cached_ticks: AtomicU64::new(0),
             endpoints,
         }
     }
@@ -387,11 +414,102 @@ impl TwitchClient {
         stream_info_from_typed(response)
     }
 
-    pub async fn prime_live_playback(&self, channel_login: &str) -> Result<(), TwitchClientError> {
+    /// Requests the newest media segment of a live channel.
+    ///
+    /// With a non-empty `broadcast_id`, the media-playlist URL that passed the
+    /// full preflight is reused for that broadcast until its playback token
+    /// expires, so most ticks skip the token and master-playlist requests. The
+    /// playlist body and the segment URL rotate and are never reused.
+    pub async fn prime_live_playback(
+        &self,
+        channel_login: &str,
+        broadcast_id: &str,
+    ) -> Result<(), TwitchClientError> {
         let channel_login = normalize_channel_login(channel_login)
             .ok_or(TwitchClientError::InvalidField("channel_login"))?;
+        let broadcast_id = broadcast_id.trim();
 
-        let response = self.fetch_playback_access_token(&channel_login).await?;
+        // The entry is taken out before it is tried and put back only after it
+        // worked. A tick that fails, or is cancelled by its caller's deadline
+        // while waiting on a dead host, therefore cannot leave it behind.
+        if let Some(cached) = self.take_media_playlist(&channel_login, broadcast_id) {
+            if self.prime_media_playlist(&cached.url).await.is_ok() {
+                self.playback_cached_ticks.fetch_add(1, Ordering::Relaxed);
+                self.playback_playlists
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(channel_login, cached);
+                return Ok(());
+            }
+            // A cached URL that stopped working gets one full preflight, whose
+            // result is the one reported.
+        }
+
+        let (variant_url, expires_at_unix) = self.resolve_media_playlist(&channel_login).await?;
+        self.prime_media_playlist(&variant_url).await?;
+        self.playback_full_preflights
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(expires_at_unix) = expires_at_unix.filter(|_| !broadcast_id.is_empty()) {
+            self.playback_playlists
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    channel_login,
+                    CachedMediaPlaylist {
+                        broadcast_id: broadcast_id.to_string(),
+                        url: variant_url,
+                        // A stated expiry far in the future is not trusted.
+                        expires_at_unix: expires_at_unix.min(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                + PLAYBACK_PLAYLIST_MAX_AGE_SECONDS,
+                        ),
+                    },
+                );
+        }
+        Ok(())
+    }
+
+    /// Successful playback ticks since this client was created, as
+    /// `(full preflights, ticks that reused a cached media playlist)`.
+    #[must_use]
+    pub fn playback_tick_counts(&self) -> (u64, u64) {
+        (
+            self.playback_full_preflights.load(Ordering::Relaxed),
+            self.playback_cached_ticks.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Removes the channel's cached playlist and returns it when it is still
+    /// usable for this broadcast; a stale one is simply dropped.
+    fn take_media_playlist(
+        &self,
+        channel_login: &str,
+        broadcast_id: &str,
+    ) -> Option<CachedMediaPlaylist> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.playback_playlists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(channel_login)
+            .filter(|cached| {
+                cached.broadcast_id == broadcast_id
+                    && cached.expires_at_unix > now + PLAYBACK_TOKEN_EXPIRY_MARGIN_SECONDS
+            })
+    }
+
+    /// Runs the token and master-playlist preflight and returns the validated
+    /// media-playlist URL with the token's expiry, when the token states one.
+    async fn resolve_media_playlist(
+        &self,
+        channel_login: &str,
+    ) -> Result<(reqwest::Url, Option<u64>), TwitchClientError> {
+        let response = self.fetch_playback_access_token(channel_login).await?;
         let token =
             response
                 .stream_playback_access_token
@@ -439,16 +557,27 @@ impl TwitchClient {
             .await
             .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
         let variant_url = lowest_bandwidth_variant_url(&master_url, &master_body)?;
+        let expires_at_unix = serde_json::from_str::<PlaybackTokenClaims>(&token.value)
+            .ok()
+            .map(|claims| claims.expires);
+        Ok((variant_url, expires_at_unix))
+    }
+
+    async fn prime_media_playlist(
+        &self,
+        variant_url: &reqwest::Url,
+    ) -> Result<(), TwitchClientError> {
         validate_remote_endpoint(
-            &variant_url,
+            variant_url,
             "master playlist",
             self.allow_loopback_remote_endpoints,
         )?;
+        let remote_client = self.remote_client("media playlist")?;
         let variant = self
             .send_playback_read_request(
                 remote_client,
                 reqwest::Method::GET,
-                &variant_url,
+                variant_url,
                 "media playlist",
             )
             .await?;
