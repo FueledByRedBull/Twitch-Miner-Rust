@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Adds the soak measurements the promotion evidence gate requires: per-sample
+  container memory, CPU and data size; eligible and live opportunity time in
+  the review; `soak_inject_failure.py` for one recorded network cut; and
+  `soak_rollback_check.py`, which runs the rollback image against the
+  pre-deploy snapshot and the live data without stopping the miner.
+  `soak_start.py` records a configuration digest when `SOAK_CONFIG_PATH` is set.
 - The soak collector continues an existing history when started again, and
   `deploy/twitch-miner-soak@.service` runs it as a systemd user unit, so a host
   reboot is recorded as a continuity failure instead of ending collection

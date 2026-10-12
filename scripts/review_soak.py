@@ -80,6 +80,8 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
     present_drops: set[str] = set()
     terminal = None
     health_streak = 0
+    eligible_seconds = live_seconds = 0.0
+    resource_samples: list[dict] = []
 
     def note(code: str, when: str, level: str = "review") -> None:
         item = findings.setdefault(code, dict(first_utc=when, last_utc=when,
@@ -91,7 +93,7 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
     def observe(cp: dict, expect_continuous_sample: bool = True) -> None:
         nonlocal last, previous_time, previous_mono, max_gap, max_drift, max_drought
         nonlocal full_windows, minimum_6h, baseline_task_names, selected_set, present_drops
-        nonlocal health_streak
+        nonlocal health_streak, eligible_seconds, live_seconds
         active.clear()
         when = cp.get("utc", previous_time.isoformat())
         for key in REQUIRED:
@@ -155,6 +157,15 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
                 or ps.get("total") != ps.get("acknowledged")):
             note("pubsub", when)
         slots = [s for s in cp.get("watch_slots", []) if s.get("selected") is True]
+        # Opportunity is credited to the interval that ends at this sample.
+        # Eligible: the miner was ready and healthy. Live: it also held a slot.
+        if (expect_continuous_sample and 0 < gap <= 90 and cp.get("runtime_state") == "ready"
+                and cp.get("health") == "healthy" and cp.get("status_fresh") is True
+                and cp.get("application_health_exit_code", 0) == 0):
+            eligible_seconds += gap
+            live_seconds += gap if slots else 0
+        if isinstance(cp.get("resource_use"), dict):
+            resource_samples.append(cp["resource_use"])
         if len(slots) > 2:
             note("watch-slot-limit", when, "failure")
         for slot in slots:
@@ -258,6 +269,15 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
                               observation_age_seconds=(timestamp(last["utc"]).timestamp() - drop["observed_at_unix"])
                               if drop.get("observed_at_unix") else None))
     complete = history_samples > 0 and not any(v["level"] in ("evidence", "failure") for v in findings.values())
+    def measured(key: str) -> list:
+        return [sample[key] for sample in resource_samples if isinstance(sample.get(key), (int, float))]
+    cpu, peak, disk = measured("cpu_usage_seconds"), measured("memory_peak_bytes"), measured("data_dir_bytes")
+    # The memory peak is the container cgroup's own high-water mark. It starts
+    # at container start, so it can only overstate the peak inside the window.
+    resource_use = dict(samples=len(resource_samples), max_rss_bytes=max(peak, default=None),
+                        cpu_seconds=cpu[-1] - cpu[0] if len(cpu) > 1 and cpu[-1] >= cpu[0] else None,
+                        disk_bytes=max(disk, default=None))
+    resource_use["result"] = "pass" if None not in resource_use.values() else "not-measured"
     report = dict(
         utc=last["utc"], identity={k: anchor[k] for k in (*IDENTITY, "observation_anchor_utc", "monotonic_seconds")},
         acceptance="manual-review-required", decision_required=bool(findings) or elapsed >= 259200,
@@ -267,6 +287,8 @@ def analyze(anchor: dict, records: Iterable[dict], current: dict | Callable[[], 
         milestone=dict(elapsed=elapsed >= 259200, hours=hours, remaining_seconds=max(0, 259200 - elapsed),
                        earliest_review_utc=(start + dt.timedelta(seconds=259200)).isoformat()),
         findings=findings, rates_per_hour=rates,
+        opportunity=dict(eligible_seconds=eligible_seconds, live_seconds=live_seconds),
+        resource_use=resource_use,
         watch=dict(full_6h_samples=full_windows, minimum_full_6h_base_points=minimum_6h,
                    latest_6h=last.get("watch_last_6h"), threshold_6h_base_points=1224,
                    max_sampled_drought_seconds=max_drought,

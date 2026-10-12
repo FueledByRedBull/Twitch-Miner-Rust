@@ -22,6 +22,7 @@ def load(name):
 
 
 CHECKPOINT, COLLECT, START = load("soak_checkpoint"), load("soak_collect"), load("soak_start")
+INJECT = load("soak_inject_failure")
 
 
 def fake_docker(args, **_):
@@ -75,6 +76,18 @@ class SoakToolTests(unittest.TestCase):
                 COLLECT.main()
             kinds = [json.loads(line)["kind"] for line in history.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(kinds, ["checkpoint", "continuity-failure"])
+
+    def test_injected_failure_recovers_only_with_credit_newer_than_the_reconnect(self):
+        healthy = dict(health_exit=0, tasks_clean=True, eventsub_ok=True, pubsub_ok=True, credit=[1000, 1010])
+        self.assertTrue(INJECT.recovered(healthy, 1000))
+        self.assertFalse(INJECT.recovered(healthy, 1005))
+        self.assertFalse(INJECT.recovered(dict(healthy, credit=[]), 0))
+        for broken in (dict(health_exit=1), dict(tasks_clean=False), dict(eventsub_ok=False), dict(pubsub_ok=False)):
+            self.assertFalse(INJECT.recovered(dict(healthy, **broken), 1000))
+
+    def test_checkpoint_reports_unmeasured_resources_as_none(self):
+        self.assertEqual(CHECKPOINT.resource_use({}), dict(memory_current_bytes=None, memory_peak_bytes=None,
+                                                           cpu_usage_seconds=None, data_dir_bytes=None))
 
     def test_anchor_waits_for_a_fully_earning_runtime(self):
         ready = sample(60, application_health_exit_code=0)

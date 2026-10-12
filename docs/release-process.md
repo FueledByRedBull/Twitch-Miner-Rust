@@ -217,6 +217,28 @@ a record. To have the reboot recorded as a continuity failure, install
 that user, and set `SOAK_COLLECTOR_UNIT=twitch-miner-soak` when running
 `soak_start.py`. The restart still fails the soak.
 
+Three measurements exist only if they are taken during the soak; the promotion
+evidence gate requires all of them:
+
+- **Resource use.** Each checkpoint records the container's cgroup memory
+  (current and peak), CPU time, and the size of its data directory. The review
+  reports the memory peak as `max_rss_bytes`, the CPU time spent inside the
+  window, and the largest data size. The memory peak is the cgroup's own
+  high-water mark since container start, so it can only overstate the window.
+- **Injected failure.** `scripts/soak_inject_failure.py <evidence-dir>` cuts
+  the container's network for 90 seconds once, reconnects it, and records how
+  long it took to return to a healthy runtime with server credit newer than
+  the reconnect on every selected watch slot. Run it inside the window.
+- **Rollback exercise.** `scripts/soak_rollback_check.py <evidence-dir>
+  <rollback-image> <rollback-revision>` extracts the pre-deploy data snapshot
+  to a private scratch directory and runs the rollback image's offline
+  configuration check against it and against the live data, read-only and
+  without a network. It does not stop or replace the running miner.
+
+Set `SOAK_CONFIG_PATH` to the miner's configuration file when running
+`soak_start.py` to record its SHA-256 as `config_fingerprint`; the canary must
+record the same digest.
+
 `scripts/soak_dns_path.py` is an optional one-shot probe for DNS interception
 on the host path. Run `python -B -m unittest scripts.tests.test_soak_tools` after
 changing any of these scripts.
@@ -230,6 +252,11 @@ the evidence host. Run `python scripts/review_soak.py --help` for the local and 
 input options, and `python -B -m unittest scripts.tests.test_review_soak` for its
 synthetic regression tests. Keep `--output-dir` in a durable evidence directory
 outside build output such as `target/`.
+
+The review also reports opportunity time, measured between consecutive samples
+no more than 90 seconds apart: `eligible_seconds` is the time the miner was
+ready, healthy and fresh, and `live_seconds` is the part of it in which at
+least one watch slot was selected. Neither says a slot earned.
 
 ### What fails a soak
 
