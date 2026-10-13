@@ -2281,6 +2281,29 @@ async fn checked_presence_update_reports_only_real_transitions() {
 }
 
 #[tokio::test]
+async fn stream_up_invalidates_in_flight_offline_presence_poll() {
+    let config = ConfigFile {
+        streamers: vec!["tester".into()],
+        ..ConfigFile::default()
+    };
+    let mut state = RuntimeState::from_targets(&config, &config.streamers, ts(10));
+    state.streamers[0].channel_id = String::from("100");
+    state.streamers[0].presence_known = true;
+    let runtime = spawn_runtime_state(state);
+
+    let poll = runtime.begin_stream_update("100").await.unwrap().unwrap();
+    assert!(runtime
+        .set_presence_if_changed("100", true, ts(20))
+        .await
+        .unwrap());
+    assert!(!runtime
+        .set_presence_if_current("100", false, poll, ts(21))
+        .await
+        .unwrap());
+    assert!(runtime.state_snapshot().await.unwrap().streamers[0].is_online);
+}
+
+#[tokio::test]
 async fn releasing_watch_slot_resets_only_that_channels_progress() {
     let config = ConfigFile {
         streamers: vec!["alpha".into(), "bravo".into()],
