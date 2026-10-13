@@ -12,6 +12,10 @@ use crate::observability::AppObservability;
 use crate::status::HealthTracker;
 
 const UNKNOWN_CLAIM_RETRY_DELAY: Duration = Duration::from_secs(30 * 60);
+/// Twitch can keep listing a claimed Drop as unclaimed and complete. Sending
+/// the claim again every retry delay earns nothing, so an accepted claim is
+/// held for a day.
+const COMPLETED_CLAIM_RETRY_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_TRACKED_CLAIMS: usize = 256;
 
 #[derive(Clone, Default)]
@@ -43,7 +47,7 @@ impl DropClaimCoordinator {
             .retain(|_, started| started.elapsed() < UNKNOWN_CLAIM_RETRY_DELAY);
         state
             .completed
-            .retain(|_, completed| completed.elapsed() < UNKNOWN_CLAIM_RETRY_DELAY);
+            .retain(|_, completed| completed.elapsed() < COMPLETED_CLAIM_RETRY_DELAY);
         if state.unknown.contains_key(drop_instance_id)
             || state.completed.contains_key(drop_instance_id)
             || state.in_flight.len() >= MAX_TRACKED_CLAIMS
@@ -544,6 +548,24 @@ mod tests {
         drop(lease);
         assert!(coordinator.begin("drop-1").is_none());
         coordinator.confirm("drop-1");
+        assert!(coordinator.begin("drop-1").is_none());
+    }
+
+    #[test]
+    fn coordinator_does_not_resend_an_accepted_claim_after_the_unknown_retry_delay() {
+        // A freshly booted host has no instant that far in the past.
+        let Some(accepted) = std::time::Instant::now()
+            .checked_sub(super::UNKNOWN_CLAIM_RETRY_DELAY + std::time::Duration::from_secs(60))
+        else {
+            return;
+        };
+        let coordinator = DropClaimCoordinator::default();
+        coordinator
+            .state
+            .lock()
+            .expect("claim state")
+            .completed
+            .insert(String::from("drop-1"), accepted);
         assert!(coordinator.begin("drop-1").is_none());
     }
 

@@ -10,6 +10,9 @@
   warning.
 - A Drop claim that Twitch answers with "already claimed" is recorded as
   claimed but no longer counted or announced as a new claim.
+- An accepted Drop claim is not sent again for a day. Twitch can keep listing
+  a claimed Drop as unclaimed and complete, and 0.3.3 then claimed and
+  announced it again every 30 minutes.
 - Failed presence-poll requests log one warning per poll cycle with a count
   instead of one per streamer.
 - `review_soak.py --host` passes `SOAK_CONTAINER` and `SOAK_EXPECTED_DNS` to
