@@ -1,5 +1,6 @@
 """Synthetic checks for the soak host tools; no Docker or miner required."""
 import contextlib
+import datetime as dt
 import importlib.util
 import io
 import json
@@ -22,7 +23,7 @@ def load(name):
 
 
 CHECKPOINT, COLLECT, START = load("soak_checkpoint"), load("soak_collect"), load("soak_start")
-INJECT = load("soak_inject_failure")
+INJECT, ASSEMBLE = load("soak_inject_failure"), load("soak_assemble_evidence")
 
 
 def fake_docker(args, **_):
@@ -84,6 +85,49 @@ class SoakToolTests(unittest.TestCase):
         self.assertFalse(INJECT.recovered(dict(healthy, credit=[]), 0))
         for broken in (dict(health_exit=1), dict(tasks_clean=False), dict(eventsub_ok=False), dict(pubsub_ok=False)):
             self.assertFalse(INJECT.recovered(dict(healthy, **broken), 1000))
+
+    def test_evidence_is_assembled_only_when_every_field_was_measured(self):
+        image, revision, hash_ = "repo@sha256:" + "a" * 64, "c" * 40, "f" * 64
+        run = dict(id=1, head_sha=revision, event="push", conclusion="success")
+        files = {
+            "soak-start.json": dict(image=image, revision=revision, config_fingerprint=hash_),
+            "verified-candidate.json": dict(
+                revision=revision, manifest_digest=image.split("@")[1], children=dict(arm64="sha256:1", amd64="sha256:2"),
+                signed_provenance_and_spdx_verified=True,
+                exact_main_runs={name: dict(run, path=".github/workflows/" + name) for name in ASSEMBLE.WORKFLOWS}),
+            "deployment.json": [
+                dict(stage="begin", candidate=image, revision=revision),
+                dict(stage="exclusive-canary-passed", started_at="2026-01-01T00:00:00+00:00",
+                     ended_at="2026-01-01T00:00:30+00:00", monotonic_duration_seconds=30, mutations="none",
+                     config_fingerprint=hash_)],
+            "injected-failure-summary.json": dict(result="pass", injected_failures=1, recovered_failures=1,
+                                                  max_recovery_seconds=300.0),
+            "rollback-check.json": dict(result="pass", source_revision="b" * 40, image_digest="sha256:" + "b" * 64,
+                                        compatibility="pass", state_restore="pass", data_snapshot="pass",
+                                        candidate_data_preserved="pass", format_policy="compatible"),
+        }
+        review = dict(
+            utc="2026-01-04T00:10:00+00:00", findings={"eventsub": dict(level="review")},
+            identity=dict(image=image, revision=revision, observation_anchor_utc="2026-01-01T00:10:00+00:00"),
+            coverage=dict(complete=True), milestone=dict(elapsed=True, hours=72.0),
+            health=dict(eventsub=dict(verified=True, failed_subscriptions=0), pubsub=dict(total=2, acknowledged=2)),
+            counters=dict(rewards=dict(WATCH=dict(events=5), CLAIM=dict(events=2))),
+            drops=dict(claimed_transitions=1), opportunity=dict(eligible_seconds=10.0, live_seconds=5.0),
+            resource_use=dict(result="pass", max_rss_bytes=1, cpu_seconds=1.0, disk_bytes=1, samples=3))
+        windows = dict(workflowName="Windows Release", headBranch="v1.2.3", headSha=revision, event="push",
+                       conclusion="success", databaseId=4)
+        now = dt.datetime(2026, 1, 4, 1, tzinfo=dt.timezone.utc)
+        evidence, gaps = ASSEMBLE.assemble(files, review, windows, "v1.2.3", "operator", now)
+        self.assertEqual(gaps, [])
+        self.assertEqual(evidence["soak"]["monotonic_duration_seconds"], 259200.0)
+        self.assertEqual(evidence["soak"]["server_confirmed"], dict(watch_rewards=5, claims=2, drops=1, predictions=0))
+        self.assertEqual(sorted(evidence["platform_digests"]), ["linux/amd64", "linux/arm64"])
+        self.assertEqual(len(evidence["required_checks"]), 4)
+        review["drops"]["claimed_transitions"] = 0
+        review["findings"]["restart"] = dict(level="failure")
+        evidence, gaps = ASSEMBLE.assemble(files, review, {}, "v1.2.3", "operator", now)
+        self.assertIsNone(evidence)
+        self.assertEqual(len(gaps), 3)
 
     def test_checkpoint_reports_unmeasured_resources_as_none(self):
         self.assertEqual(CHECKPOINT.resource_use({}), dict(memory_current_bytes=None, memory_peak_bytes=None,

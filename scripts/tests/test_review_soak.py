@@ -1,6 +1,8 @@
 """Synthetic evidence: failures must remain visible after recovery."""
+import contextlib
 import datetime as dt
 import importlib.util
+import io
 import json
 import re
 from pathlib import Path
@@ -8,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[1] / "review_soak.py"
 if SCRIPT.exists():
@@ -171,6 +174,16 @@ class SoakReviewTests(unittest.TestCase):
             self.assertEqual(report["changes"]["new_history_samples"], 0)
             saved = json.loads((root / "reviews/latest.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["coverage"]["history_samples"], 2)
+
+    def test_ssh_mode_forwards_the_checker_environment(self):
+        commands = []
+        def fake(command, source=None):
+            commands.append(command)
+            return dict(acceptance="manual-review-required")
+        argv = ["review_soak.py", "--host", "pi", "--anchor", "a", "--history", "h", "--checker", "c"]
+        with mock.patch.object(REVIEW, "command_json", fake), mock.patch.object(sys, "argv", argv),                 mock.patch.dict("os.environ", {"SOAK_EXPECTED_DNS": ""}),                 contextlib.redirect_stdout(io.StringIO()):
+            REVIEW.main()
+        self.assertIn("env SOAK_EXPECTED_DNS= python3 - ", commands[0][-1])
 
     def test_recovery_cannot_erase_identity_restart_or_health_failures(self):
         changed = sample(60, revision="other", restarts=1, health="unhealthy")
