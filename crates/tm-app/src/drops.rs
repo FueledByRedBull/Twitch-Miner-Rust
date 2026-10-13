@@ -292,33 +292,44 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
             .claim_drop(&drop.drop_instance_id)
             .await
             .with_context(|| format!("claim drop {}", drop.drop_instance_id));
-        if let Err(error) = result {
-            coordinator.mark_unknown(&drop.drop_instance_id);
-            if let Ok(reconciled) = twitch.fetch_inventory_typed().await {
-                if let Some(current) = reconciled.iter().find(|current| {
-                    current.drop_instance_id == drop.drop_instance_id && current.is_claimed
-                }) {
-                    lease.complete();
-                    if let Some(health) = health {
-                        health.record_drop_progress(current);
-                        health.record_claim();
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                coordinator.mark_unknown(&drop.drop_instance_id);
+                if let Ok(reconciled) = twitch.fetch_inventory_typed().await {
+                    if let Some(current) = reconciled.iter().find(|current| {
+                        current.drop_instance_id == drop.drop_instance_id && current.is_claimed
+                    }) {
+                        lease.complete();
+                        if let Some(health) = health {
+                            health.record_drop_progress(current);
+                            health.record_claim();
+                        }
+                        let message = observability.drop_claim_message(mode, drop);
+                        tracing::info!(operation = "claim_drop_reconciled", "{message}");
+                        observability
+                            .send_event(DiscordEvent::DropClaim, &message)
+                            .await;
+                        continue;
                     }
-                    let message = observability.drop_claim_message(mode, drop);
-                    tracing::info!(operation = "claim_drop_reconciled", "{message}");
-                    observability
-                        .send_event(DiscordEvent::DropClaim, &message)
-                        .await;
-                    continue;
                 }
+                failures.push(error);
+                continue;
             }
-            failures.push(error);
-            continue;
-        }
+        };
         lease.complete();
         if let Some(health) = health {
             let mut claimed = drop.clone();
             claimed.is_claimed = true;
             health.record_drop_progress(&claimed);
+        }
+        if outcome == tm_twitch::ClaimDropOutcome::AlreadyClaimed {
+            // The inventory snapshot was stale: this request claimed nothing,
+            // so it is neither counted nor announced.
+            tracing::debug!(operation = "claim_drop", "drop was already claimed");
+            continue;
+        }
+        if let Some(health) = health {
             health.record_claim();
         }
         let message = observability.drop_claim_message(mode, drop);

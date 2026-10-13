@@ -633,11 +633,11 @@ mod tests {
         )
     }
 
-    fn spawn_disabled_points_server() -> (TwitchEndpoints, thread::JoinHandle<()>) {
+    fn spawn_disabled_points_server(streamers: usize) -> (TwitchEndpoints, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            for _ in 0..4 {
+            for _ in 0..=3 * streamers {
                 let (mut stream, _) = listener.accept().unwrap();
                 let request = read_http_request(&mut stream);
                 let response = if request.starts_with("GET / ") {
@@ -1634,7 +1634,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_keeps_confirmed_disabled_channel_without_point_work() {
-        let (endpoints, server) = spawn_disabled_points_server();
+        let (endpoints, server) = spawn_disabled_points_server(1);
         let twitch = TwitchClient::with_client_and_endpoints(
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -1666,6 +1666,41 @@ mod tests {
         assert_eq!(state.streamers[0].channel_points_enabled, Some(false));
         assert_eq!(state.streamers[0].channel_points, 0);
         assert!(!state.streamers[0].is_online);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_keeps_one_streamer_per_channel_id() {
+        // The old and new login of a renamed channel resolve to the same id.
+        let (endpoints, server) = spawn_disabled_points_server(2);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let config = ConfigFile {
+            streamers: vec![String::from("oldname"), String::from("newname")],
+            ..ConfigFile::default()
+        };
+        let mut streak_cache = crate::streak_cache::StreakCache::default();
+
+        let state = bootstrap_runtime_state(
+            &config,
+            &twitch,
+            Some("user-1"),
+            ts(0),
+            &test_observability(),
+            &mut streak_cache,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(state.streamers.len(), 1);
+        assert_eq!(state.streamers[0].username, "oldname");
     }
 
     #[tokio::test]
@@ -2868,6 +2903,56 @@ mod tests {
             .iter()
             .any(|request| request.contains(r#""dropInstanceID":"drop-prompt""#)));
         assert_eq!(health.task_consecutive_failures("drop"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn already_claimed_drop_is_not_counted_as_a_new_claim() {
+        let (endpoints, _requests, server) = spawn_json_response_server(vec![serde_json::json!({
+            "data": {"claimDropRewards": {"status": "DROP_INSTANCE_ALREADY_CLAIMED"}}
+        })
+        .to_string()]);
+        let twitch = TwitchClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            "token",
+            "ua",
+            endpoints,
+        );
+        let health = HealthTracker::default();
+        health.register("drop", Duration::from_secs(60));
+        claim_inventory_drops(
+            &twitch,
+            "prompt",
+            &[InventoryDrop {
+                drop_instance_id: String::from("drop-stale"),
+                reward_name: String::from("Reward"),
+                campaign_name: String::from("Campaign"),
+                current_minutes_watched: 60,
+                required_minutes_watched: 60,
+                is_claimed: false,
+                ..InventoryDrop::default()
+            }],
+            &test_observability(),
+            Some(&health),
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let reporter = crate::status::StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(tm_runtime::RuntimeMetrics::default()),
+        )
+        .unwrap();
+        reporter.heartbeat().unwrap();
+        let status =
+            fs::read_to_string(directory.path().join(crate::status::STATUS_FILE_NAME)).unwrap();
+        assert!(status.contains("\"claims\": 0"), "{status}");
+        assert!(status.contains("\"is_claimed\": true"), "{status}");
     }
 
     #[tokio::test]

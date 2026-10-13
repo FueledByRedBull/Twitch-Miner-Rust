@@ -76,6 +76,7 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
 
     let configured = state.streamers.len();
     let mut skipped = Vec::new();
+    let mut channel_ids = std::collections::HashSet::new();
     for (index, streamer) in state.streamers.iter_mut().enumerate() {
         if let Err(error) = bootstrap_streamer(
             streamer,
@@ -96,6 +97,16 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
                 error_class = "streamer-skipped",
                 %error,
                 "skipping a streamer that could not be loaded; it stays skipped until restart"
+            );
+            skipped.push(index);
+        } else if !channel_ids.insert(streamer.channel_id.clone()) {
+            // State is keyed by channel id, so a second entry for the same
+            // channel would never be updated and could hold a watch slot.
+            tracing::warn!(
+                operation = "run",
+                error_class = "streamer-duplicate",
+                streamer = %streamer.username,
+                "skipping a configured name that resolves to an already loaded channel"
             );
             skipped.push(index);
         }
