@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.4 - Unreleased
+
+- A stream-up event now invalidates a presence poll that was already in
+  flight. Before, the poll's late "offline" answer could take a channel that
+  had just gone live back out of the watch state until the next poll.
+- Two configured names that resolve to the same channel (the old and new login
+  of a renamed channel) load as one streamer; the second is skipped with a
+  warning.
+- A Drop claim that Twitch answers with "already claimed" is recorded as
+  claimed but no longer counted or announced as a new claim.
+- Failed presence-poll requests log one warning per poll cycle with a count
+  instead of one per streamer.
+- `review_soak.py --host` passes `SOAK_CONTAINER` and `SOAK_EXPECTED_DNS` to
+  the checker on the evidence host, and `soak_assemble_evidence.py` builds the
+  promotion evidence from recorded soak measurements or lists what is missing.
+
 ## 0.3.3 - Unreleased
 
 - Reuses the validated media-playlist URL for the same channel and broadcast,
