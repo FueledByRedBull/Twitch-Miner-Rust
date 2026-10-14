@@ -15,6 +15,9 @@
   announced it again every 30 minutes.
 - Failed presence-poll requests log one warning per poll cycle with a count
   instead of one per streamer.
+- A PubSub connection error now logs a fixed `reason` such as
+  `reset-without-close` or `io-connection-reset`, so a dropped connection can
+  be told apart without logging the error text.
 - `review_soak.py --host` passes `SOAK_CONTAINER` and `SOAK_EXPECTED_DNS` to
   the checker on the evidence host, and `soak_assemble_evidence.py` builds the
   promotion evidence from recorded soak measurements or lists what is missing.

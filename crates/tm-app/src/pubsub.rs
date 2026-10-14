@@ -652,6 +652,7 @@ fn classify_pubsub_connection_result(
         Ok(Err(error)) => tracing::error!(
             task = "pubsub",
             error_class = pubsub_error_class(error),
+            reason = error.websocket_reason(),
             connection_index,
             topic_count,
             failure_attempt,
