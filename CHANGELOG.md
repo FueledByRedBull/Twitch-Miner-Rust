@@ -22,7 +22,7 @@
   the checker on the evidence host, and `soak_assemble_evidence.py` builds the
   promotion evidence from recorded soak measurements or lists what is missing.
 
-## 0.3.3 - Unreleased
+## 0.3.3 - 2026-10-16
 
 - Reuses the validated media-playlist URL for the same channel and broadcast,
   so most watch ticks send two playback requests (media playlist, newest
