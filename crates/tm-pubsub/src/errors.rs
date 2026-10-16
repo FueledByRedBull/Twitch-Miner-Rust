@@ -22,3 +22,33 @@ pub enum PubSubError {
     #[error("pubsub pong timeout")]
     PongTimeout,
 }
+
+impl PubSubError {
+    /// Why the WebSocket transport failed, as a fixed label. The error text is
+    /// not logged, so this keeps a dropped connection diagnosable without it.
+    #[must_use]
+    pub fn websocket_reason(&self) -> Option<&'static str> {
+        use std::io::ErrorKind;
+        use tungstenite::error::ProtocolError;
+        let Self::WebSocket(error) = self else {
+            return None;
+        };
+        Some(match error {
+            tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => "closed",
+            tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+                "reset-without-close"
+            }
+            tungstenite::Error::Protocol(_) => "protocol",
+            tungstenite::Error::Io(error) => match error.kind() {
+                ErrorKind::ConnectionReset => "io-connection-reset",
+                ErrorKind::ConnectionAborted => "io-connection-aborted",
+                ErrorKind::BrokenPipe => "io-broken-pipe",
+                ErrorKind::TimedOut => "io-timed-out",
+                ErrorKind::UnexpectedEof => "io-unexpected-eof",
+                _ => "io-other",
+            },
+            tungstenite::Error::Tls(_) => "tls",
+            _ => "other",
+        })
+    }
+}

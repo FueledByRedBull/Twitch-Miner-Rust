@@ -253,6 +253,17 @@ input options, and `python -B -m unittest scripts.tests.test_review_soak` for it
 synthetic regression tests. Keep `--output-dir` in a durable evidence directory
 outside build output such as `target/`.
 
+With `--host`, `SOAK_CONTAINER` and `SOAK_EXPECTED_DNS` set in the local
+environment are passed to the checker on the evidence host, so the review uses
+the same `soak_checkpoint.py` settings as the collector.
+
+After the window closes and the soak is accepted,
+`scripts/soak_assemble_evidence.py` builds the JSON for
+`verify-release-evidence.ps1` from the evidence directory, a saved review and
+the tag's Windows Release run. It copies recorded measurements only: if one is
+absent or failing (no server-confirmed Drop claim, for example) it lists the
+gaps and writes nothing. Its docstring gives the arguments.
+
 The review also reports opportunity time, measured between consecutive samples
 no more than 90 seconds apart: `eligible_seconds` is the time the miner was
 ready, healthy and fresh, and `live_seconds` is the part of it in which at

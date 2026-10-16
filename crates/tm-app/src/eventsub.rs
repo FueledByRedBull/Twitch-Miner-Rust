@@ -275,6 +275,7 @@ async fn poll_presence_fallback(
     let mut queries = tokio::task::JoinSet::new();
     let mut next = 0_usize;
     let mut failure_class = None;
+    let mut failed_requests = 0_usize;
     while next < indices.len() || !queries.is_empty() {
         while next < indices.len() && queries.len() < PRESENCE_POLL_CONCURRENCY {
             let streamer_index = indices[next];
@@ -339,15 +340,9 @@ async fn poll_presence_fallback(
                     }
                 }
             }
-            Ok((streamer_index, _, _, Err(error))) => {
-                let error_class = classify_presence_poll_error(error.failure_class());
-                failure_class.get_or_insert(error_class);
-                tracing::warn!(
-                    task = "presence-poll",
-                    error_class,
-                    streamer_index,
-                    "presence polling request failed"
-                );
+            Ok((_, _, _, Err(error))) => {
+                failure_class.get_or_insert(classify_presence_poll_error(error.failure_class()));
+                failed_requests += 1;
             }
             Err(error) => {
                 failure_class.get_or_insert("poll-task");
@@ -359,6 +354,15 @@ async fn poll_presence_fallback(
                 );
             }
         }
+    }
+    if let (Some(error_class), true) = (failure_class, failed_requests > 0) {
+        // An outage fails every request in the cycle the same way: one line.
+        tracing::warn!(
+            task = "presence-poll",
+            error_class,
+            failed_requests,
+            "presence polling requests failed"
+        );
     }
     match failure_class {
         Some(error_class) => health.failure("presence-poll", error_class),

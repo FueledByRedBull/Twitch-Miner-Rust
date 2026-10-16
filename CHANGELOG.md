@@ -1,6 +1,32 @@
 # Changelog
 
-## 0.3.3 - Unreleased
+## 0.3.4 - Unreleased
+
+- Updates rustls to 0.23.46 for RUSTSEC-2026-0346 to 0349. The miner builds
+  rustls without certificate compression, does not configure ECH and does not
+  log TLS session values, so at most the key-exchange downgrade advisory
+  could apply to 0.3.3.
+- A stream-up event now invalidates a presence poll that was already in
+  flight. Before, the poll's late "offline" answer could take a channel that
+  had just gone live back out of the watch state until the next poll.
+- Two configured names that resolve to the same channel (the old and new login
+  of a renamed channel) load as one streamer; the second is skipped with a
+  warning.
+- A Drop claim that Twitch answers with "already claimed" is recorded as
+  claimed but no longer counted or announced as a new claim.
+- An accepted Drop claim is not sent again for a day. Twitch can keep listing
+  a claimed Drop as unclaimed and complete, and 0.3.3 then claimed and
+  announced it again every 30 minutes.
+- Failed presence-poll requests log one warning per poll cycle with a count
+  instead of one per streamer.
+- A PubSub connection error now logs a fixed `reason` such as
+  `reset-without-close` or `io-connection-reset`, so a dropped connection can
+  be told apart without logging the error text.
+- `review_soak.py --host` passes `SOAK_CONTAINER` and `SOAK_EXPECTED_DNS` to
+  the checker on the evidence host, and `soak_assemble_evidence.py` builds the
+  promotion evidence from recorded soak measurements or lists what is missing.
+
+## 0.3.3 - 2026-10-16
 
 - Reuses the validated media-playlist URL for the same channel and broadcast,
   so most watch ticks send two playback requests (media playlist, newest

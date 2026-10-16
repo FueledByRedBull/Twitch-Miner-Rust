@@ -12,6 +12,10 @@ use crate::observability::AppObservability;
 use crate::status::HealthTracker;
 
 const UNKNOWN_CLAIM_RETRY_DELAY: Duration = Duration::from_secs(30 * 60);
+/// Twitch can keep listing a claimed Drop as unclaimed and complete. Sending
+/// the claim again every retry delay earns nothing, so an accepted claim is
+/// held for a day.
+const COMPLETED_CLAIM_RETRY_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_TRACKED_CLAIMS: usize = 256;
 
 #[derive(Clone, Default)]
@@ -43,7 +47,7 @@ impl DropClaimCoordinator {
             .retain(|_, started| started.elapsed() < UNKNOWN_CLAIM_RETRY_DELAY);
         state
             .completed
-            .retain(|_, completed| completed.elapsed() < UNKNOWN_CLAIM_RETRY_DELAY);
+            .retain(|_, completed| completed.elapsed() < COMPLETED_CLAIM_RETRY_DELAY);
         if state.unknown.contains_key(drop_instance_id)
             || state.completed.contains_key(drop_instance_id)
             || state.in_flight.len() >= MAX_TRACKED_CLAIMS
@@ -292,33 +296,44 @@ pub(crate) async fn claim_inventory_drops_with_coordinator(
             .claim_drop(&drop.drop_instance_id)
             .await
             .with_context(|| format!("claim drop {}", drop.drop_instance_id));
-        if let Err(error) = result {
-            coordinator.mark_unknown(&drop.drop_instance_id);
-            if let Ok(reconciled) = twitch.fetch_inventory_typed().await {
-                if let Some(current) = reconciled.iter().find(|current| {
-                    current.drop_instance_id == drop.drop_instance_id && current.is_claimed
-                }) {
-                    lease.complete();
-                    if let Some(health) = health {
-                        health.record_drop_progress(current);
-                        health.record_claim();
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                coordinator.mark_unknown(&drop.drop_instance_id);
+                if let Ok(reconciled) = twitch.fetch_inventory_typed().await {
+                    if let Some(current) = reconciled.iter().find(|current| {
+                        current.drop_instance_id == drop.drop_instance_id && current.is_claimed
+                    }) {
+                        lease.complete();
+                        if let Some(health) = health {
+                            health.record_drop_progress(current);
+                            health.record_claim();
+                        }
+                        let message = observability.drop_claim_message(mode, drop);
+                        tracing::info!(operation = "claim_drop_reconciled", "{message}");
+                        observability
+                            .send_event(DiscordEvent::DropClaim, &message)
+                            .await;
+                        continue;
                     }
-                    let message = observability.drop_claim_message(mode, drop);
-                    tracing::info!(operation = "claim_drop_reconciled", "{message}");
-                    observability
-                        .send_event(DiscordEvent::DropClaim, &message)
-                        .await;
-                    continue;
                 }
+                failures.push(error);
+                continue;
             }
-            failures.push(error);
-            continue;
-        }
+        };
         lease.complete();
         if let Some(health) = health {
             let mut claimed = drop.clone();
             claimed.is_claimed = true;
             health.record_drop_progress(&claimed);
+        }
+        if outcome == tm_twitch::ClaimDropOutcome::AlreadyClaimed {
+            // The inventory snapshot was stale: this request claimed nothing,
+            // so it is neither counted nor announced.
+            tracing::debug!(operation = "claim_drop", "drop was already claimed");
+            continue;
+        }
+        if let Some(health) = health {
             health.record_claim();
         }
         let message = observability.drop_claim_message(mode, drop);
@@ -533,6 +548,24 @@ mod tests {
         drop(lease);
         assert!(coordinator.begin("drop-1").is_none());
         coordinator.confirm("drop-1");
+        assert!(coordinator.begin("drop-1").is_none());
+    }
+
+    #[test]
+    fn coordinator_does_not_resend_an_accepted_claim_after_the_unknown_retry_delay() {
+        // A freshly booted host has no instant that far in the past.
+        let Some(accepted) = std::time::Instant::now()
+            .checked_sub(super::UNKNOWN_CLAIM_RETRY_DELAY + std::time::Duration::from_secs(60))
+        else {
+            return;
+        };
+        let coordinator = DropClaimCoordinator::default();
+        coordinator
+            .state
+            .lock()
+            .expect("claim state")
+            .completed
+            .insert(String::from("drop-1"), accepted);
         assert!(coordinator.begin("drop-1").is_none());
     }
 

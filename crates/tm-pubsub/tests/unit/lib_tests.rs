@@ -456,3 +456,22 @@ fn randomized_ping_delay_stays_in_expected_range() {
     let delay = randomized_ping_delay(base);
     assert!((Duration::from_secs(25)..=Duration::from_secs(30)).contains(&delay));
 }
+
+#[test]
+fn websocket_failures_report_a_fixed_reason() {
+    use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+    let reason = |error: Error| PubSubError::WebSocket(error).websocket_reason();
+    assert_eq!(
+        reason(Error::Protocol(ProtocolError::ResetWithoutClosingHandshake)),
+        Some("reset-without-close")
+    );
+    assert_eq!(
+        reason(std::io::Error::from(std::io::ErrorKind::ConnectionReset).into()),
+        Some("io-connection-reset")
+    );
+    assert_eq!(
+        reason(std::io::Error::other("private detail").into()),
+        Some("io-other")
+    );
+    assert_eq!(PubSubError::PongTimeout.websocket_reason(), None);
+}

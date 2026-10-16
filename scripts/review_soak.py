@@ -10,6 +10,7 @@ import argparse
 import collections
 import datetime as dt
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -405,7 +406,10 @@ def main() -> None:
     parser.add_argument("--now", help="Explicit timestamp for replaying retained evidence")
     args = parser.parse_args()
     if args.host:
-        remote = ["python3", "-", "--anchor", args.anchor, "--history", args.history]
+        # The checker reads these on the evidence host; SSH does not carry them.
+        forwarded = [f"{name}={os.environ[name]}" for name in ("SOAK_CONTAINER", "SOAK_EXPECTED_DNS")
+                     if name in os.environ]
+        remote = ["env", *forwarded, "python3", "-", "--anchor", args.anchor, "--history", args.history]
         for key in ("checkpoint", "checker", "container", "now"):
             if getattr(args, key):
                 remote.extend(["--" + key, getattr(args, key)])

@@ -621,6 +621,10 @@ impl RuntimeState {
         if !streamer.presence_known || prev_online != online {
             streamer.presence_known = true;
             streamer.is_online = online;
+            // Invalidate presence polls and metadata requests issued before
+            // this transition. A late response must neither bring an offline
+            // stream back into the watch state nor take a new broadcast out.
+            streamer.stream_update_generation = streamer.stream_update_generation.saturating_add(1);
             if online {
                 let short_restart = streamer.offline_at.is_some_and(|offline_at| {
                     (now - offline_at).whole_seconds() <= STREAK_RESTART_CARRYOVER_SECONDS
@@ -637,11 +641,6 @@ impl RuntimeState {
                     stream.stream_up_at = Some(now);
                 }
             } else {
-                // Invalidate metadata requests that were issued while this
-                // broadcast was live. A late successful response must not
-                // bring an offline stream back into the watch state.
-                streamer.stream_update_generation =
-                    streamer.stream_update_generation.saturating_add(1);
                 streamer.offline_at = Some(now);
                 streamer.last_stream_ended_at = Some(now);
                 if let Some(stream) = streamer.stream.as_mut() {
