@@ -2,6 +2,10 @@
 
 ## 0.3.4 - Unreleased
 
+- Updates rustls to 0.23.46 for RUSTSEC-2026-0346 to 0349. The miner builds
+  rustls without certificate compression, does not configure ECH and does not
+  log TLS session values, so at most the key-exchange downgrade advisory
+  could apply to 0.3.3.
 - A stream-up event now invalidates a presence poll that was already in
   flight. Before, the poll's late "offline" answer could take a channel that
   had just gone live back out of the watch state until the next poll.
