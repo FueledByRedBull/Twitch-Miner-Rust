@@ -53,7 +53,10 @@ def assemble(files: dict, review: dict, windows: dict, tag: str, approver: str, 
     need(review['coverage']['complete'] and review['milestone']['elapsed'], 'complete 72-hour coverage')
     need(not levels & {'evidence', 'failure'}, 'no evidence or failure finding in the review')
     eventsub, pubsub = health['eventsub'], health['pubsub']
-    rewards, drops = counters['rewards'], review['drops']['claimed_transitions']
+    rewards = counters['rewards']
+    # The review's last snapshot is taken when it runs, so it can see claims made after the window.
+    window_end = dt.datetime.fromisoformat(review['milestone']['earliest_review_utc'])
+    drops = sum(dt.datetime.fromisoformat(when) <= window_end for when in review['drops']['claim_events'].values())
     capabilities = dict(
         eventsub='pass' if eventsub['verified'] and not eventsub['failed_subscriptions'] else 'fail',
         pubsub='pass' if pubsub['total'] and pubsub['acknowledged'] == pubsub['total'] else 'fail',
