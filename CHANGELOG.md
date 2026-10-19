@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.3.4 - Unreleased
+## 0.3.5 - Unreleased
+
+- An accepted Drop claim is not sent again while the miner runs. Twitch can
+  keep listing a claimed Drop as unclaimed and complete and accept the claim
+  again, and 0.3.4 then claimed and announced it again once a day.
+- `soak_assemble_evidence.py` counts only Drop claims made inside the soak
+  window. A review run after the window closed could see a later claim, and
+  the assembler counted it.
+
+## 0.3.4 - 2026-10-19
 
 - Updates rustls to 0.23.46 for RUSTSEC-2026-0346 to 0349. The miner builds
   rustls without certificate compression, does not configure ECH and does not

@@ -109,10 +109,12 @@ class SoakToolTests(unittest.TestCase):
         review = dict(
             utc="2026-01-04T00:10:00+00:00", findings={"eventsub": dict(level="review")},
             identity=dict(image=image, revision=revision, observation_anchor_utc="2026-01-01T00:10:00+00:00"),
-            coverage=dict(complete=True), milestone=dict(elapsed=True, hours=72.0),
+            coverage=dict(complete=True),
+            milestone=dict(elapsed=True, hours=72.0, earliest_review_utc="2026-01-04T00:10:00+00:00"),
             health=dict(eventsub=dict(verified=True, failed_subscriptions=0), pubsub=dict(total=2, acknowledged=2)),
             counters=dict(rewards=dict(WATCH=dict(events=5), CLAIM=dict(events=2))),
-            drops=dict(claimed_transitions=1), opportunity=dict(eligible_seconds=10.0, live_seconds=5.0),
+            drops=dict(claim_events={"drop-a": "2026-01-03T00:00:00+00:00", "drop-b": "2026-01-04T00:11:00+00:00"}),
+            opportunity=dict(eligible_seconds=10.0, live_seconds=5.0),
             resource_use=dict(result="pass", max_rss_bytes=1, cpu_seconds=1.0, disk_bytes=1, samples=3))
         windows = dict(workflowName="Windows Release", headBranch="v1.2.3", headSha=revision, event="push",
                        conclusion="success", databaseId=4)
@@ -123,7 +125,7 @@ class SoakToolTests(unittest.TestCase):
         self.assertEqual(evidence["soak"]["server_confirmed"], dict(watch_rewards=5, claims=2, drops=1, predictions=0))
         self.assertEqual(sorted(evidence["platform_digests"]), ["linux/amd64", "linux/arm64"])
         self.assertEqual(len(evidence["required_checks"]), 4)
-        review["drops"]["claimed_transitions"] = 0
+        del review["drops"]["claim_events"]["drop-a"]  # drop-b was claimed after the window
         review["findings"]["restart"] = dict(level="failure")
         evidence, gaps = ASSEMBLE.assemble(files, review, {}, "v1.2.3", "operator", now)
         self.assertIsNone(evidence)
