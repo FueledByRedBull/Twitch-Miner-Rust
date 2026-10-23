@@ -36,6 +36,15 @@ function Get-Property([object]$Object, [string]$Name) {
     return $Object.PSObject.Properties[$Name].Value
 }
 
+function ConvertFrom-EvidenceJson([string]$Json) {
+    # PowerShell 7 parses ISO-8601 strings into DateTime unless told not to, and the
+    # timestamp checks need the original text. Windows PowerShell keeps strings as text.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return $Json | ConvertFrom-Json
+    }
+    return $Json | ConvertFrom-Json -Depth 20 -DateKind String
+}
+
 function Assert-Text([object]$Value, [string]$Name) {
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
         throw "Release evidence field '$Name' is required."
@@ -466,16 +475,19 @@ if ($ValidateOnly) {
         }
     }
     Test-Evidence $evidence
-    $zeroOutcome = $evidence | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    # A published record arrives as JSON text, so the accepted case must survive a round trip.
+    $json = $evidence | ConvertTo-Json -Depth 20
+    Test-Evidence (ConvertFrom-EvidenceJson $json)
+    $zeroOutcome = ConvertFrom-EvidenceJson $json
     $zeroOutcome.soak.server_confirmed.watch_rewards = 0
     Assert-Rejected { Test-Evidence $zeroOutcome } 'zero server-confirmed watch rewards'
-    $unboundedClock = $evidence | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $unboundedClock = ConvertFrom-EvidenceJson $json
     $unboundedClock.soak.monotonic_duration_seconds = 72 * 60 * 60 + 301
     Assert-Rejected { Test-Evidence $unboundedClock } 'unbounded wall/monotonic clock divergence'
-    $oversizedOpportunity = $evidence | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $oversizedOpportunity = ConvertFrom-EvidenceJson $json
     $oversizedOpportunity.soak.opportunity.eligible_seconds = 72 * 60 * 60 + 301
     Assert-Rejected { Test-Evidence $oversizedOpportunity } 'opportunity interval outside soak'
-    $futureWindow = $evidence | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $futureWindow = ConvertFrom-EvidenceJson $json
     $futureStart = [DateTimeOffset]::UtcNow.AddMinutes(6)
     $futureWindow.soak.started_at = $futureStart.ToString('o')
     $futureWindow.soak.ended_at = $futureStart.AddHours(72).ToString('o')
@@ -488,7 +500,7 @@ if (-not (Test-Path -LiteralPath $EvidencePath -PathType Leaf)) {
     throw "Release evidence file not found: $EvidencePath"
 }
 try {
-    $evidence = Get-Content -Raw -LiteralPath $EvidencePath | ConvertFrom-Json -Depth 20
+    $evidence = ConvertFrom-EvidenceJson (Get-Content -Raw -LiteralPath $EvidencePath)
 } catch {
     throw 'Release evidence file was not valid JSON.'
 }
