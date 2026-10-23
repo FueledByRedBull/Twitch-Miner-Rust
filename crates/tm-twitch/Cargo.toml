@@ -14,7 +14,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
-tm-domain = { path = "../tm-domain", version = "0.3.5" }
+tm-domain = { path = "../tm-domain", version = "0.3.6" }
 
 [lints]
 workspace = true

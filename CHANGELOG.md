@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.3.5 - Unreleased
+## 0.3.6 - Unreleased
+
+- `verify-release-evidence.ps1` keeps the record's timestamps as text under
+  PowerShell 7, which needs 7.5 or later. PowerShell 7 parsed them into dates,
+  so every real record failed the RFC3339 check and Promote Release could not
+  pass.
+- Updates rustls-webpki to 0.103.16 and webpki-roots to 1.0.10 for
+  RUSTSEC-2026-0382 and 0381, which distrust the leaked emSign intermediate
+  keys, and tokio to 1.53.3 for RUSTSEC-2026-0386.
+
+## 0.3.5 - 2026-10-23
 
 - An accepted Drop claim is not sent again while the miner runs. Twitch can
   keep listing a claimed Drop as unclaimed and complete and accept the claim
