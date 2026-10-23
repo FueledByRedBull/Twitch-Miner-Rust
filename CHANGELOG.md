@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.3.5 - Unreleased
+## 0.3.6 - Unreleased
+
+- `verify-release-evidence.ps1` keeps the record's timestamps as text under
+  PowerShell 7, which needs 7.5 or later. PowerShell 7 parsed them into dates,
+  so every real record failed the RFC3339 check and Promote Release could not
+  pass.
+
+## 0.3.5 - 2026-10-23
 
 - An accepted Drop claim is not sent again while the miner runs. Twitch can
   keep listing a claimed Drop as unclaimed and complete and accept the claim
