@@ -528,3 +528,29 @@ fn drop_events_parse_and_the_topic_follows_drop_settings() {
     assert_eq!(pubsub_topic_class(&topic), "drops");
     assert!(topic_requires_auth(&topic));
 }
+
+#[test]
+fn drop_event_fixtures_parse() {
+    assert_eq!(
+        parse_message(
+            include_str!("../../../../tests/fixtures/pubsub.drop_progress.json"),
+            &[]
+        )
+        .unwrap(),
+        Some(MinerEvent::DropProgress {
+            drop_id: String::from("d"),
+            current_minutes: 3,
+            required_minutes: 60,
+        })
+    );
+    assert_eq!(
+        parse_message(
+            include_str!("../../../../tests/fixtures/pubsub.drop_claim.json"),
+            &[]
+        )
+        .unwrap(),
+        Some(MinerEvent::DropReadyToClaim {
+            drop_instance_id: String::from("i"),
+        })
+    );
+}

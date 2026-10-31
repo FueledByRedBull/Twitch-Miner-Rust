@@ -623,6 +623,7 @@ fn log_unconfirmed(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     #[test]
     fn missed_broadcast_needs_an_open_streak_and_no_pending_retry() {

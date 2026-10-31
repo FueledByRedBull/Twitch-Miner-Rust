@@ -763,6 +763,7 @@ fn privacy_safe_log_path(anonymized: bool, path: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::time::Duration;
 

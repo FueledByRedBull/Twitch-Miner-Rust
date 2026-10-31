@@ -21,6 +21,7 @@ const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(60);
 
 /// Carries the same topics and events as a `PubSub` connection over Hermes, for
 /// when `PubSub` itself is unavailable.
+#[allow(clippy::too_many_lines)]
 pub async fn connect_hermes_topics_and_listen(
     url: &str,
     topics: &[String],
@@ -195,22 +196,18 @@ mod tests {
             let subscribe: Value = serde_json::from_str(subscribe.as_ref()).unwrap();
             let id = subscribe["subscribe"]["id"].as_str().unwrap().to_string();
             received.push(subscribe);
+            let mut notification: Value = serde_json::from_str(include_str!(
+                "../../../tests/fixtures/hermes.notification.json"
+            ))
+            .unwrap();
+            notification["notification"]["subscription"]["id"] = json!(id);
             let frames = [
                 json!({
                     "type": "subscribeResponse",
                     "subscribeResponse": { "result": "ok", "subscription": { "id": id } }
                 }),
                 json!({ "type": "keepalive" }),
-                json!({
-                    "id": "n",
-                    "type": "notification",
-                    "timestamp": "2030-01-01T00:00:00Z",
-                    "notification": {
-                        "type": "pubsub",
-                        "subscription": { "id": id },
-                        "pubsub": r#"{"type":"drop-claim","data":{"drop_instance_id":"i"}}"#
-                    }
-                }),
+                notification,
                 json!({ "type": "reconnect" }),
             ];
             for frame in frames {
@@ -238,11 +235,11 @@ mod tests {
         .await;
         assert!(matches!(result, Err(PubSubError::ReconnectRequested)));
 
-        let received = server.await.unwrap();
-        assert_eq!(received[0]["type"], "authenticate");
-        assert_eq!(received[0]["authenticate"]["token"], "token");
+        let frames = server.await.unwrap();
+        assert_eq!(frames[0]["type"], "authenticate");
+        assert_eq!(frames[0]["authenticate"]["token"], "token");
         assert_eq!(
-            received[1]["subscribe"]["pubsub"]["topic"],
+            frames[1]["subscribe"]["pubsub"]["topic"],
             "user-drop-events.viewer"
         );
         assert_eq!(

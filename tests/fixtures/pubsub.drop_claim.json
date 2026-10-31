@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "user-drop-events.viewer",
+    "message": "{\"type\":\"drop-claim\",\"data\":{\"drop_instance_id\":\"i\"}}"
+  }
+}

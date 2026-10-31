@@ -2974,3 +2974,33 @@ async fn gql_requests_start_spaced_apart() {
     server.join().unwrap();
     assert!(started.elapsed() >= Duration::from_millis(50));
 }
+
+#[test]
+fn drop_session_directory_and_weekly_visit_fixtures() {
+    let session: types::GqlResponse<types::DropSessionData> =
+        serde_json::from_value(protocol_fixture("twitch.drop_current_session.json")).unwrap();
+    let session = session.data.unwrap().current_user.unwrap().session.unwrap();
+    assert_eq!(session.channel.unwrap().id.as_deref(), Some("100"));
+    assert_eq!(session.current_minutes_watched, Some(12));
+
+    let directory: types::GqlResponse<types::GameDirectoryData> =
+        serde_json::from_value(protocol_fixture("twitch.game_directory.json")).unwrap();
+    assert_eq!(
+        crate::responses::game_directory_logins_from_typed(directory.data.unwrap()),
+        vec![String::from("alice")]
+    );
+
+    let weekly: types::GqlResponse<types::WeeklyVisitData> =
+        serde_json::from_value(protocol_fixture("twitch.weekly_visit_rewards.json")).unwrap();
+    let rewards = weekly
+        .data
+        .unwrap()
+        .channel
+        .unwrap()
+        .self_data
+        .unwrap()
+        .rewards
+        .unwrap();
+    assert_eq!(rewards.accumulated_weeks, 1);
+    assert!(rewards.needs_visit(time::macros::datetime!(2030-01-01 00:00 UTC)));
+}
