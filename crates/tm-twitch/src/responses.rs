@@ -424,6 +424,21 @@ pub(crate) fn archived_videos_from_typed(
         .collect()
 }
 
+/// The cursor of the page after this one, if Twitch says there is one.
+pub(crate) fn next_clips_cursor(data: &RecentClipsData) -> Option<String> {
+    let clips = data.user.as_ref()?.clips.as_ref()?;
+    clips
+        .page_info
+        .as_ref()
+        .filter(|page_info| page_info.has_next_page)?;
+    clips
+        .edges
+        .last()?
+        .cursor
+        .clone()
+        .filter(|cursor| !cursor.is_empty())
+}
+
 pub(crate) fn recent_clips_from_typed(
     data: RecentClipsData,
 ) -> Result<Vec<RecentClip>, TwitchClientError> {

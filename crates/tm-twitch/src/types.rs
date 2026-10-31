@@ -516,10 +516,20 @@ pub(crate) struct RecentClipsUser {
 pub(crate) struct RecentClipsConnection {
     #[serde(default)]
     pub(crate) edges: Vec<RecentClipEdge>,
+    #[serde(rename = "pageInfo", default)]
+    pub(crate) page_info: Option<RecentClipsPageInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipsPageInfo {
+    #[serde(rename = "hasNextPage", default)]
+    pub(crate) has_next_page: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RecentClipEdge {
+    #[serde(default)]
+    pub(crate) cursor: Option<String>,
     pub(crate) node: Option<RecentClipNode>,
 }
 

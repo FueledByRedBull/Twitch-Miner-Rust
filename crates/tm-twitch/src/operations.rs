@@ -224,12 +224,17 @@ pub fn recent_archived_videos(channel_login: &str) -> GqlPersistedOperation {
 }
 
 #[must_use]
-pub fn recent_clips(channel_login: &str) -> GqlPersistedOperation {
+pub fn recent_clips(
+    channel_login: &str,
+    filter: &str,
+    cursor: Option<&str>,
+) -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "ClipsCards__User",
         "1cd671bfa12cec480499c087319f26d21925e9695d1f80225aae6a4354f23088",
         json!({
-            "criteria": { "filter": "ALL_TIME" },
+            "criteria": { "filter": filter },
+            "cursor": cursor,
             "limit": 20,
             "login": channel_login.to_lowercase()
         }),

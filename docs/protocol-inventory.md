@@ -243,7 +243,8 @@ Twitch will credit every partial watch interval.
 ## Offline streak recovery
 
 Offline streak recovery uses the three typed read-only operations above
-(`RewardList`, `FilterableVideoTower_Videos`, and `ClipsCards__User`). Archived
+(`RewardList`, `FilterableVideoTower_Videos`, and `ClipsCards__User`, searched
+with `LAST_DAY` then `LAST_WEEK`, up to three pages each). Archived
 videos require an ID, duration, and optional broadcast identifier; the scheduler
 accepts a VOD only when its broadcast identifier exactly matches the missed live
 broadcast and it is at least five minutes long. Clip nodes require an ID, slug,

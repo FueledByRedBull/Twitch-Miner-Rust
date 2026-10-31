@@ -29,6 +29,8 @@
 - New `weekly_visit_rewards` setting (off by default) earns Weekly Visit Rewards by
   playing a VOD or clip on channels still waiting for today's visit.
 - `ChannelPointsContext` retries with its query text when Twitch retires its hash.
+- Clip search looks at the last day and then the last week, across pages, so a
+  recent clip is no longer missed behind a channel's all-time top clips.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
 ## 0.3.6 - Unreleased

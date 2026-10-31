@@ -598,7 +598,7 @@ fn persisted_operations_match_expected_names() {
         "FilterableVideoTower_Videos"
     );
     assert_eq!(
-        operations::recent_clips("abc").operation_name,
+        operations::recent_clips("abc", "LAST_DAY", None).operation_name,
         "ClipsCards__User"
     );
     assert_eq!(
@@ -631,7 +631,7 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::playback_access_token("abc"),
         operations::reward_list("abc"),
         operations::recent_archived_videos("abc"),
-        operations::recent_clips("abc"),
+        operations::recent_clips("abc", "LAST_DAY", None),
         operations::claim_community_points("1", "2"),
         operations::community_moment_claim("moment"),
         operations::join_raid("raid"),
@@ -2866,4 +2866,54 @@ async fn channel_points_context_retries_with_query_text_when_the_hash_is_retired
     server.join().unwrap();
     assert_eq!(context.balance, 7);
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn recent_clips_search_the_day_then_the_week_and_follow_pages() {
+    let clip = |id: &str| {
+        format!(
+            r#"{{"cursor":"after-{id}","node":{{"id":"{id}","slug":"s","url":"u","durationSeconds":5.0}}}}"#
+        )
+    };
+    let page = |clip: String, more: bool| {
+        format!(
+            r#"{{"data":{{"user":{{"clips":{{"edges":[{clip}],"pageInfo":{{"hasNextPage":{more}}}}}}}}}}}"#
+        )
+    };
+    let day_first: &'static str = Box::leak(page(clip("a"), true).into_boxed_str());
+    let day_second: &'static str = Box::leak(page(clip("b"), false).into_boxed_str());
+    let week: &'static str = Box::leak(page(clip("b"), false).into_boxed_str());
+    let (base_url, requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, day_first),
+        (200, day_second),
+        (200, week),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let clips = client.fetch_recent_clips("tester").await.unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        clips
+            .iter()
+            .map(|clip| clip.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
 }

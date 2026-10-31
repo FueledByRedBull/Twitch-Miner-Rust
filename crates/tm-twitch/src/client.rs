@@ -20,8 +20,8 @@ use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
     channel_points_context_from_typed, decode_gql_data, drop_catalog_from_typed,
     followers_page_from_typed, game_directory_logins_from_typed, inventory_snapshot_from_typed,
-    is_persisted_query_not_found, recent_clips_from_typed, stream_info_from_typed,
-    user_contributions_from_typed, validate_make_prediction_response,
+    is_persisted_query_not_found, next_clips_cursor, recent_clips_from_typed,
+    stream_info_from_typed, user_contributions_from_typed, validate_make_prediction_response,
     validate_typed_claim_bonus_response, validate_typed_claim_drop_response,
     validate_typed_community_goal_response, watch_streak_milestone_from_typed,
 };
@@ -103,6 +103,8 @@ struct PlaybackTokenClaims {
 /// A cached playlist is dropped this long before its token expires.
 const PLAYBACK_TOKEN_EXPIRY_MARGIN_SECONDS: u64 = 60;
 /// Upper bound on reuse, whatever expiry the token states.
+/// Bounds the clip search for one channel; each page holds 20 clips.
+const MAX_CLIP_PAGES: usize = 3;
 /// A live playlist lists a few seconds of video; this bounds a hostile one.
 const MAX_OLDER_SEGMENT_REQUESTS: usize = 16;
 const PLAYBACK_PLAYLIST_MAX_AGE_SECONDS: u64 = 60 * 60;
@@ -707,10 +709,30 @@ impl TwitchClient {
         &self,
         channel_login: &str,
     ) -> Result<Vec<RecentClip>, TwitchClientError> {
-        let response: RecentClipsData = self
-            .post_gql_typed(&operations::recent_clips(channel_login))
-            .await?;
-        recent_clips_from_typed(response)
+        let mut clips = Vec::new();
+        for filter in ["LAST_DAY", "LAST_WEEK"] {
+            let mut cursor = None;
+            for _ in 0..MAX_CLIP_PAGES {
+                let response: RecentClipsData = self
+                    .post_gql_typed(&operations::recent_clips(
+                        channel_login,
+                        filter,
+                        cursor.as_deref(),
+                    ))
+                    .await?;
+                cursor = next_clips_cursor(&response);
+                for clip in recent_clips_from_typed(response)? {
+                    // The week's list repeats the day's clips.
+                    if !clips.iter().any(|known: &RecentClip| known.id == clip.id) {
+                        clips.push(clip);
+                    }
+                }
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        Ok(clips)
     }
 
     pub async fn fetch_followers(
