@@ -332,11 +332,27 @@ async fn handle_pubsub_message_with_lanes(
 fn handle_drop_event(context: &PubSubEventContext, event: &tm_domain::MinerEvent) -> bool {
     let drop_events = context.drop_events.as_ref();
     match event {
-        tm_domain::MinerEvent::DropProgress { .. } => {
+        tm_domain::MinerEvent::DropProgress {
+            drop_id,
+            current_minutes,
+            required_minutes,
+        } => {
             if let Some(drop_events) = drop_events {
                 drop_events
                     .coordinator
                     .record_reported_progress(Instant::now());
+                if let Some(percent) = drop_events.coordinator.progress_milestone(
+                    drop_id,
+                    *current_minutes,
+                    *required_minutes,
+                ) {
+                    context.observability.spawn_event(
+                        DiscordEvent::DropStatus,
+                        format!(
+                            "Drop progress: {percent}% ({current_minutes}/{required_minutes} minutes)"
+                        ),
+                    );
+                }
             }
             true
         }

@@ -32,6 +32,7 @@ struct DropClaimState {
     /// accept the claim again, so an accepted claim is never sent again.
     completed: HashMap<String, Instant>,
     last_reported_progress: Option<Instant>,
+    announced_quarters: HashMap<String, i64>,
     watches: HashMap<String, DropChannelWatch>,
     benched: HashMap<String, Instant>,
 }
@@ -70,6 +71,33 @@ impl DropClaimCoordinator {
     /// Twitch pushed progress, so no Drop channel needs a stall check right now.
     pub(crate) fn record_reported_progress(&self, now: Instant) {
         self.locked().last_reported_progress = Some(now);
+    }
+
+    /// Returns the percentage to announce when progress reaches a new quarter of
+    /// the Drop, so one Drop produces at most three status messages.
+    pub(crate) fn progress_milestone(
+        &self,
+        drop_id: &str,
+        current_minutes: i64,
+        required_minutes: i64,
+    ) -> Option<i64> {
+        if required_minutes <= 0 || current_minutes >= required_minutes {
+            return None;
+        }
+        let quarter = current_minutes.saturating_mul(4) / required_minutes;
+        let mut state = self.locked();
+        if state.announced_quarters.len() >= MAX_TRACKED_CLAIMS {
+            state.announced_quarters.clear();
+        }
+        let announced = state
+            .announced_quarters
+            .entry(drop_id.to_string())
+            .or_insert(0);
+        if quarter <= *announced {
+            return None;
+        }
+        *announced = quarter;
+        Some(quarter * 25)
     }
 
     /// Whether a watched Drop channel should be asked about its session now.
@@ -666,6 +694,19 @@ mod tests {
         assert!(coordinator.observe_drop_session("a", None, at(40)));
         assert!(coordinator.is_benched("a", at(41)));
         assert!(!coordinator.is_benched("a", at(71)));
+    }
+
+    #[test]
+    fn drop_progress_announces_each_quarter_once() {
+        let coordinator = super::DropClaimCoordinator::default();
+        let milestone = |current| coordinator.progress_milestone("drop", current, 60);
+        assert_eq!(milestone(5), None);
+        assert_eq!(milestone(15), Some(25));
+        assert_eq!(milestone(16), None);
+        assert_eq!(milestone(45), Some(75));
+        assert_eq!(milestone(30), None);
+        assert_eq!(milestone(60), None);
+        assert_eq!(coordinator.progress_milestone("zero", 1, 0), None);
     }
 
     #[test]

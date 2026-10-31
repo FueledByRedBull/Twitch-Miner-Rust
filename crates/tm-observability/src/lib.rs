@@ -256,6 +256,35 @@ pub fn normalize_event_name(raw: &str) -> Option<Event> {
 }
 
 #[must_use]
+pub fn event_name(event: Event) -> &'static str {
+    match event {
+        Event::Startup => "STARTUP",
+        Event::Shutdown => "SHUTDOWN",
+        Event::StreamerOnline => "STREAMER_ONLINE",
+        Event::StreamerOffline => "STREAMER_OFFLINE",
+        Event::GainForRaid => "GAIN_FOR_RAID",
+        Event::GainForClaim => "GAIN_FOR_CLAIM",
+        Event::GainForWatch => "GAIN_FOR_WATCH",
+        Event::GainForWatchStreak => "GAIN_FOR_WATCH_STREAK",
+        Event::BetWin => "BET_WIN",
+        Event::BetLose => "BET_LOSE",
+        Event::BetRefund => "BET_REFUND",
+        Event::BetFilters => "BET_FILTERS",
+        Event::BetGeneral => "BET_GENERAL",
+        Event::BetFailed => "BET_FAILED",
+        Event::BetStart => "BET_START",
+        Event::BonusClaim => "BONUS_CLAIM",
+        Event::MomentClaim => "MOMENT_CLAIM",
+        Event::JoinRaid => "JOIN_RAID",
+        Event::DropClaim => "DROP_CLAIM",
+        Event::DropStatus => "DROP_STATUS",
+        Event::ChatMention => "CHAT_MENTION",
+        Event::WatchStatus => "WATCH_STATUS",
+        Event::SessionLost => "SESSION_LOST",
+    }
+}
+
+#[must_use]
 pub fn event_from_gain_reason(reason: &str) -> Option<Event> {
     match reason.trim().to_uppercase().as_str() {
         "WATCH" => Some(Event::GainForWatch),
@@ -317,6 +346,12 @@ pub fn discord_message(
     Some(clean_message)
 }
 
+#[derive(Serialize)]
+struct WebhookPayload<'a> {
+    event: &'a str,
+    message: &'a str,
+}
+
 impl DiscordClient {
     pub fn new(timeout: std::time::Duration) -> Result<Self, reqwest::Error> {
         Ok(Self {
@@ -334,6 +369,28 @@ impl DiscordClient {
             .client
             .post(webhook_api)
             .form(&[("content", message), ("username", DISCORD_USERNAME)])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ObservabilityError::DiscordStatus(response.status()));
+        }
+        Ok(())
+    }
+
+    /// Posts one event to the generic webhook as `{"event", "message"}`.
+    pub async fn send_webhook(
+        &self,
+        url: &str,
+        event: Event,
+        message: &str,
+    ) -> Result<(), ObservabilityError> {
+        let response = self
+            .client
+            .post(url)
+            .json(&WebhookPayload {
+                event: event_name(event),
+                message,
+            })
             .send()
             .await?;
         if !response.status().is_success() {

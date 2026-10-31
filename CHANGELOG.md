@@ -35,6 +35,9 @@
   broadcast that ended before the miner started.
 - Event connections fail over to Twitch's Hermes transport after three failures in
   a row, so predictions, moments, and raids keep working if PubSub goes away.
+- New `webhook` setting posts chosen events as JSON to any HTTP endpoint.
+- `DROP_STATUS` events now fire. They report each quarter of a Drop's progress and
+  channels benched for not crediting; the name was accepted before but never sent.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
 ## 0.3.6 - Unreleased

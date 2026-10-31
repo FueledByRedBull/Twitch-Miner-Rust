@@ -37,6 +37,10 @@
     "webhook_api": "",
     "events": []
   },
+  "webhook": {
+    "url": "",
+    "events": []
+  },
   "streamer_overrides": {},
   "bet": {
     "strategy": null,

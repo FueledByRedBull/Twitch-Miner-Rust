@@ -92,6 +92,8 @@ pinning and fair rotation are separate rules, described in the
 | `show_game` | `true` | Include the game name in point messages. |
 | `timezone` | `null` | IANA time zone for timestamps, such as `Europe/Athens`. `null` uses the host's local time. |
 | `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, points, and results in logs and Discord messages. The saved log is named `miner.log` instead of after the account. |
+| `webhook.url` | `""` | Any HTTP(S) endpoint that should receive events, such as ntfy, Gotify, or Home Assistant. Each event is a POST with the JSON body `{"event": "DROP_CLAIM", "message": "..."}`. Empty disables it. Treat it as a secret. |
+| `webhook.events` | `[]` | Which events to send, from the same names as `discord.events`. |
 | `discord.webhook_api` | `""` | Discord webhook URL. Empty disables Discord. Treat it as a secret. |
 | `discord.events` | `[]` | Events to send. An empty list sends all events. |
 
