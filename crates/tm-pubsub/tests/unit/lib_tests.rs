@@ -475,3 +475,56 @@ fn websocket_failures_report_a_fixed_reason() {
     );
     assert_eq!(PubSubError::PongTimeout.websocket_reason(), None);
 }
+
+#[test]
+fn drop_events_parse_and_the_topic_follows_drop_settings() {
+    let message = |payload: &str| {
+        json!({
+            "type": "MESSAGE",
+            "data": { "topic": "user-drop-events.viewer", "message": payload }
+        })
+        .to_string()
+    };
+    assert_eq!(
+        parse_message(
+            &message(
+                r#"{"type":"drop-progress","data":{"drop_id":"d","current_progress_min":3,"required_progress_min":60}}"#
+            ),
+            &[]
+        )
+        .unwrap(),
+        Some(MinerEvent::DropProgress {
+            drop_id: String::from("d"),
+            current_minutes: 3,
+            required_minutes: 60,
+        })
+    );
+    assert_eq!(
+        parse_message(
+            &message(r#"{"type":"drop-claim","data":{"drop_instance_id":"i"}}"#),
+            &[]
+        )
+        .unwrap(),
+        Some(MinerEvent::DropReadyToClaim {
+            drop_instance_id: String::from("i"),
+        })
+    );
+    assert_eq!(
+        parse_message(&message(r#"{"type":"drop-progress","data":{}}"#), &[]).unwrap(),
+        None
+    );
+
+    let mut streamer = Streamer::default();
+    streamer.settings.farm_drops = false;
+    streamer.settings.claim_drops = false;
+    let topic = String::from("user-drop-events.viewer");
+    assert!(!build_topics("viewer", std::slice::from_ref(&streamer))
+        .unwrap()
+        .contains(&topic));
+    streamer.settings.claim_drops = true;
+    assert!(build_topics("viewer", &[streamer])
+        .unwrap()
+        .contains(&topic));
+    assert_eq!(pubsub_topic_class(&topic), "drops");
+    assert!(topic_requires_auth(&topic));
+}

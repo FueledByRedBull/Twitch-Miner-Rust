@@ -742,6 +742,20 @@ async fn watch_streamer_login(
         )
         .await,
     );
+    if matches!(outcome, WatchAttemptOutcome::Success) && streamer.can_watch_drop_campaign() {
+        crate::drops::check_drop_stall(
+            &context.runtime,
+            &context.twitch,
+            &context.claim_coordinator,
+            &context.observability,
+            &streamer,
+            streamer
+                .stream
+                .as_ref()
+                .map_or("", |stream| stream.broadcast_id.as_str()),
+        )
+        .await;
+    }
     context
         .health
         .record_playback_ticks(context.twitch.playback_tick_counts());
@@ -939,6 +953,7 @@ async fn refresh_watch_selection_metadata_inner(
         let observability = observability.clone();
         let streamer = streamer.clone();
         let excluded_campaign_ids = Arc::clone(&excluded_campaign_ids);
+        let benched = claim_coordinator.is_benched(&streamer.channel_id, std::time::Instant::now());
         let inventory_drops = Arc::clone(&inventory_drops);
         refreshes.spawn(async move {
             let previous_game = streamer_game_name(&streamer);
@@ -1000,6 +1015,7 @@ async fn refresh_watch_selection_metadata_inner(
                     &excluded_campaign_ids,
                     inventory_drops,
                     now,
+                    benched,
                 )
                 .await?;
             }
@@ -1062,6 +1078,7 @@ async fn refresh_drop_campaign_eligibility(
     excluded_campaign_ids: &HashSet<String>,
     inventory_drops: &[tm_twitch::InventoryDrop],
     now: OffsetDateTime,
+    benched: bool,
 ) -> Result<()> {
     if !streamer.settings.farm_drops {
         return Ok(());
@@ -1072,7 +1089,7 @@ async fn refresh_drop_campaign_eligibility(
             .game_id
             .as_deref()
             .is_some_and(|game_id| !game_id.trim().is_empty());
-    if !has_game {
+    if !has_game || benched {
         runtime
             .set_drop_campaign_eligibility_if_current(
                 streamer.channel_id.clone(),

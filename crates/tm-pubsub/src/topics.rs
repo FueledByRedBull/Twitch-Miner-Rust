@@ -49,6 +49,13 @@ pub fn build_topics(user_id: &str, streamers: &[Streamer]) -> Result<Vec<String>
         push_unique(format!("predictions-user-v1.{}", user_id.trim()));
     }
 
+    if streamers
+        .iter()
+        .any(|streamer| streamer.settings.farm_drops || streamer.settings.claim_drops)
+    {
+        push_unique(format!("user-drop-events.{}", user_id.trim()));
+    }
+
     let mut presence = Vec::new();
     for streamer in streamers {
         if streamer.channel_id.trim().is_empty() {
@@ -138,7 +145,9 @@ pub fn ping_payload() -> Value {
 
 #[must_use]
 pub fn topic_requires_auth(topic: &str) -> bool {
-    topic.starts_with("community-points-user-v1.") || topic.starts_with("predictions-user-v1.")
+    topic.starts_with("community-points-user-v1.")
+        || topic.starts_with("predictions-user-v1.")
+        || topic.starts_with("user-drop-events.")
 }
 
 #[must_use]
@@ -147,6 +156,8 @@ pub fn pubsub_topic_class(topic: &str) -> &'static str {
         "points-user"
     } else if topic.starts_with("predictions-user-v1.") {
         "prediction-user"
+    } else if topic.starts_with("user-drop-events.") {
+        "drops"
     } else if topic.starts_with("video-playback-by-id.") {
         "presence"
     } else if topic.starts_with("raid.") {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -6,6 +7,7 @@ use tm_domain::Streamer;
 use tm_observability::{event_from_gain_reason, Event as DiscordEvent};
 use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
 
+use crate::drops::DropClaimCoordinator;
 use crate::observability::AppObservability;
 use crate::prediction_journal::PredictionPlacementJournal;
 use crate::runtime_effects::{reconcile_prediction_journal, RuntimeEffectContext};
@@ -37,6 +39,14 @@ struct PubSubEventContext {
     health: HealthTracker,
     journal: PredictionPlacementJournal,
     account_id: String,
+    drop_events: Option<DropEventContext>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DropEventContext {
+    pub(crate) twitch: Arc<tm_twitch::TwitchClient>,
+    pub(crate) coordinator: DropClaimCoordinator,
+    pub(crate) claim_drops: bool,
 }
 
 pub(crate) struct PubSubTaskContext {
@@ -45,6 +55,7 @@ pub(crate) struct PubSubTaskContext {
     pub(crate) user_id: String,
     pub(crate) username: String,
     pub(crate) tracked_streamers: Vec<Streamer>,
+    pub(crate) drop_events: Option<DropEventContext>,
 }
 
 pub(crate) fn spawn_pubsub_loop(
@@ -93,6 +104,7 @@ pub(crate) fn spawn_pubsub_loop(
             health: context.effects.health.clone(),
             journal: context.effects.prediction_journal.clone(),
             account_id: context.effects.persistent_user_id.clone(),
+            drop_events: context.drop_events.clone(),
         };
         let event_task = spawn_pubsub_event_task(
             stop.clone(),
@@ -241,6 +253,7 @@ async fn handle_pubsub_message(
         health: health.clone(),
         journal: PredictionPlacementJournal::memory(),
         account_id: String::from("test-account"),
+        drop_events: None,
     };
     handle_pubsub_message_with_lanes(&context, effect_sender, effect_sender, message, None).await
 }
@@ -315,6 +328,43 @@ async fn handle_pubsub_message_with_lanes(
     false
 }
 
+/// Drop events act on the coordinator, not on runtime state.
+fn handle_drop_event(context: &PubSubEventContext, event: &tm_domain::MinerEvent) -> bool {
+    let drop_events = context.drop_events.as_ref();
+    match event {
+        tm_domain::MinerEvent::DropProgress { .. } => {
+            if let Some(drop_events) = drop_events {
+                drop_events
+                    .coordinator
+                    .record_reported_progress(Instant::now());
+            }
+            true
+        }
+        tm_domain::MinerEvent::DropReadyToClaim { .. } => {
+            if let Some(drop_events) = drop_events.filter(|drop_events| drop_events.claim_drops) {
+                let drop_events = drop_events.clone();
+                let observability = context.observability.clone();
+                let health = context.health.clone();
+                context.observability.track_task(tokio::spawn(async move {
+                    if let Err(error) = crate::drops::claim_available_drops_with_health(
+                        drop_events.twitch.as_ref(),
+                        "event",
+                        &observability,
+                        Some(&health),
+                        &drop_events.coordinator,
+                    )
+                    .await
+                    {
+                        tracing::warn!(task = "drop", error_class = "inventory-or-claim", %error, "drop event claim failed");
+                    }
+                }));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn handle_pubsub_event(
     context: &PubSubEventContext,
     effect_sender: &tokio::sync::mpsc::Sender<QueuedRuntimeEffects>,
@@ -326,6 +376,9 @@ async fn handle_pubsub_event(
     context
         .health
         .record_pubsub_message(pubsub_event_topic_class(&event));
+    if handle_drop_event(context, &event) {
+        return false;
+    }
     let log_event = (*event).clone();
     match context
         .runtime
@@ -455,6 +508,8 @@ fn pubsub_event_topic_class(event: &tm_domain::MinerEvent) -> &'static str {
         tm_domain::MinerEvent::PredictionChannel { .. } => "prediction-channel",
         tm_domain::MinerEvent::PredictionUser { .. } => "prediction-user",
         tm_domain::MinerEvent::CommunityGoal { .. } => "community-goals",
+        tm_domain::MinerEvent::DropProgress { .. }
+        | tm_domain::MinerEvent::DropReadyToClaim { .. } => "drops",
     }
 }
 
@@ -1184,6 +1239,7 @@ mod tests {
             user_id: String::new(),
             username: String::from("tester"),
             tracked_streamers: Vec::new(),
+            drop_events: None,
         };
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(true);
 
@@ -1216,6 +1272,7 @@ mod tests {
             user_id: String::from("viewer-1"),
             username: String::from("tester"),
             tracked_streamers: Vec::new(),
+            drop_events: None,
         };
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(true);
 
@@ -1395,6 +1452,7 @@ mod tests {
             health,
             journal: PredictionPlacementJournal::memory(),
             account_id: String::from("test-account"),
+            drop_events: None,
         };
         let task = spawn_pubsub_event_task(
             stop_receiver,

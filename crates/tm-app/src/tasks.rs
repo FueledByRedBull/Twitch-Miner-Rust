@@ -15,7 +15,7 @@ use crate::eventsub::{
 use crate::minute_watcher::spawn_minute_watcher_loop;
 use crate::observability::AppObservability;
 use crate::prediction_journal::PredictionPlacementJournal;
-use crate::pubsub::{spawn_pubsub_loop, PubSubTaskContext};
+use crate::pubsub::{spawn_pubsub_loop, DropEventContext, PubSubTaskContext};
 use crate::runtime_effects::{PredictionEvaluationScheduler, RuntimeEffectContext};
 use crate::session_watch::{spawn_session_watch_loop, SESSION_CHECK_INTERVAL};
 use crate::status::HealthTracker;
@@ -92,6 +92,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
         &username,
         &prediction_journal,
         prediction_scheduler.as_ref(),
+        &drop_coordinator,
     );
     let context = params.user_id.map(|user_id| {
         spawn_context_refresh_loop(
@@ -230,6 +231,7 @@ fn spawn_transport_tasks(
     username: &str,
     prediction_journal: &PredictionPlacementJournal,
     prediction_scheduler: Option<&PredictionEvaluationScheduler>,
+    drop_coordinator: &DropClaimCoordinator,
 ) -> TransportTasks {
     let initial_fallback = (0..params.initial_streamers.len()).collect::<Vec<_>>();
     let (fallback_tx, fallback_rx) = tokio::sync::watch::channel(initial_fallback);
@@ -283,6 +285,14 @@ fn spawn_transport_tasks(
                 user_id: user_id.clone(),
                 username: username.to_string(),
                 tracked_streamers: params.initial_streamers.to_vec(),
+                drop_events: Some(DropEventContext {
+                    twitch: Arc::clone(params.twitch),
+                    coordinator: drop_coordinator.clone(),
+                    claim_drops: params
+                        .initial_streamers
+                        .iter()
+                        .any(|streamer| streamer.settings.claim_drops),
+                }),
             },
         ))
     });

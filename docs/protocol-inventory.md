@@ -28,6 +28,7 @@ baseline, including its documented hash differences, is in the
 | `Inventory` | Read-only |
 | `ViewerDropsDashboard` | Read-only |
 | `DropsHighlightService_AvailableDrops` | Read-only |
+| `DropCurrentSessionContext` | Read-only |
 | `UserPointsContribution` | Read-only |
 | `ClaimCommunityPoints` | Mutation |
 | `CommunityMomentCallout_Claim` | Mutation |
@@ -445,6 +446,14 @@ plus a deterministic per-connection offset of up to six seconds, with backoff
 for repeated short-lived connections. A
 connection lasting at least five minutes resets the retry count. Subscriptions
 must be acknowledged again before their capability is reported ready.
+
+Accounts that farm or claim Drops also listen on `user-drop-events.<user>`. A
+`drop-progress` message records that Twitch is crediting minutes, and a
+`drop-claim` message triggers an immediate inventory read and claim. Watched Drop
+channels that have had no such message for five minutes are checked with
+`DropCurrentSessionContext` every five minutes; a channel that credits nothing
+for 20 minutes loses Drop priority for 30 minutes and raises a `DROP_STATUS`
+event.
 
 ### IRC
 

@@ -98,6 +98,11 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
         read_only: true,
     },
     PersistedOperationContract {
+        operation_name: "DropCurrentSessionContext",
+        sha256_hash: "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b",
+        read_only: true,
+    },
+    PersistedOperationContract {
         operation_name: "UserPointsContribution",
         sha256_hash: "23ff2c2d60708379131178742327ead913b93b1bd6f665517a6d9085b73f661f",
         read_only: true,
@@ -296,6 +301,15 @@ pub fn drops_highlight_service_available(channel_id: &str) -> GqlPersistedOperat
         "DropsHighlightService_AvailableDrops",
         "782dad0f032942260171d2d80a654f88bdd0c5a9dddc392e9bc92218a0f42d20",
         json!({ "channelID": channel_id }),
+    )
+}
+
+#[must_use]
+pub fn drop_current_session(channel_id: &str) -> GqlPersistedOperation {
+    GqlPersistedOperation::new(
+        "DropCurrentSessionContext",
+        "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b",
+        json!({ "channelID": channel_id, "channelLogin": "" }),
     )
 }
 

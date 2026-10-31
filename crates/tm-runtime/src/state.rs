@@ -493,6 +493,10 @@ impl RuntimeState {
                     EventApplication::changed(vec![effect])
                 }
             },
+            // Handled by the app's Drop coordinator; the runtime holds no Drop progress.
+            MinerEvent::DropProgress { .. } | MinerEvent::DropReadyToClaim { .. } => {
+                EventApplication::unchanged()
+            }
             MinerEvent::CommunityGoal {
                 channel_id,
                 kind,

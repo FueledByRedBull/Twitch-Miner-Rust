@@ -26,10 +26,10 @@ use crate::responses::{
 };
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
-    ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
-    EmptyMutationData, FollowersData, GqlPersistedOperation, InventoryData, InventoryDrop,
-    InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip,
-    RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData, DropSession,
+    DropSessionData, EmptyMutationData, FollowersData, GqlPersistedOperation, InventoryData,
+    InventoryDrop, InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData,
+    RecentClip, RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
     TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
     WatchStreakMilestone,
 };
@@ -834,6 +834,23 @@ impl TwitchClient {
             .post_mutation_typed(&operations::claim_drop_rewards(drop_instance_id))
             .await?;
         validate_typed_claim_drop_response(response)
+    }
+
+    /// `None` means Twitch is crediting no Drop to this account right now.
+    pub async fn fetch_drop_session_typed(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<DropSession>, TwitchClientError> {
+        let response: DropSessionData = self
+            .post_gql_typed(&operations::drop_current_session(channel_id))
+            .await?;
+        Ok(response
+            .current_user
+            .and_then(|user| user.session)
+            .map(|session| DropSession {
+                channel_id: session.channel.and_then(|channel| channel.id),
+                current_minutes: session.current_minutes_watched.unwrap_or_default(),
+            }))
     }
 
     pub async fn fetch_available_drop_campaigns_typed(

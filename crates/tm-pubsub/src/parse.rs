@@ -83,8 +83,37 @@ pub fn parse_message(
     if topic.starts_with("community-points-channel-v1.") {
         return parse_community_goal_event(&payload, &payload_type, channel_id);
     }
+    if topic.starts_with("user-drop-events.") {
+        return Ok(parse_drop_event(&payload, &payload_type));
+    }
 
     Ok(None)
+}
+
+fn parse_drop_event(payload: &Value, payload_type: &str) -> Option<MinerEvent> {
+    let text = |pointer: &str| {
+        payload
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    match payload_type {
+        "drop-progress" => Some(MinerEvent::DropProgress {
+            drop_id: text("/data/drop_id")?,
+            current_minutes: payload
+                .pointer("/data/current_progress_min")
+                .and_then(Value::as_i64)?,
+            required_minutes: payload
+                .pointer("/data/required_progress_min")
+                .and_then(Value::as_i64)?,
+        }),
+        "drop-claim" => Some(MinerEvent::DropReadyToClaim {
+            drop_instance_id: text("/data/drop_instance_id")?,
+        }),
+        _ => None,
+    }
 }
 
 fn parse_points_earned_event(

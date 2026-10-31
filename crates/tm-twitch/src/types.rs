@@ -678,6 +678,37 @@ pub(crate) struct InventoryDropSelf {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionData {
+    #[serde(rename = "currentUser")]
+    pub(crate) current_user: Option<DropSessionUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionUser {
+    #[serde(rename = "dropCurrentSession")]
+    pub(crate) session: Option<DropSessionNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionNode {
+    pub(crate) channel: Option<DropSessionChannel>,
+    #[serde(rename = "currentMinutesWatched")]
+    pub(crate) current_minutes_watched: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionChannel {
+    pub(crate) id: Option<String>,
+}
+
+/// The Drop session Twitch is currently crediting for this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSession {
+    pub channel_id: Option<String>,
+    pub current_minutes: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AvailableDropsData {
     pub(crate) channel: Option<AvailableDropsChannel>,
 }

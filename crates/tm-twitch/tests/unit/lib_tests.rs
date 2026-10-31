@@ -614,6 +614,10 @@ fn persisted_operations_match_expected_names() {
         "DropsHighlightService_AvailableDrops"
     );
     assert_eq!(operations::inventory().operation_name, "Inventory");
+    assert_eq!(
+        operations::drop_current_session("1").operation_name,
+        "DropCurrentSessionContext"
+    );
 }
 
 #[test]
@@ -636,6 +640,7 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::viewer_drops_dashboard(),
         operations::claim_drop_rewards("drop"),
         operations::drops_highlight_service_available("1"),
+        operations::drop_current_session("1"),
         operations::user_points_contribution("abc"),
         operations::contribute_community_goal(1, "1", "goal", "transaction"),
     ];

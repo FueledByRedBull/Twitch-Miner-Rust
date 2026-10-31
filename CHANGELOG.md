@@ -14,6 +14,9 @@
   refreshed before the miner asks for a new device code.
 - `--import-token` saves a Twitch token read from standard input, for when device
   login is unavailable.
+- The miner listens for Twitch's Drop events, so rewards are claimed as soon as
+  they are ready, and benches a channel for 30 minutes if it credits no Drop
+  minutes for 20 minutes.
 
 ## 0.3.6 - Unreleased
 

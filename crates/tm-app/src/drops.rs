@@ -13,6 +13,10 @@ use crate::status::HealthTracker;
 
 const UNKNOWN_CLAIM_RETRY_DELAY: Duration = Duration::from_secs(30 * 60);
 const MAX_TRACKED_CLAIMS: usize = 256;
+/// A channel that credits no Drop minutes for this long is benched.
+const DROP_STALL_WINDOW: Duration = Duration::from_secs(20 * 60);
+const DROP_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const DROP_STALL_BENCH: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Default)]
 pub(crate) struct DropClaimCoordinator {
@@ -26,6 +30,16 @@ struct DropClaimState {
     /// Twitch can keep listing a claimed Drop as unclaimed and complete and
     /// accept the claim again, so an accepted claim is never sent again.
     completed: HashMap<String, Instant>,
+    last_reported_progress: Option<Instant>,
+    watches: HashMap<String, DropChannelWatch>,
+    benched: HashMap<String, Instant>,
+}
+
+struct DropChannelWatch {
+    progressed_at: Instant,
+    checked_at: Instant,
+    seen_at: Instant,
+    minutes: Option<i64>,
 }
 
 struct DropClaimLease {
@@ -35,11 +49,88 @@ struct DropClaimLease {
 }
 
 impl DropClaimCoordinator {
-    fn begin(&self, drop_instance_id: &str) -> Option<DropClaimLease> {
-        let mut state = self
-            .state
+    fn locked(&self) -> std::sync::MutexGuard<'_, DropClaimState> {
+        self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Twitch pushed progress, so no Drop channel needs a stall check right now.
+    pub(crate) fn record_reported_progress(&self, now: Instant) {
+        self.locked().last_reported_progress = Some(now);
+    }
+
+    /// Whether a watched Drop channel should be asked about its session now.
+    pub(crate) fn stall_check_due(&self, channel_id: &str, now: Instant) -> bool {
+        let mut state = self.locked();
+        let reported = state.last_reported_progress;
+        let watch = state
+            .watches
+            .entry(channel_id.to_string())
+            .or_insert(DropChannelWatch {
+                progressed_at: now,
+                checked_at: now,
+                seen_at: now,
+                minutes: None,
+            });
+        // A channel that left the watch set starts its window over on return.
+        if now.duration_since(watch.seen_at) > DROP_STALL_CHECK_INTERVAL {
+            watch.progressed_at = now;
+            watch.checked_at = now;
+            watch.minutes = None;
+        }
+        watch.seen_at = now;
+        if reported.is_some_and(|at| now.duration_since(at) < DROP_STALL_CHECK_INTERVAL) {
+            watch.progressed_at = now;
+            watch.checked_at = now;
+            return false;
+        }
+        if now.duration_since(watch.checked_at) < DROP_STALL_CHECK_INTERVAL {
+            return false;
+        }
+        watch.checked_at = now;
+        true
+    }
+
+    /// Records Twitch's answer and returns whether the channel was just benched.
+    pub(crate) fn observe_drop_session(
+        &self,
+        channel_id: &str,
+        session: Option<&tm_twitch::DropSession>,
+        now: Instant,
+    ) -> bool {
+        let mut state = self.locked();
+        let Some(watch) = state.watches.get_mut(channel_id) else {
+            return false;
+        };
+        // Twitch credits one channel at a time; another channel's session says
+        // nothing about this one.
+        let credited_elsewhere = session
+            .and_then(|session| session.channel_id.as_deref())
+            .is_some_and(|credited| credited != channel_id);
+        let minutes = session.map(|session| session.current_minutes);
+        if credited_elsewhere || (minutes.is_some() && minutes != watch.minutes) {
+            watch.progressed_at = now;
+        }
+        watch.minutes = minutes;
+        if now.duration_since(watch.progressed_at) < DROP_STALL_WINDOW {
+            return false;
+        }
+        state.watches.remove(channel_id);
+        state
+            .benched
+            .insert(channel_id.to_string(), now + DROP_STALL_BENCH);
+        true
+    }
+
+    pub(crate) fn is_benched(&self, channel_id: &str, now: Instant) -> bool {
+        let mut state = self.locked();
+        state.benched.retain(|_, until| *until > now);
+        state.benched.contains_key(channel_id)
+    }
+
+    fn begin(&self, drop_instance_id: &str) -> Option<DropClaimLease> {
+        let mut state = self.locked();
         state
             .unknown
             .retain(|_, started| started.elapsed() < UNKNOWN_CLAIM_RETRY_DELAY);
@@ -201,7 +292,7 @@ pub(crate) async fn claim_available_drops(
     .await
 }
 
-async fn claim_available_drops_with_health(
+pub(crate) async fn claim_available_drops_with_health(
     twitch: &TwitchClient,
     mode: &str,
     observability: &AppObservability,
@@ -230,6 +321,52 @@ async fn claim_available_drops_with_health(
         coordinator,
     )
     .await
+}
+
+/// Asks Twitch whether this channel still earns Drop minutes, and takes it out
+/// of Drop priority when it has stopped.
+pub(crate) async fn check_drop_stall(
+    runtime: &tm_runtime::RuntimeHandle,
+    twitch: &TwitchClient,
+    coordinator: &DropClaimCoordinator,
+    observability: &AppObservability,
+    streamer: &Streamer,
+    broadcast_id: &str,
+) {
+    let now = Instant::now();
+    if !coordinator.stall_check_due(&streamer.channel_id, now) {
+        return;
+    }
+    let session = match twitch.fetch_drop_session_typed(&streamer.channel_id).await {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!(error_class = "drop-session", %error, "drop session read failed");
+            return;
+        }
+    };
+    if !coordinator.observe_drop_session(&streamer.channel_id, session.as_ref(), now) {
+        return;
+    }
+    let game_id = streamer
+        .stream
+        .as_ref()
+        .and_then(|stream| stream.game_id.as_deref());
+    if let Err(error) = runtime
+        .set_drop_watch_target_if_current(&streamer.channel_id, broadcast_id, game_id, false, None)
+        .await
+    {
+        tracing::warn!(error_class = "drop-session", %error, "drop bench update failed");
+    }
+    let name = observability.streamer_name(streamer);
+    tracing::warn!(
+        task = "drop",
+        error_class = "drop-progress-stalled",
+        "no Drop progress on {name}; trying other channels for 30 minutes"
+    );
+    observability.spawn_event(
+        DiscordEvent::DropStatus,
+        format!("No Drop progress on {name}; trying other channels for 30 minutes"),
+    );
 }
 
 #[cfg(test)]
@@ -434,6 +571,52 @@ pub(crate) fn watch_target(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn drop_stall_benches_a_channel_only_without_minute_progress() {
+        let coordinator = super::DropClaimCoordinator::default();
+        let start = Instant::now();
+        let at = |minutes: u64| start + Duration::from_secs(minutes * 60);
+        let session = |minutes: i64, channel: &str| tm_twitch::DropSession {
+            channel_id: Some(channel.to_string()),
+            current_minutes: minutes,
+        };
+
+        assert!(!coordinator.stall_check_due("a", at(0)));
+        assert!(!coordinator.stall_check_due("a", at(1)));
+        for (minute, minutes) in [(5, 10), (10, 15), (15, 15)] {
+            assert!(coordinator.stall_check_due("a", at(minute)));
+            assert!(!coordinator.observe_drop_session(
+                "a",
+                Some(&session(minutes, "a")),
+                at(minute)
+            ));
+        }
+        assert!(coordinator.stall_check_due("a", at(20)));
+        // Credit going to another channel is not this channel's stall.
+        assert!(!coordinator.observe_drop_session("a", Some(&session(15, "b")), at(20)));
+        assert!(coordinator.stall_check_due("a", at(25)));
+        assert!(!coordinator.observe_drop_session("a", None, at(25)));
+        for minute in [30, 35] {
+            assert!(coordinator.stall_check_due("a", at(minute)));
+            assert!(!coordinator.observe_drop_session("a", None, at(minute)));
+        }
+        assert!(coordinator.stall_check_due("a", at(40)));
+        assert!(coordinator.observe_drop_session("a", None, at(40)));
+        assert!(coordinator.is_benched("a", at(41)));
+        assert!(!coordinator.is_benched("a", at(71)));
+    }
+
+    #[test]
+    fn reported_drop_progress_skips_the_session_check() {
+        let coordinator = super::DropClaimCoordinator::default();
+        let start = Instant::now();
+        assert!(!coordinator.stall_check_due("a", start));
+        coordinator.record_reported_progress(start + Duration::from_secs(290));
+        assert!(!coordinator.stall_check_due("a", start + Duration::from_secs(300)));
+    }
+
     use super::DropClaimCoordinator;
 
     #[test]
