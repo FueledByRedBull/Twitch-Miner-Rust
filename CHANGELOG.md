@@ -40,6 +40,10 @@
   channels benched for not crediting; the name was accepted before but never sent.
 - Discord events wait out a rate limit and retry, and a deleted webhook gets its own
   log class. Discord and webhook URLs are now checked when the configuration loads.
+- GQL requests are paced and capped at eight at a time. Response bodies and event
+  connection frames have size limits, and a dead PubSub connection is noticed in about
+  a minute
+  instead of five.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
 ## 0.3.6 - Unreleased

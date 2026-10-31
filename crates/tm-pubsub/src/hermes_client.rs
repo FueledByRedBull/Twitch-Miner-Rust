@@ -6,10 +6,10 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use tm_domain::Streamer;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::client::PubSubConnectionEvent;
+use crate::client::{bounded_frames, PubSubConnectionEvent};
 use crate::errors::PubSubError;
 use crate::hermes::{HermesObservation, HermesObserver, HermesObserverError};
 use crate::topics::pubsub_topic_class;
@@ -28,7 +28,7 @@ pub async fn connect_hermes_topics_and_listen(
     tracked_streamers: &[Streamer],
     sender: mpsc::Sender<PubSubConnectionEvent>,
 ) -> Result<(), PubSubError> {
-    let (mut socket, _) = connect_async(url).await?;
+    let (mut socket, _) = connect_async_with_config(url, Some(bounded_frames()), false).await?;
     let subscriptions: HashMap<String, String> = topics
         .iter()
         .enumerate()

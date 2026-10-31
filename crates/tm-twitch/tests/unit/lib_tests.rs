@@ -2917,3 +2917,60 @@ async fn recent_clips_search_the_day_then_the_week_and_follow_pages() {
     );
     assert_eq!(requests.load(Ordering::SeqCst), 4);
 }
+
+#[tokio::test]
+async fn oversized_gql_response_is_rejected_without_being_buffered() {
+    let oversized: &'static str = Box::leak(" ".repeat(8 * 1024 * 1024 + 1).into_boxed_str());
+    let (base_url, _requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, oversized),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+    assert!(matches!(
+        client.fetch_channel_id("tester").await,
+        Err(TwitchClientError::ResponseTooLarge)
+    ));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn gql_requests_start_spaced_apart() {
+    let (base_url, _requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, r#"{"data":{"user":{"id":"1"}}}"#),
+        (200, r#"{"data":{"user":{"id":"1"}}}"#),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::new(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+    let started = tokio::time::Instant::now();
+    client.fetch_channel_id("tester").await.unwrap();
+    client.fetch_channel_id("tester").await.unwrap();
+    server.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(50));
+}

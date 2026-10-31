@@ -11,7 +11,9 @@ use time::OffsetDateTime;
 use tm_domain::{MinerEvent, Streamer};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+
+use crate::client::bounded_frames;
 
 mod planning;
 mod protocol;
@@ -397,12 +399,12 @@ impl EventSubClient {
         inherited_subscriptions: Option<EventSubSetupReport>,
     ) -> Result<(EventSubSocket, Duration, EventSubSetupReport, String), EventSubError> {
         let setup = async {
-            let (mut socket, _) =
-                tokio::time::timeout(deadlines.connect, connect_async(websocket_url))
-                    .await
-                    .map_err(|_| {
-                        EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect)
-                    })??;
+            let (mut socket, _) = tokio::time::timeout(
+                deadlines.connect,
+                connect_async_with_config(websocket_url, Some(bounded_frames()), false),
+            )
+            .await
+            .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect))??;
             let welcome = tokio::time::timeout(
                 deadlines.welcome,
                 read_welcome(&mut socket, tracked_streamers),

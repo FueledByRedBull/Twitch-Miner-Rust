@@ -499,9 +499,8 @@ mod tests {
         let address = listener.local_addr().expect("identity test server address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
-        let expected_requests = if recover_through_cached_id { 5 } else { 3 };
         let server = thread::spawn(move || {
-            for _ in 0..expected_requests {
+            loop {
                 let (mut stream, _) = listener.accept().expect("accept identity test request");
                 let request = read_http_request(&mut stream);
                 recorded
@@ -535,6 +534,17 @@ mod tests {
                 stream
                     .write_all(&response)
                     .expect("write identity test response");
+                // A failed login lookup cancels the paced context read for the
+                // old login, usually before it is sent, so recovery cannot be
+                // counted in requests.
+                let finished = if recover_through_cached_id {
+                    request.contains(r#""channelLogin":"renamed"#)
+                } else {
+                    recorded.lock().expect("lock identity test requests").len() == 3
+                };
+                if finished {
+                    break;
+                }
             }
         });
         (
@@ -611,7 +621,6 @@ mod tests {
         let requests = requests
             .lock()
             .map_err(|_| anyhow!("identity requests poisoned"))?;
-        assert_eq!(requests.len(), 5);
         assert_eq!(
             requests
                 .iter()
@@ -619,9 +628,6 @@ mod tests {
                 .count(),
             1
         );
-        assert!(requests
-            .iter()
-            .any(|request| request.contains(r#""channelLogin":"alice"#)));
         assert!(requests
             .iter()
             .any(|request| request.contains(r#""channelLogin":"renamed"#)));

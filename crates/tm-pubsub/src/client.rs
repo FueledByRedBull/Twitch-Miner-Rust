@@ -5,7 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use tm_domain::{MinerEvent, Streamer};
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::errors::PubSubError;
@@ -45,7 +46,7 @@ impl Default for PubSubClientSettings {
     fn default() -> Self {
         Self {
             ping_interval: Duration::from_secs(25),
-            pong_timeout: Duration::from_secs(5 * 60),
+            pong_timeout: Duration::from_secs(60),
             websocket_url: WEBSOCKET_URL.to_string(),
         }
     }
@@ -84,7 +85,9 @@ impl PubSubClient {
         tracked_streamers: &[Streamer],
         sender: mpsc::Sender<PubSubConnectionEvent>,
     ) -> Result<(), PubSubError> {
-        let (mut socket, _) = connect_async(&self.settings.websocket_url).await?;
+        let (mut socket, _) =
+            connect_async_with_config(&self.settings.websocket_url, Some(bounded_frames()), false)
+                .await?;
         let mut pending_listens = HashMap::new();
         for (topic, payload) in topics.iter().zip(listen_payloads(topics, auth_token)) {
             if let Some(nonce) = payload.get("nonce").and_then(serde_json::Value::as_str) {
@@ -156,6 +159,14 @@ impl PubSubClient {
             }
         }
     }
+}
+
+/// An event connection frame is a small JSON event; the library default is 64 MiB.
+pub(crate) fn bounded_frames() -> WebSocketConfig {
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_FRAME_BYTES))
+        .max_frame_size(Some(MAX_FRAME_BYTES))
 }
 
 pub(crate) fn randomized_ping_delay(base: Duration) -> Duration {

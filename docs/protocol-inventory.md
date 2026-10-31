@@ -91,6 +91,10 @@ fixed `persisted-query-not-found` class and retains only the operation name.
 
 ## Remote endpoints and client identity
 
+GQL requests run at most eight at a time and start at least 50 ms apart, including
+retries. Response bodies have fixed limits: 8 MiB for GQL, 16 MiB for the homepage
+and settings script, and 1 MiB for playlists. A larger body fails the request.
+
 Every request target that Twitch supplies inside a document rather than one the
 miner compiles in is checked before use: the settings script, playback master
 playlist, selected media playlist, newest complete media segment, and the spade
@@ -465,6 +469,8 @@ Each channel also gets an undocumented `video-playback-by-id` presence topic,
 listed after every other topic. Above the 500-topic limit (10 connections) the
 list is truncated with a warning, so presence topics are dropped first and the
 account topics are always kept.
+A connection that goes 60 seconds without a PONG is treated as dead and
+reconnected. PubSub, Hermes, and EventSub frames are limited to 1 MiB.
 Server-requested reconnects use the clean-close retry policy: a five-second base
 plus a deterministic per-connection offset of up to six seconds, with backoff
 for repeated short-lived connections. A

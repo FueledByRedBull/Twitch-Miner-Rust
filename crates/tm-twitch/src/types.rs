@@ -51,6 +51,8 @@ pub enum TwitchClientError {
     },
     #[error("missing response field: {0}")]
     MissingField(&'static str),
+    #[error("response body exceeded its size limit")]
+    ResponseTooLarge,
     /// Twitch answered with a null campaign list instead of an empty one, which
     /// it does for sessions it will not show the catalog to. That is not "no
     /// campaigns" and must not be read as one.
