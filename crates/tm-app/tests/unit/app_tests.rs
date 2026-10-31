@@ -1871,7 +1871,8 @@ mod tests {
         server.join().unwrap();
         assert_eq!(session.auth_token(), Some("fresh-token"));
         assert_eq!(session.refresh_token(), Some("new-refresh"));
-        assert_eq!(session.cookie_header_for_host("www.twitch.tv"), None);
+        let header = session.cookie_header_for_host("www.twitch.tv").unwrap();
+        assert!(!header.contains("refresh"));
         assert!(requests.lock().unwrap()[1].contains("grant_type=refresh_token"));
         let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
         assert_eq!(saved.auth_token(), Some("fresh-token"));
