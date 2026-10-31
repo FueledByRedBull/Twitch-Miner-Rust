@@ -717,6 +717,36 @@ pub(crate) struct DropSessionChannel {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryData {
+    pub(crate) game: Option<GameDirectoryGame>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryGame {
+    pub(crate) streams: Option<GameDirectoryStreams>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryStreams {
+    pub(crate) edges: Vec<GameDirectoryEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryEdge {
+    pub(crate) node: Option<GameDirectoryNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryNode {
+    pub(crate) broadcaster: Option<GameDirectoryBroadcaster>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryBroadcaster {
+    pub(crate) login: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct DropCatalogData {
     #[serde(rename = "currentUser")]
     pub(crate) current_user: Option<DropCatalogUser>,

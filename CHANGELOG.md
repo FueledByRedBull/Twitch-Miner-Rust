@@ -24,6 +24,8 @@
 - A channel offering a campaign you have not started now gets `DROPS` priority.
   Before, a campaign had to appear in your inventory first, and it only appears
   once started.
+- New `drop_discovery_games` setting adds live channels with Drops enabled for the
+  games you list, each time the miner starts.
 
 ## 0.3.6 - Unreleased
 

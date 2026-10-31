@@ -29,6 +29,7 @@ baseline, including its documented hash differences, is in the
 | `ViewerDropsDashboard` | Read-only |
 | `DropsHighlightService_AvailableDrops` | Read-only |
 | `DropCurrentSessionContext` | Read-only |
+| `DirectoryPage_Game` | Read-only |
 | `UserPointsContribution` | Read-only |
 | `ClaimCommunityPoints` | Mutation |
 | `CommunityMomentCallout_Claim` | Mutation |
@@ -215,8 +216,10 @@ authorize a channel. Completed, subscription-only, prerequisite-blocked, future
 and infeasible rewards do not receive deadline priority. Missing planning
 metadata retains the existing campaign/channel-order behavior without inventing
 eligibility or deadlines. Targets older than ten minutes lose deadline priority.
-This ranks rewards on tracked channels; it does not discover new channels or
-guarantee optimal global campaign coverage. Releasing a channel resets its
+This ranks rewards on tracked channels and does not guarantee optimal global
+campaign coverage. `drop_discovery_games` adds channels only at startup, through
+`DirectoryPage_Game` with the `DROPS_ENABLED` filter; a failed lookup logs a
+warning and startup continues. Releasing a channel resets its
 watched minutes; that reset must not send the campaign pin immediately back to
 it. A streak candidate arriving just after a fair rotation waits until the next
 turn instead of displacing a channel that has only just started watching.

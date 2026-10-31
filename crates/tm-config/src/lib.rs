@@ -175,6 +175,8 @@ pub struct ConfigFile {
     pub followers_order: FollowersOrder,
     #[serde(default)]
     pub drop_account_link: DropAccountLink,
+    #[serde(default)]
+    pub drop_discovery_games: Vec<String>,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
@@ -226,6 +228,7 @@ pub fn default_config_value() -> Value {
         "watch_priority": ["STREAK", "DROPS", "ORDER"],
         "followers_order": "DESC",
         "drop_account_link": "linked",
+        "drop_discovery_games": [],
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
@@ -831,6 +834,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "watch_priority",
     "followers_order",
     "drop_account_link",
+    "drop_discovery_games",
     "bet",
     "timezone",
     "privacy",

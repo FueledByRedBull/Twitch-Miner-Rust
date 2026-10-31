@@ -641,6 +641,7 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::claim_drop_rewards("drop"),
         operations::drops_highlight_service_available("1"),
         operations::drop_current_session("1"),
+        operations::drops_enabled_game_directory("game", 5),
         operations::user_points_contribution("abc"),
         operations::contribute_community_goal(1, "1", "goal", "transaction"),
     ];
@@ -2785,5 +2786,22 @@ fn null_drop_catalog_is_withheld_and_an_empty_one_is_not() {
             .id
             .as_deref(),
         Some("c")
+    );
+}
+
+#[test]
+fn game_directory_keeps_only_channels_with_a_login() {
+    let decode = |payload: serde_json::Value| {
+        crate::responses::game_directory_logins_from_typed(serde_json::from_value(payload).unwrap())
+    };
+    assert!(decode(serde_json::json!({ "game": null })).is_empty());
+    assert_eq!(
+        decode(serde_json::json!({ "game": { "streams": { "edges": [
+            { "node": { "broadcaster": { "login": "alice" } } },
+            { "node": { "broadcaster": null } },
+            { "node": null },
+            { "node": { "broadcaster": { "login": " " } } },
+        ] } } })),
+        vec![String::from("alice")]
     );
 }

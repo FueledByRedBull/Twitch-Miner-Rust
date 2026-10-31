@@ -42,6 +42,7 @@ which is secret), optional `log/` files, `streak-cache.json`,
 | `streamers_exclude` | `[]` | Logins that are never watched. |
 | `followers_order` | `DESC` | Order of followed channels when `streamers` is empty: `ASC` or `DESC`. |
 | `drop_account_link` | `linked` | Which Drop campaigns to farm by game-account link: `linked` skips campaigns you have not linked, `all` farms everything, `none` skips any campaign that involves a game account. |
+| `drop_discovery_games` | `[]` | Game slugs (the last part of the game's Twitch directory URL, such as `rocket-league`) to find channels for. At each start the miner adds up to five live channels with Drops enabled per game. They use your global settings and `streamers_exclude` still applies, but the list is only refreshed when the miner restarts. |
 | `game_priority` | `[]` | Games to prefer, in order. |
 | `game_exclude` | `[]` | Games whose streams are not watched. |
 | `watch_priority` | `["STREAK", "DROPS", "ORDER"]` | How the two watched channels are chosen. Priorities are tried in order; see the next table. |

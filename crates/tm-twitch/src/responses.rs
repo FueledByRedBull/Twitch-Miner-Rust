@@ -6,8 +6,8 @@ use crate::types::{
     campaign_is_unlinked, campaign_requires_link, ArchivedVideo, ArchivedVideosData,
     AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome,
     ClaimedDropReward, CommunityGoalContributionData, DropCatalogCampaign, DropCatalogData,
-    FollowersData, GqlResponse, InventoryData, InventoryDrop, InventorySnapshot, RecentClip,
-    RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    FollowersData, GameDirectoryData, GqlResponse, InventoryData, InventoryDrop, InventorySnapshot,
+    RecentClip, RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
     UserContributionData, WatchStreakMilestone,
 };
 
@@ -468,6 +468,17 @@ fn required_text(value: Option<String>, field: &'static str) -> Result<String, T
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or(TwitchClientError::MissingField(field))
+}
+
+/// An unknown game slug answers with a null game, which is simply no channels.
+pub(crate) fn game_directory_logins_from_typed(data: GameDirectoryData) -> Vec<String> {
+    data.game
+        .and_then(|game| game.streams)
+        .map_or_else(Vec::new, |streams| streams.edges)
+        .into_iter()
+        .filter_map(|edge| edge.node?.broadcaster?.login)
+        .filter(|login| !login.trim().is_empty())
+        .collect()
 }
 
 pub(crate) fn drop_catalog_from_typed(

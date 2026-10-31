@@ -19,20 +19,20 @@ use crate::parsers::minute_watched_request;
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
     channel_points_context_from_typed, decode_gql_data, drop_catalog_from_typed,
-    followers_page_from_typed, inventory_snapshot_from_typed, is_persisted_query_not_found,
-    recent_clips_from_typed, stream_info_from_typed, user_contributions_from_typed,
-    validate_make_prediction_response, validate_typed_claim_bonus_response,
-    validate_typed_claim_drop_response, validate_typed_community_goal_response,
-    watch_streak_milestone_from_typed,
+    followers_page_from_typed, game_directory_logins_from_typed, inventory_snapshot_from_typed,
+    is_persisted_query_not_found, recent_clips_from_typed, stream_info_from_typed,
+    user_contributions_from_typed, validate_make_prediction_response,
+    validate_typed_claim_bonus_response, validate_typed_claim_drop_response,
+    validate_typed_community_goal_response, watch_streak_milestone_from_typed,
 };
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
     ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
     DropCatalogCampaign, DropCatalogData, DropSession, DropSessionData, EmptyMutationData,
-    FollowersData, GqlPersistedOperation, InventoryData, InventoryDrop, InventorySnapshot,
-    LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip, RecentClipsData,
-    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
-    UserContributionData, UserIdData, UserLoginData, WatchStreakMilestone,
+    FollowersData, GameDirectoryData, GqlPersistedOperation, InventoryData, InventoryDrop,
+    InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip,
+    RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, WatchStreakMilestone,
 };
 use crate::{operations, CLIENT_ID};
 
@@ -812,6 +812,17 @@ impl TwitchClient {
     ) -> Result<InventorySnapshot, TwitchClientError> {
         let response: InventoryData = self.post_gql_typed(&operations::inventory()).await?;
         inventory_snapshot_from_typed(response)
+    }
+
+    pub async fn fetch_drops_enabled_channels_typed(
+        &self,
+        game_slug: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, TwitchClientError> {
+        let response: GameDirectoryData = self
+            .post_gql_typed(&operations::drops_enabled_game_directory(game_slug, limit))
+            .await?;
+        Ok(game_directory_logins_from_typed(response))
     }
 
     pub async fn fetch_drop_catalog_typed(
