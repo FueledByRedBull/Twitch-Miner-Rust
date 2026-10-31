@@ -1137,7 +1137,11 @@ pub(crate) async fn send_minute_watched_for_streamer(
     stream.payload = vec![build_minute_watched_event(&streamer, &stream, user_id)];
 
     twitch
-        .prime_live_playback(&streamer.username, &stream.broadcast_id)
+        .prime_live_playback(
+            &streamer.username,
+            &stream.broadcast_id,
+            streamer.can_watch_drop_campaign(),
+        )
         .await
         .with_context(|| format!("prime live playback for {}", streamer.username))?;
 

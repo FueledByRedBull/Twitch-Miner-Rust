@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Channels with an active Drop campaign now request every segment their media
+  playlist lists each minute, not only the newest one, because Twitch stopped
+  crediting Drop progress from the newest segment alone.
+
 ## 0.3.6 - Unreleased
 
 - `verify-release-evidence.ps1` keeps the record's timestamps as text under

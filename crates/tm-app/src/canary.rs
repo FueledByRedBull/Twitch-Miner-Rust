@@ -344,7 +344,7 @@ async fn prime_playback_if_live(
     if !target_is_live {
         return Ok(false);
     }
-    twitch.prime_live_playback(target, "").await?;
+    twitch.prime_live_playback(target, "", false).await?;
     Ok(true)
 }
 

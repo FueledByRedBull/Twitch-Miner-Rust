@@ -988,7 +988,10 @@ async fn playback_network_errors_do_not_expose_tokenized_urls() {
         },
     );
 
-    let error = client.prime_live_playback("tester", "").await.unwrap_err();
+    let error = client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap_err();
     let message = error.to_string();
     assert!(matches!(error, TwitchClientError::PlaybackRequest { .. }));
     assert!(!message.contains("secret-signature"));
@@ -1029,7 +1032,7 @@ async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
         (200, ""),
     ]);
     client_for(&base_url)
-        .prime_live_playback("tester", "")
+        .prime_live_playback("tester", "", false)
         .await
         .unwrap();
     assert_eq!(requests.load(Ordering::SeqCst), 6);
@@ -1038,7 +1041,7 @@ async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
     let (base_url, requests, server) =
         spawn_http_server([(200, build_id), (200, token), (400, "")]);
     let error = client_for(&base_url)
-        .prime_live_playback("tester", "")
+        .prime_live_playback("tester", "", false)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1166,8 +1169,14 @@ async fn playback_priming_without_a_broadcast_repeats_all_four_requests() {
         endpoints,
     );
 
-    client.prime_live_playback("tester", "").await.unwrap();
-    client.prime_live_playback("tester", "").await.unwrap();
+    client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     let requests = requests.lock().unwrap();
@@ -1225,7 +1234,10 @@ async fn playback_query_is_sent_only_after_persisted_hash_miss() {
         endpoints,
     );
 
-    client.prime_live_playback("tester", "").await.unwrap();
+    client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     let requests = requests.lock().unwrap();
@@ -1668,6 +1680,9 @@ fn spawn_caching_playback_server(
                 )
             } else if request.starts_with("HEAD /segment.ts") {
                 String::new()
+            } else if request.starts_with("HEAD /older-segment.ts") {
+                status = "404 Not Found";
+                String::new()
             } else {
                 panic!("unexpected playback request: {request}");
             };
@@ -1725,16 +1740,46 @@ fn playback_test_client(endpoints: TwitchEndpoints) -> TwitchClient {
 }
 
 #[tokio::test]
+async fn drop_playback_requests_older_segments_and_tolerates_their_failure() {
+    // Client version, one full preflight, one older-segment HEAD that fails.
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 1, unix_now() + 3600, None, false);
+    let client = playback_test_client(endpoints);
+
+    client
+        .prime_live_playback("tester", "first", true)
+        .await
+        .unwrap();
+    server.join().unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(playback_request_counts(&requests), [1, 1, 1, 1]);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("HEAD /older-segment.ts"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn playback_reuses_the_media_playlist_until_the_broadcast_changes() {
     // Client version, one full preflight, one cached tick, one full preflight.
     let (endpoints, requests, server) =
         spawn_caching_playback_server(1 + 4 + 2 + 4, unix_now() + 3600, None, false);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
-    client.prime_live_playback("tester", "first").await.unwrap();
     client
-        .prime_live_playback("tester", "second")
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "second", false)
         .await
         .unwrap();
     server.join().unwrap();
@@ -1752,8 +1797,14 @@ async fn playback_does_not_reuse_a_playlist_whose_token_is_about_to_expire() {
         spawn_caching_playback_server(1 + 4 + 4, unix_now() + 30, None, false);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     assert_eq!(
@@ -1769,8 +1820,14 @@ async fn failed_cached_playlist_gets_one_full_preflight() {
         spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), false);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     assert_eq!(
@@ -1786,14 +1843,20 @@ async fn cancelled_cached_tick_does_not_keep_the_cached_playlist() {
         spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), true);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
     tokio::time::timeout(
         Duration::from_millis(100),
-        client.prime_live_playback("tester", "first"),
+        client.prime_live_playback("tester", "first", false),
     )
     .await
     .unwrap_err();
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
 
     assert_eq!(
         playback_request_counts(&requests.lock().unwrap()),

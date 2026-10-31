@@ -13,7 +13,7 @@ use tm_domain::{Stream, MAX_PREDICTION_POINTS};
 
 use crate::contracts::{extract_build_id, extract_settings_script_url, extract_spade_url};
 use crate::cookies::{claim_bonus_cookie_header, is_twitch_cookie_url, merge_cookie_headers};
-use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
+use crate::hls::{lowest_bandwidth_variant_url, media_segment_urls};
 use crate::ids::{generate_client_session_id, generate_device_id, generate_transaction_id};
 use crate::parsers::minute_watched_request;
 use crate::responses::{
@@ -101,6 +101,8 @@ struct PlaybackTokenClaims {
 /// A cached playlist is dropped this long before its token expires.
 const PLAYBACK_TOKEN_EXPIRY_MARGIN_SECONDS: u64 = 60;
 /// Upper bound on reuse, whatever expiry the token states.
+/// A live playlist lists a few seconds of video; this bounds a hostile one.
+const MAX_OLDER_SEGMENT_REQUESTS: usize = 16;
 const PLAYBACK_PLAYLIST_MAX_AGE_SECONDS: u64 = 60 * 60;
 
 #[derive(Debug, Clone)]
@@ -414,7 +416,8 @@ impl TwitchClient {
         stream_info_from_typed(response)
     }
 
-    /// Requests the newest media segment of a live channel.
+    /// Requests the newest media segment of a live channel and, with
+    /// `all_segments`, the older segments its playlist still lists.
     ///
     /// With a non-empty `broadcast_id`, the media-playlist URL that passed the
     /// full preflight is reused for that broadcast until its playback token
@@ -424,6 +427,7 @@ impl TwitchClient {
         &self,
         channel_login: &str,
         broadcast_id: &str,
+        all_segments: bool,
     ) -> Result<(), TwitchClientError> {
         let channel_login = normalize_channel_login(channel_login)
             .ok_or(TwitchClientError::InvalidField("channel_login"))?;
@@ -433,7 +437,11 @@ impl TwitchClient {
         // worked. A tick that fails, or is cancelled by its caller's deadline
         // while waiting on a dead host, therefore cannot leave it behind.
         if let Some(cached) = self.take_media_playlist(&channel_login, broadcast_id) {
-            if self.prime_media_playlist(&cached.url).await.is_ok() {
+            if self
+                .prime_media_playlist(&cached.url, all_segments)
+                .await
+                .is_ok()
+            {
                 self.playback_cached_ticks.fetch_add(1, Ordering::Relaxed);
                 self.playback_playlists
                     .lock()
@@ -446,7 +454,8 @@ impl TwitchClient {
         }
 
         let (variant_url, expires_at_unix) = self.resolve_media_playlist(&channel_login).await?;
-        self.prime_media_playlist(&variant_url).await?;
+        self.prime_media_playlist(&variant_url, all_segments)
+            .await?;
         self.playback_full_preflights
             .fetch_add(1, Ordering::Relaxed);
         if let Some(expires_at_unix) = expires_at_unix.filter(|_| !broadcast_id.is_empty()) {
@@ -566,6 +575,7 @@ impl TwitchClient {
     async fn prime_media_playlist(
         &self,
         variant_url: &reqwest::Url,
+        all_segments: bool,
     ) -> Result<(), TwitchClientError> {
         validate_remote_endpoint(
             variant_url,
@@ -592,7 +602,10 @@ impl TwitchClient {
             .text()
             .await
             .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
-        let segment_url = media_segment_url(&variant_url, &variant_body)?;
+        let mut segment_urls = media_segment_urls(&variant_url, &variant_body)?;
+        let segment_url = segment_urls
+            .pop()
+            .ok_or(TwitchClientError::MissingField("media playlist"))?;
         validate_remote_endpoint(
             &segment_url,
             "media playlist",
@@ -612,6 +625,28 @@ impl TwitchClient {
                 status: segment.status(),
                 context: "prime playback media segment",
             });
+        }
+        if all_segments {
+            // Older segments can age out of the CDN mid-tick, so only the
+            // newest one decides whether the tick succeeded.
+            for url in segment_urls.iter().rev().take(MAX_OLDER_SEGMENT_REQUESTS) {
+                if validate_remote_endpoint(
+                    url,
+                    "media playlist",
+                    self.allow_loopback_remote_endpoints,
+                )
+                .is_ok()
+                {
+                    let _ = self
+                        .send_playback_read_request(
+                            remote_client,
+                            reqwest::Method::HEAD,
+                            url,
+                            "media segment",
+                        )
+                        .await;
+                }
+            }
         }
         Ok(())
     }

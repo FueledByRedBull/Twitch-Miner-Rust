@@ -133,7 +133,9 @@ the next attempt without replaying missed ticks; it does not queue catch-up
 requests. Watch-selection work can still add time between passes.
 A full preflight performs one `PlaybackAccessToken` GQL request, one
 master-playlist GET, one selected media-playlist GET, and one
-newest-complete-segment HEAD before the spade POST. The media-playlist URL that
+newest-complete-segment HEAD before the spade POST. On a channel with an active
+Drop campaign the tick also sends a HEAD for each older segment the playlist
+lists, up to 16. Only the newest segment's result decides the tick. The media-playlist URL that
 passed it is then reused for the same channel and broadcast, so later ticks
 perform only the media-playlist GET and the segment HEAD. The URL is dropped
 when the broadcast ID changes, 60 seconds before the playback token's stated
