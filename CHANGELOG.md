@@ -17,6 +17,8 @@
 - The miner listens for Twitch's Drop events, so rewards are claimed as soon as
   they are ready, and benches a channel for 30 minutes if it credits no Drop
   minutes for 20 minutes.
+- The canary now fails when Twitch withholds the Drop campaign catalog. It used to
+  pass on the null response.
 
 ## 0.3.6 - Unreleased
 

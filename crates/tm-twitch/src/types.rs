@@ -51,6 +51,11 @@ pub enum TwitchClientError {
     },
     #[error("missing response field: {0}")]
     MissingField(&'static str),
+    /// Twitch answered with a null campaign list instead of an empty one, which
+    /// it does for sessions it will not show the catalog to. That is not "no
+    /// campaigns" and must not be read as one.
+    #[error("twitch withheld the Drop campaign catalog from this session")]
+    DropCatalogWithheld,
     #[error("invalid response field: {0}")]
     InvalidField(&'static str),
     #[error("graphql errors for {context}: {errors}")]
@@ -699,6 +704,24 @@ pub(crate) struct DropSessionNode {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct DropSessionChannel {
     pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropCatalogData {
+    #[serde(rename = "currentUser")]
+    pub(crate) current_user: Option<DropCatalogUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropCatalogUser {
+    #[serde(rename = "dropCampaigns")]
+    pub(crate) campaigns: Option<Vec<DropCatalogCampaign>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropCatalogCampaign {
+    pub id: Option<String>,
+    pub status: Option<String>,
 }
 
 /// The Drop session Twitch is currently crediting for this account.

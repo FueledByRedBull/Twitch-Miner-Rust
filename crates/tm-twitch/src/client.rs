@@ -18,20 +18,21 @@ use crate::ids::{generate_client_session_id, generate_device_id, generate_transa
 use crate::parsers::minute_watched_request;
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
-    channel_points_context_from_typed, decode_gql_data, followers_page_from_typed,
-    inventory_snapshot_from_typed, is_persisted_query_not_found, recent_clips_from_typed,
-    stream_info_from_typed, user_contributions_from_typed, validate_make_prediction_response,
-    validate_typed_claim_bonus_response, validate_typed_claim_drop_response,
-    validate_typed_community_goal_response, watch_streak_milestone_from_typed,
+    channel_points_context_from_typed, decode_gql_data, drop_catalog_from_typed,
+    followers_page_from_typed, inventory_snapshot_from_typed, is_persisted_query_not_found,
+    recent_clips_from_typed, stream_info_from_typed, user_contributions_from_typed,
+    validate_make_prediction_response, validate_typed_claim_bonus_response,
+    validate_typed_claim_drop_response, validate_typed_community_goal_response,
+    watch_streak_milestone_from_typed,
 };
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
-    ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData, DropSession,
-    DropSessionData, EmptyMutationData, FollowersData, GqlPersistedOperation, InventoryData,
-    InventoryDrop, InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData,
-    RecentClip, RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
-    TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
-    WatchStreakMilestone,
+    ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
+    DropCatalogCampaign, DropCatalogData, DropSession, DropSessionData, EmptyMutationData,
+    FollowersData, GqlPersistedOperation, InventoryData, InventoryDrop, InventorySnapshot,
+    LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip, RecentClipsData,
+    RewardListData, StreamInfo, StreamInfoData, TwitchClientError, TwitchEndpoints,
+    UserContributionData, UserIdData, UserLoginData, WatchStreakMilestone,
 };
 use crate::{operations, CLIENT_ID};
 
@@ -813,11 +814,13 @@ impl TwitchClient {
         inventory_snapshot_from_typed(response)
     }
 
-    pub async fn fetch_viewer_drops_dashboard_typed(
+    pub async fn fetch_drop_catalog_typed(
         &self,
-    ) -> Result<ViewerDropsDashboard, TwitchClientError> {
-        self.post_gql_typed(&operations::viewer_drops_dashboard())
-            .await
+    ) -> Result<Vec<DropCatalogCampaign>, TwitchClientError> {
+        let response: DropCatalogData = self
+            .post_gql_typed(&operations::viewer_drops_dashboard())
+            .await?;
+        drop_catalog_from_typed(response)
     }
 
     pub async fn claim_drop(

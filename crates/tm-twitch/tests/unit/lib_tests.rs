@@ -2762,3 +2762,28 @@ fn integrity_failures_are_classified_separately_from_other_gql_errors() {
         Err(TwitchClientError::GqlErrors { .. })
     ));
 }
+
+#[test]
+fn null_drop_catalog_is_withheld_and_an_empty_one_is_not() {
+    let decode = |payload: serde_json::Value| {
+        crate::responses::drop_catalog_from_typed(serde_json::from_value(payload).unwrap())
+    };
+    assert!(matches!(
+        decode(serde_json::json!({ "currentUser": { "dropCampaigns": null } })),
+        Err(TwitchClientError::DropCatalogWithheld)
+    ));
+    assert!(
+        decode(serde_json::json!({ "currentUser": { "dropCampaigns": [] } }))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        decode(serde_json::json!({
+            "currentUser": { "dropCampaigns": [{ "id": "c", "status": "ACTIVE" }] }
+        }))
+        .unwrap()[0]
+            .id
+            .as_deref(),
+        Some("c")
+    );
+}

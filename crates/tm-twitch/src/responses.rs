@@ -4,9 +4,10 @@ use time::OffsetDateTime;
 
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome,
-    ClaimDropOutcome, ClaimedDropReward, CommunityGoalContributionData, FollowersData, GqlResponse,
-    InventoryData, InventoryDrop, InventorySnapshot, RecentClip, RecentClipsData, RewardListData,
-    StreamInfo, StreamInfoData, TwitchClientError, UserContributionData, WatchStreakMilestone,
+    ClaimDropOutcome, ClaimedDropReward, CommunityGoalContributionData, DropCatalogCampaign,
+    DropCatalogData, FollowersData, GqlResponse, InventoryData, InventoryDrop, InventorySnapshot,
+    RecentClip, RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    UserContributionData, WatchStreakMilestone,
 };
 
 pub(crate) fn is_persisted_query_not_found(payload: &serde_json::Value) -> bool {
@@ -466,6 +467,15 @@ fn required_text(value: Option<String>, field: &'static str) -> Result<String, T
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or(TwitchClientError::MissingField(field))
+}
+
+pub(crate) fn drop_catalog_from_typed(
+    data: DropCatalogData,
+) -> Result<Vec<DropCatalogCampaign>, TwitchClientError> {
+    data.current_user
+        .ok_or(TwitchClientError::MissingField("data.currentUser"))?
+        .campaigns
+        .ok_or(TwitchClientError::DropCatalogWithheld)
 }
 
 pub(crate) fn available_drop_campaign_ids_from_typed(

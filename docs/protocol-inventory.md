@@ -253,6 +253,10 @@ milestone rather than treating either trigger as proof.
 
 ## Drops
 
+`ViewerDropsDashboard` reports a null `dropCampaigns` as a distinct "catalog
+withheld" error rather than an empty list, because Twitch returns null to
+sessions it will not show the catalog to. The canary fails on it.
+
 `DropsHighlightService_AvailableDrops` treats a null channel or null campaign
 list as an empty result, matching the Go reference, while every entry in a
 present list still requires a non-empty campaign ID. Its typed result also
