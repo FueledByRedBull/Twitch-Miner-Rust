@@ -145,6 +145,19 @@ pub fn build_token_poll_request(device_id: &str, device_code: &str) -> OAuthRequ
 }
 
 #[must_use]
+pub fn build_token_refresh_request(device_id: &str, refresh_token: &str) -> OAuthRequest {
+    OAuthRequest {
+        url: TOKEN_URL.to_string(),
+        headers: device_headers(device_id),
+        form: vec![
+            ("client_id".into(), CLIENT_ID.into()),
+            ("grant_type".into(), "refresh_token".into()),
+            ("refresh_token".into(), refresh_token.into()),
+        ],
+    }
+}
+
+#[must_use]
 pub fn build_validate_login_request(
     auth_token: &str,
     device_id: &str,

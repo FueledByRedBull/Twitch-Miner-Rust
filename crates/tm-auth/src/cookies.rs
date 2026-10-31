@@ -287,7 +287,9 @@ pub fn session_cookies_by_host(store: &CookieStore) -> BTreeMap<String, Vec<Sess
     let mut by_host: BTreeMap<String, Vec<SessionCookie>> = BTreeMap::new();
     for (name, cookie) in store {
         let value = cookie.value.trim();
-        if value.is_empty() || name == "auth-token" || name == "persistent" {
+        if value.is_empty()
+            || matches!(name.as_str(), "auth-token" | "persistent" | "refresh-token")
+        {
             continue;
         }
         let domain = normalized_cookie_domain(cookie.domain.as_deref());

@@ -1827,6 +1827,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_saved_session_is_refreshed_before_device_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("expired-token");
+        stored.set_refresh_token("old-refresh");
+        stored.save_to_dir(directory.path()).unwrap();
+
+        let responses = vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"access_token":"fresh-token","refresh_token":"new-refresh"}"#,
+            ),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+        assert_eq!(session.refresh_token(), Some("new-refresh"));
+        assert_eq!(session.cookie_header_for_host("www.twitch.tv"), None);
+        assert!(requests.lock().unwrap()[1].contains("grant_type=refresh_token"));
+        let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
+        assert_eq!(saved.auth_token(), Some("fresh-token"));
+        assert_eq!(saved.refresh_token(), Some("new-refresh"));
+    }
+
+    #[tokio::test]
     async fn rejected_saved_session_falls_back_to_device_login() {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = AuthSession::new("tester", CookieStore::new());
@@ -3438,7 +3490,7 @@ mod tests {
         );
         assert!(matches!(
             client.poll_access_token("device", "code").await.unwrap(),
-            TokenPollOutcome::AccessToken(token) if token == "secret-token"
+            TokenPollOutcome::AccessToken(tokens) if tokens.access_token == "secret-token"
         ));
         server.join().unwrap();
     }

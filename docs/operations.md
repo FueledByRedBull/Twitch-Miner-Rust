@@ -127,7 +127,8 @@ password.
 A saved session starts reauthorization only after a definitive authentication
 rejection. Transient network or Twitch server failures leave the session
 untouched and retry validation in-process with capped backoff; the wait can be
-interrupted with `CTRL-C` or `SIGTERM`.
+interrupted with `CTRL-C` or `SIGTERM`. Reauthorization tries the refresh token
+saved with the session first and asks for a new device code only if that fails.
 
 While running, the miner validates its session every 10 minutes. If Twitch
 definitively rejects it, the miner logs an error, sends a `SESSION_LOST` Discord

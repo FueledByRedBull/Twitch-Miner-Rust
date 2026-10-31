@@ -6,8 +6,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::device_flow::{
-    build_device_code_request_with_scope, build_token_poll_request, build_validate_login_request,
-    DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
+    build_device_code_request_with_scope, build_token_poll_request, build_token_refresh_request,
+    build_validate_login_request, DeviceFlowState, DEVICE_URL, TOKEN_URL, VALIDATE_URL,
 };
 
 pub const ACTIVATE_URL: &str = "https://www.twitch.tv/activate";
@@ -41,8 +41,20 @@ pub struct LoginValidation {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+pub struct IssuedTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+}
+
+impl fmt::Debug for IssuedTokens {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("IssuedTokens(<redacted>)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub enum TokenPollOutcome {
-    AccessToken(String),
+    AccessToken(IssuedTokens),
     Pending,
     SlowDown,
 }
@@ -110,6 +122,7 @@ pub struct TwitchAuthClient {
 #[derive(Deserialize)]
 struct TokenPollResponse {
     access_token: Option<String>,
+    refresh_token: Option<String>,
     error: Option<String>,
     message: Option<String>,
 }
@@ -203,14 +216,9 @@ impl TwitchAuthClient {
         let status = response.status();
 
         if status.is_success() {
-            let token = response
-                .json::<TokenPollResponse>()
+            return issued_tokens(response)
                 .await
-                .map_err(AuthClientError::Http)?
-                .access_token;
-            return token
-                .map(TokenPollOutcome::AccessToken)
-                .ok_or(AuthClientError::MissingAccessToken);
+                .map(TokenPollOutcome::AccessToken);
         }
 
         if status == StatusCode::BAD_REQUEST {
@@ -229,6 +237,31 @@ impl TwitchAuthClient {
             status,
             context: "poll access token",
         })
+    }
+
+    pub async fn refresh_access_token(
+        &self,
+        device_id: &str,
+        refresh_token: &str,
+    ) -> Result<IssuedTokens, AuthClientError> {
+        let mut request = build_token_refresh_request(device_id, refresh_token);
+        request.url.clone_from(&self.endpoints.token_url);
+        let response = self
+            .client
+            .post(request.url)
+            .headers(headers_from_pairs(&request.headers)?)
+            .form(&request.form)
+            .send()
+            .await
+            .map_err(AuthClientError::Http)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AuthClientError::UnexpectedStatus {
+                status,
+                context: "refresh access token",
+            });
+        }
+        issued_tokens(response).await
     }
 
     pub async fn validate_login_details(
@@ -327,6 +360,21 @@ fn headers_from_pairs(
     Ok(headers)
 }
 
+async fn issued_tokens(response: reqwest::Response) -> Result<IssuedTokens, AuthClientError> {
+    let body = response
+        .json::<TokenPollResponse>()
+        .await
+        .map_err(AuthClientError::Http)?;
+    let access_token = body
+        .access_token
+        .filter(|token| !token.is_empty())
+        .ok_or(AuthClientError::MissingAccessToken)?;
+    Ok(IssuedTokens {
+        access_token,
+        refresh_token: body.refresh_token.filter(|token| !token.is_empty()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,9 +421,14 @@ mod tests {
         assert_eq!(interval, Duration::from_secs(7));
         interval = TokenPollOutcome::SlowDown.next_interval(interval);
         assert_eq!(interval, Duration::from_secs(12));
-        assert!(
-            !format!("{:?}", TokenPollOutcome::AccessToken("secret".into())).contains("secret")
-        );
+        assert!(!format!(
+            "{:?}",
+            TokenPollOutcome::AccessToken(IssuedTokens {
+                access_token: "secret".into(),
+                refresh_token: Some("secret".into()),
+            })
+        )
+        .contains("secret"));
     }
 
     #[test]

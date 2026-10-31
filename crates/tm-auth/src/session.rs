@@ -143,6 +143,26 @@ impl AuthSession {
     }
 
     #[must_use]
+    pub fn refresh_token(&self) -> Option<&str> {
+        self.store
+            .get("refresh-token")
+            .map(|cookie| cookie.value.trim())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Stored beside the session cookies but never sent as one.
+    pub fn set_refresh_token(&mut self, refresh_token: impl Into<String>) {
+        self.store.insert(
+            String::from("refresh-token"),
+            crate::cookies::PersistedCookie {
+                value: refresh_token.into(),
+                path: None,
+                domain: None,
+            },
+        );
+    }
+
+    #[must_use]
     pub fn user_id(&self) -> Option<&str> {
         self.store
             .get("persistent")
@@ -205,7 +225,7 @@ impl AuthSession {
             if value.is_empty() {
                 continue;
             }
-            if matches!(name.as_str(), "auth-token" | "persistent") {
+            if matches!(name.as_str(), "auth-token" | "persistent" | "refresh-token") {
                 continue;
             }
 
