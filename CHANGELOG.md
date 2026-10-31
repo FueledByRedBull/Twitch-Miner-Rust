@@ -19,6 +19,8 @@
   minutes for 20 minutes.
 - The canary now fails when Twitch withholds the Drop campaign catalog. It used to
   pass on the null response.
+- New `drop_account_link` setting. By default the miner no longer spends watch time
+  on campaigns whose game account is not linked, since they cannot pay out.
 
 ## 0.3.6 - Unreleased
 

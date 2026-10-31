@@ -85,7 +85,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
     let prediction_scheduler = params.user_id.map(|_| {
         PredictionEvaluationScheduler::start(params.stop_rx.clone(), params.observability)
     });
-    let drop_coordinator = DropClaimCoordinator::default();
+    let drop_coordinator = DropClaimCoordinator::with_account_link(params.config.drop_account_link);
     register_background_health(params);
     let transports = spawn_transport_tasks(
         params,

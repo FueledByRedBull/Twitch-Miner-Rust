@@ -3,10 +3,11 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::types::{
-    ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome,
-    ClaimDropOutcome, ClaimedDropReward, CommunityGoalContributionData, DropCatalogCampaign,
-    DropCatalogData, FollowersData, GqlResponse, InventoryData, InventoryDrop, InventorySnapshot,
-    RecentClip, RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    campaign_is_unlinked, campaign_requires_link, ArchivedVideo, ArchivedVideosData,
+    AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome,
+    ClaimedDropReward, CommunityGoalContributionData, DropCatalogCampaign, DropCatalogData,
+    FollowersData, GqlResponse, InventoryData, InventoryDrop, InventorySnapshot, RecentClip,
+    RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
     UserContributionData, WatchStreakMilestone,
 };
 
@@ -651,6 +652,19 @@ pub(crate) fn inventory_snapshot_from_typed(
                 .filter(|id| !id.is_empty())
             {
                 snapshot.subscription_only_campaign_ids.push(id.to_owned());
+            }
+        }
+        if let Some(id) = campaign
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if campaign_is_unlinked(campaign.self_data.as_ref()) {
+                snapshot.unlinked_campaign_ids.push(id.to_owned());
+            }
+            if campaign_requires_link(campaign.account_link_url.as_deref()) {
+                snapshot.link_required_campaign_ids.push(id.to_owned());
             }
         }
         snapshot.drops.extend(inventory_campaign_drops(campaign)?);

@@ -914,7 +914,16 @@ async fn refresh_watch_selection_metadata_inner(
                         }
                     }
                     inventory_drops = Some(snapshot.drops.clone());
-                    excluded_drop_campaign_ids(snapshot)
+                    let catalog =
+                        drop_catalog_for_link_check(twitch, claim_coordinator.account_link()).await;
+                    let link_excluded = crate::drops::link_excluded_campaign_ids(
+                        &snapshot,
+                        &catalog,
+                        claim_coordinator.account_link(),
+                    );
+                    let mut excluded = excluded_drop_campaign_ids(snapshot);
+                    excluded.extend(link_excluded);
+                    excluded
                 }
                 Err(error) => {
                     failures += 1;
@@ -1034,6 +1043,24 @@ async fn refresh_watch_selection_metadata_inner(
     }
 
     failures
+}
+
+/// The catalog is the only source for campaigns the account has not started, but
+/// Twitch can withhold it, so the inventory's link data still applies without it.
+async fn drop_catalog_for_link_check(
+    twitch: &TwitchClient,
+    account_link: tm_config::DropAccountLink,
+) -> Vec<tm_twitch::DropCatalogCampaign> {
+    if account_link == tm_config::DropAccountLink::All {
+        return Vec::new();
+    }
+    twitch
+        .fetch_drop_catalog_typed()
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(error_class = "drop-catalog", %error, "drop catalog unavailable");
+            Vec::new()
+        })
 }
 
 fn excluded_drop_campaign_ids(snapshot: tm_twitch::InventorySnapshot) -> HashSet<String> {

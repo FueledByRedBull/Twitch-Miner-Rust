@@ -753,6 +753,11 @@ mod tests {
                 } else if latest_request.starts_with("HEAD /segment.ts") {
                     playback_remaining = playback_remaining.saturating_sub(1);
                     empty_http_response("200 OK")
+                } else if latest_request.contains(r#""operationName":"ViewerDropsDashboard""#) {
+                    http_response(
+                        "200 OK",
+                        r#"{"data":{"currentUser":{"dropCampaigns":null}}}"#,
+                    )
                 } else {
                     let body = responses.pop_front().unwrap();
                     http_response("200 OK", &body)

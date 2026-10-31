@@ -105,6 +105,19 @@ pub struct PrivacyConfig {
     pub anonymize_logs: bool,
 }
 
+/// Which Drop campaigns may be farmed, by their game-account link requirement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DropAccountLink {
+    /// Skip campaigns whose game account this Twitch account has not linked.
+    #[default]
+    Linked,
+    /// Farm every campaign, including ones that cannot pay out until linked.
+    All,
+    /// Skip every campaign that involves a game account.
+    None,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DiscordConfig {
     pub webhook_api: String,
@@ -160,6 +173,8 @@ pub struct ConfigFile {
     pub watch_priority: Vec<String>,
     #[serde(default)]
     pub followers_order: FollowersOrder,
+    #[serde(default)]
+    pub drop_account_link: DropAccountLink,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
@@ -210,6 +225,7 @@ pub fn default_config_value() -> Value {
         "game_exclude": [],
         "watch_priority": ["STREAK", "DROPS", "ORDER"],
         "followers_order": "DESC",
+        "drop_account_link": "linked",
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
@@ -814,6 +830,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "game_exclude",
     "watch_priority",
     "followers_order",
+    "drop_account_link",
     "bet",
     "timezone",
     "privacy",

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use tm_config::ConfigFile;
+use tm_config::{ConfigFile, DropAccountLink};
 use tm_domain::Streamer;
 use tm_observability::Event as DiscordEvent;
 use tm_twitch::{InventoryDrop, InventorySnapshot, TwitchClient};
@@ -21,6 +21,7 @@ const DROP_STALL_BENCH: Duration = Duration::from_secs(30 * 60);
 #[derive(Clone, Default)]
 pub(crate) struct DropClaimCoordinator {
     state: Arc<Mutex<DropClaimState>>,
+    account_link: DropAccountLink,
 }
 
 #[derive(Default)]
@@ -49,6 +50,17 @@ struct DropClaimLease {
 }
 
 impl DropClaimCoordinator {
+    pub(crate) fn with_account_link(account_link: DropAccountLink) -> Self {
+        Self {
+            account_link,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn account_link(&self) -> DropAccountLink {
+        self.account_link
+    }
+
     fn locked(&self) -> std::sync::MutexGuard<'_, DropClaimState> {
         self.state
             .lock()
@@ -209,6 +221,7 @@ impl DropClaimLease {
         self.resolved = true;
         let coordinator = DropClaimCoordinator {
             state: Arc::clone(&self.state),
+            account_link: DropAccountLink::default(),
         };
         coordinator.complete(&self.drop_instance_id);
     }
@@ -321,6 +334,30 @@ pub(crate) async fn claim_available_drops_with_health(
         coordinator,
     )
     .await
+}
+
+/// Campaigns the account-link setting rules out, from whichever source listed them.
+pub(crate) fn link_excluded_campaign_ids(
+    snapshot: &InventorySnapshot,
+    catalog: &[tm_twitch::DropCatalogCampaign],
+    account_link: DropAccountLink,
+) -> HashSet<String> {
+    let id = |campaign: &tm_twitch::DropCatalogCampaign| campaign.id.clone();
+    match account_link {
+        DropAccountLink::All => HashSet::new(),
+        DropAccountLink::Linked => snapshot
+            .unlinked_campaign_ids
+            .iter()
+            .cloned()
+            .chain(catalog.iter().filter(|c| c.is_unlinked()).filter_map(id))
+            .collect(),
+        DropAccountLink::None => snapshot
+            .link_required_campaign_ids
+            .iter()
+            .cloned()
+            .chain(catalog.iter().filter(|c| c.requires_link()).filter_map(id))
+            .collect(),
+    }
 }
 
 /// Asks Twitch whether this channel still earns Drop minutes, and takes it out
@@ -572,6 +609,27 @@ pub(crate) fn watch_target(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn account_link_setting_selects_which_campaigns_are_excluded() {
+        use std::collections::HashSet;
+        use tm_config::DropAccountLink;
+        let snapshot = tm_twitch::InventorySnapshot {
+            unlinked_campaign_ids: vec![String::from("unlinked")],
+            link_required_campaign_ids: vec![String::from("unlinked"), String::from("linked")],
+            ..tm_twitch::InventorySnapshot::default()
+        };
+        let excluded = |mode| super::link_excluded_campaign_ids(&snapshot, &[], mode);
+        assert!(excluded(DropAccountLink::All).is_empty());
+        assert_eq!(
+            excluded(DropAccountLink::Linked),
+            HashSet::from([String::from("unlinked")])
+        );
+        assert_eq!(
+            excluded(DropAccountLink::None),
+            HashSet::from([String::from("unlinked"), String::from("linked")])
+        );
+    }
 
     #[test]
     fn drop_stall_benches_a_channel_only_without_minute_progress() {

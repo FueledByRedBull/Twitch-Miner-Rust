@@ -625,6 +625,16 @@ pub(crate) struct InventoryCampaign {
     pub(crate) display_name: Option<String>,
     #[serde(rename = "timeBasedDrops", default)]
     pub(crate) drops: Vec<InventoryTimeDrop>,
+    #[serde(rename = "self", default)]
+    pub(crate) self_data: Option<DropCampaignSelf>,
+    #[serde(rename = "accountLinkURL", default)]
+    pub(crate) account_link_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropCampaignSelf {
+    #[serde(rename = "isAccountConnected", default)]
+    pub is_account_connected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -722,6 +732,30 @@ pub(crate) struct DropCatalogUser {
 pub struct DropCatalogCampaign {
     pub id: Option<String>,
     pub status: Option<String>,
+    #[serde(rename = "self", default)]
+    pub self_data: Option<DropCampaignSelf>,
+    #[serde(rename = "accountLinkURL", default)]
+    pub account_link_url: Option<String>,
+}
+
+impl DropCatalogCampaign {
+    #[must_use]
+    pub fn is_unlinked(&self) -> bool {
+        campaign_is_unlinked(self.self_data.as_ref())
+    }
+
+    #[must_use]
+    pub fn requires_link(&self) -> bool {
+        campaign_requires_link(self.account_link_url.as_deref())
+    }
+}
+
+pub(crate) fn campaign_is_unlinked(self_data: Option<&DropCampaignSelf>) -> bool {
+    self_data.and_then(|data| data.is_account_connected) == Some(false)
+}
+
+pub(crate) fn campaign_requires_link(account_link_url: Option<&str>) -> bool {
+    account_link_url.is_some_and(|url| !url.trim().is_empty())
 }
 
 /// The Drop session Twitch is currently crediting for this account.
@@ -893,6 +927,8 @@ pub struct InventorySnapshot {
     pub drops: Vec<InventoryDrop>,
     pub completed_campaign_ids: Vec<String>,
     pub subscription_only_campaign_ids: Vec<String>,
+    pub unlinked_campaign_ids: Vec<String>,
+    pub link_required_campaign_ids: Vec<String>,
     pub claimed_rewards: Vec<ClaimedDropReward>,
 }
 

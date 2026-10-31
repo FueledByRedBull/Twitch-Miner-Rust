@@ -41,6 +41,7 @@ which is secret), optional `log/` files, `streak-cache.json`,
 | `streamers` | `[]` | Channels to watch. Their order is the `ORDER` priority. When the list is empty, the miner loads every channel you follow. |
 | `streamers_exclude` | `[]` | Logins that are never watched. |
 | `followers_order` | `DESC` | Order of followed channels when `streamers` is empty: `ASC` or `DESC`. |
+| `drop_account_link` | `linked` | Which Drop campaigns to farm by game-account link: `linked` skips campaigns you have not linked, `all` farms everything, `none` skips any campaign that involves a game account. |
 | `game_priority` | `[]` | Games to prefer, in order. |
 | `game_exclude` | `[]` | Games whose streams are not watched. |
 | `watch_priority` | `["STREAK", "DROPS", "ORDER"]` | How the two watched channels are chosen. Priorities are tried in order; see the next table. |

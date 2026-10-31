@@ -26,6 +26,7 @@
   "game_exclude": [],
   "watch_priority": ["STREAK", "DROPS", "ORDER"],
   "followers_order": "DESC",
+  "drop_account_link": "linked",
   "timezone": null,
   "privacy": {
     "anonymize_logs": true
