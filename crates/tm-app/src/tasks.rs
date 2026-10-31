@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use tm_auth::TwitchAuthClient;
 use tm_domain::Streamer;
-use tm_twitch::TwitchClient;
+use tm_twitch::{generate_device_id, TwitchClient};
 
-use crate::bootstrap::normalized_username;
+use crate::bootstrap::{build_http_client, normalized_username};
 use crate::chat::spawn_chat_manager_loop;
 use crate::context::spawn_context_refresh_loop;
 use crate::drops::{spawn_drop_claim_loop, DropClaimCoordinator};
@@ -16,6 +17,7 @@ use crate::observability::AppObservability;
 use crate::prediction_journal::PredictionPlacementJournal;
 use crate::pubsub::{spawn_pubsub_loop, PubSubTaskContext};
 use crate::runtime_effects::{PredictionEvaluationScheduler, RuntimeEffectContext};
+use crate::session_watch::{spawn_session_watch_loop, SESSION_CHECK_INTERVAL};
 use crate::status::HealthTracker;
 use crate::streak_cache::{spawn_streak_cache_loop, StreakCache};
 use crate::streak_recovery::spawn_streak_recovery_loop;
@@ -30,6 +32,7 @@ pub(crate) struct BackgroundTasks {
     pub(crate) chat: Option<tokio::task::JoinHandle<()>>,
     pub(crate) streak_cache: Option<tokio::task::JoinHandle<()>>,
     pub(crate) streak_recovery: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) session_watch: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct TransportTasks {
@@ -49,6 +52,7 @@ impl BackgroundTasks {
             ("chat", self.chat.as_ref()),
             ("streak-cache", self.streak_cache.as_ref()),
             ("streak-recovery", self.streak_recovery.as_ref()),
+            ("session-watch", self.session_watch.as_ref()),
         ]
         .into_iter()
         .filter_map(|(name, task)| {
@@ -173,7 +177,20 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
         chat,
         streak_cache,
         streak_recovery,
+        session_watch: Some(spawn_session_watch(params)?),
     })
+}
+
+fn spawn_session_watch(params: &BackgroundTaskParams<'_>) -> Result<tokio::task::JoinHandle<()>> {
+    Ok(spawn_session_watch_loop(
+        params.stop_rx.clone(),
+        TwitchAuthClient::with_client(build_http_client()?),
+        params.auth_token.to_string(),
+        generate_device_id(),
+        normalized_username(&params.config.username)?,
+        params.observability.clone(),
+        SESSION_CHECK_INTERVAL,
+    ))
 }
 
 fn register_background_health(params: &BackgroundTaskParams<'_>) {
@@ -302,6 +319,7 @@ mod tests {
             chat: None,
             streak_cache: None,
             streak_recovery: None,
+            session_watch: None,
         }
     }
 

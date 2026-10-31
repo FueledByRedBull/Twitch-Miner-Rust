@@ -129,6 +129,11 @@ rejection. Transient network or Twitch server failures leave the session
 untouched and retry validation in-process with capped backoff; the wait can be
 interrupted with `CTRL-C` or `SIGTERM`.
 
+While running, the miner validates its session every 10 minutes. If Twitch
+definitively rejects it, the miner logs an error, sends a `SESSION_LOST` Discord
+event, and exits with a failure status. The container's restart policy then
+starts it again, and startup reauthorizes.
+
 ## Diagnostics
 
 | Command | Use |

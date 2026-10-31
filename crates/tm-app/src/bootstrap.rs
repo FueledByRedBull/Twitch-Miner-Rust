@@ -363,7 +363,7 @@ fn saved_session_retry_delay(
         .min(retry_max)
 }
 
-fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
+pub(crate) fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
     matches!(
         error,
         AuthClientError::UnexpectedStatus { status, .. }

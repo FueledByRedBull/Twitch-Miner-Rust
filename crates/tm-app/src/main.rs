@@ -56,6 +56,7 @@ mod observability;
 mod prediction_journal;
 mod pubsub;
 mod runtime_effects;
+mod session_watch;
 mod shutdown;
 mod startup;
 mod streak_cache;

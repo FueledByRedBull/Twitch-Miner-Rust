@@ -7,6 +7,9 @@
   crediting Drop progress from the newest segment alone.
 - The minute-watched event now states `location: channel`, as a browser watching
   the channel does.
+- The miner checks its session every 10 minutes and exits with a failure status
+  once Twitch rejects it, with a new `SESSION_LOST` Discord event. Before, a
+  revoked token left it running without earning.
 
 ## 0.3.6 - Unreleased
 

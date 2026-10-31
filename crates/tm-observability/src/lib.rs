@@ -79,6 +79,7 @@ pub enum Event {
     DropStatus,
     ChatMention,
     WatchStatus,
+    SessionLost,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +250,7 @@ pub fn normalize_event_name(raw: &str) -> Option<Event> {
         "DROP_STATUS" => Some(Event::DropStatus),
         "CHAT_MENTION" => Some(Event::ChatMention),
         "WATCH_STATUS" => Some(Event::WatchStatus),
+        "SESSION_LOST" => Some(Event::SessionLost),
         _ => None,
     }
 }
