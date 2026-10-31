@@ -94,5 +94,10 @@ comparison against that head shows the persisted-operation surface changed only
 by adding `ClipsCards__User` and `FilterableVideoTower_Videos`, with no removals
 and no hash rotations; both hashes already match this project's
 implementations. Advancing to the first green upstream revision would therefore
-remove the two documented Rust-only exceptions rather than add new ones. Broken
+remove those two documented Rust-only exceptions rather than add new ones. Broken
 upstream tests are never made an enforced gate here.
+
+Three more Rust-only operations back features the Go baseline does not have:
+`DirectoryPage_Game` for Drop channel discovery, `DropCurrentSessionContext` for
+Drop credit checks, and `WeeklyVisitRewardsQuery` for Weekly Visit Rewards. The
+gate lists them by name, so any other new operation still fails it.
