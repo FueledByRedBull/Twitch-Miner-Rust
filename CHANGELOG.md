@@ -26,6 +26,8 @@
   once started.
 - New `drop_discovery_games` setting adds live channels with Drops enabled for the
   games you list, each time the miner starts.
+- New `weekly_visit_rewards` setting (off by default) earns Weekly Visit Rewards by
+  playing a VOD or clip on channels still waiting for today's visit.
 
 ## 0.3.6 - Unreleased
 

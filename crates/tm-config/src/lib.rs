@@ -155,6 +155,8 @@ pub struct ConfigFile {
     pub claim_moments: bool,
     #[serde(default)]
     pub watch_streak_vod_recovery: bool,
+    #[serde(default)]
+    pub weekly_visit_rewards: bool,
     #[serde(rename = "betting(make_predictions)")]
     pub betting_make_predictions: bool,
     pub follow_raid: bool,
@@ -211,6 +213,7 @@ pub fn default_config_value() -> Value {
         "watch_one_stream_when_drops_active": true,
         "claim_moments": true,
         "watch_streak_vod_recovery": false,
+        "weekly_visit_rewards": false,
         "betting(make_predictions)": false,
         "follow_raid": false,
         "community_goals": false,
@@ -832,6 +835,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "game_priority",
     "game_exclude",
     "watch_priority",
+    "weekly_visit_rewards",
     "followers_order",
     "drop_account_link",
     "drop_discovery_games",

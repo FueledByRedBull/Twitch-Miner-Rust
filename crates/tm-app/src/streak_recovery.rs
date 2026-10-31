@@ -474,7 +474,10 @@ async fn preempted(runtime: &tm_runtime::RuntimeHandle, streamer: &Streamer) -> 
         })
 }
 
-async fn wait_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>, seconds: u64) -> bool {
+pub(crate) async fn wait_or_stop(
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+    seconds: u64,
+) -> bool {
     if *stop.borrow() {
         return false;
     }
@@ -484,7 +487,11 @@ async fn wait_or_stop(stop: &mut tokio::sync::watch::Receiver<bool>, seconds: u6
     }
 }
 
-fn vod_minute_event(streamer: &Streamer, user_id: &str, vod_id: &str) -> serde_json::Value {
+pub(crate) fn vod_minute_event(
+    streamer: &Streamer,
+    user_id: &str,
+    vod_id: &str,
+) -> serde_json::Value {
     serde_json::json!({ "event": "minute-watched", "properties": {
         "channel_id": streamer.channel_id, "broadcast_id": null, "player": "site",
         "user_id": user_id, "live": false, "channel": streamer.username,
@@ -492,7 +499,7 @@ fn vod_minute_event(streamer: &Streamer, user_id: &str, vod_id: &str) -> serde_j
     }})
 }
 
-fn clip_play_event(
+pub(crate) fn clip_play_event(
     streamer: &Streamer,
     user_id: &str,
     clip: &RecentClip,
@@ -506,7 +513,7 @@ fn clip_play_event(
     }})
 }
 
-fn clip_progress_event(
+pub(crate) fn clip_progress_event(
     streamer: &Streamer,
     user_id: &str,
     clip: &RecentClip,

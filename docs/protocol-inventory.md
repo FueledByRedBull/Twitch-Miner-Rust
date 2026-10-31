@@ -30,6 +30,7 @@ baseline, including its documented hash differences, is in the
 | `DropsHighlightService_AvailableDrops` | Read-only |
 | `DropCurrentSessionContext` | Read-only |
 | `DirectoryPage_Game` | Read-only |
+| `WeeklyVisitRewardsQuery` | Read-only |
 | `UserPointsContribution` | Read-only |
 | `ClaimCommunityPoints` | Mutation |
 | `CommunityMomentCallout_Claim` | Mutation |

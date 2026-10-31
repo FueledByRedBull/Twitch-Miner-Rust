@@ -71,6 +71,7 @@ pinning and fair rotation are separate rules, described in the
 | `watch_one_stream_when_drops_active` | `true` | While `DROPS` has picked a channel with an unfinished reward, watch only that channel and leave the second slot unused. Twitch advances Drop progress on one channel at a time, so set this to `false` to keep earning channel points on a second channel. |
 | `claim_moments` | `true` | Claim moment rewards. |
 | `watch_streak_vod_recovery` | `false` | Try to recover a missed watch streak by playing back the matching VOD or clip. |
+| `weekly_visit_rewards` | `false` | Check every tracked channel for a Weekly Visit Reward every six hours and play a VOD or clip on those still waiting for today's visit, one channel at a time, until Twitch confirms it. Global only. |
 | `betting(make_predictions)` | `false` | Place prediction bets using the `bet` settings. The key keeps its historical Go/Python name; do not rename it. |
 | `follow_raid` | `false` | Join raids started by watched channels. |
 | `community_goals` | `false` | Contribute points to community goals. |

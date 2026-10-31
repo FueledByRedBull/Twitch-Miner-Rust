@@ -21,6 +21,7 @@ use crate::session_watch::{spawn_session_watch_loop, SESSION_CHECK_INTERVAL};
 use crate::status::HealthTracker;
 use crate::streak_cache::{spawn_streak_cache_loop, StreakCache};
 use crate::streak_recovery::spawn_streak_recovery_loop;
+use crate::weekly_visits::spawn_weekly_visit_loop;
 
 pub(crate) struct BackgroundTasks {
     pub(crate) eventsub: Option<tokio::task::JoinHandle<()>>,
@@ -33,6 +34,7 @@ pub(crate) struct BackgroundTasks {
     pub(crate) streak_cache: Option<tokio::task::JoinHandle<()>>,
     pub(crate) streak_recovery: Option<tokio::task::JoinHandle<()>>,
     pub(crate) session_watch: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) weekly_visits: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct TransportTasks {
@@ -53,6 +55,7 @@ impl BackgroundTasks {
             ("streak-cache", self.streak_cache.as_ref()),
             ("streak-recovery", self.streak_recovery.as_ref()),
             ("session-watch", self.session_watch.as_ref()),
+            ("weekly-visits", self.weekly_visits.as_ref()),
         ]
         .into_iter()
         .filter_map(|(name, task)| {
@@ -179,7 +182,23 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
         streak_cache,
         streak_recovery,
         session_watch: Some(spawn_session_watch(params)?),
+        weekly_visits: spawn_weekly_visits(params),
     })
+}
+
+fn spawn_weekly_visits(params: &BackgroundTaskParams<'_>) -> Option<tokio::task::JoinHandle<()>> {
+    params
+        .user_id
+        .filter(|_| params.config.weekly_visit_rewards)
+        .map(|user_id| {
+            spawn_weekly_visit_loop(
+                params.stop_rx.clone(),
+                params.runtime.clone(),
+                Arc::clone(params.twitch),
+                user_id.clone(),
+                params.observability.clone(),
+            )
+        })
 }
 
 fn spawn_session_watch(params: &BackgroundTaskParams<'_>) -> Result<tokio::task::JoinHandle<()>> {
@@ -330,6 +349,7 @@ mod tests {
             streak_cache: None,
             streak_recovery: None,
             session_watch: None,
+            weekly_visits: None,
         }
     }
 

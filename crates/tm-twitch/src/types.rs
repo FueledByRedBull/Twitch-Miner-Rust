@@ -717,6 +717,53 @@ pub(crate) struct DropSessionChannel {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WeeklyVisitData {
+    pub(crate) channel: Option<WeeklyVisitChannel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WeeklyVisitChannel {
+    #[serde(rename = "self")]
+    pub(crate) self_data: Option<WeeklyVisitSelf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WeeklyVisitSelf {
+    #[serde(rename = "weeklyVisitRewards")]
+    pub(crate) rewards: Option<WeeklyVisitRewards>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WeeklyVisitRewards {
+    #[serde(rename = "eventConfig")]
+    pub event: WeeklyVisitEvent,
+    #[serde(rename = "accumulatedWeeks", default)]
+    pub accumulated_weeks: u32,
+    #[serde(rename = "hasVisitedToday", default)]
+    pub visited_today: bool,
+    #[serde(rename = "hasEarnedWeeklyRewardThisWeek", default)]
+    pub earned_this_week: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WeeklyVisitEvent {
+    #[serde(rename = "endDate", with = "time::serde::rfc3339")]
+    pub ends_at: time::OffsetDateTime,
+    #[serde(rename = "rewardTiers", default)]
+    pub reward_tiers: Vec<serde_json::Value>,
+}
+
+impl WeeklyVisitRewards {
+    #[must_use]
+    pub fn needs_visit(&self, now: time::OffsetDateTime) -> bool {
+        self.event.ends_at > now
+            && (self.accumulated_weeks as usize) < self.event.reward_tiers.len()
+            && !self.visited_today
+            && !self.earned_this_week
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct GameDirectoryData {
     pub(crate) game: Option<GameDirectoryGame>,
 }

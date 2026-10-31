@@ -33,6 +33,7 @@ use crate::types::{
     InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip,
     RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
     TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, WatchStreakMilestone,
+    WeeklyVisitData, WeeklyVisitRewards,
 };
 use crate::{operations, CLIENT_ID};
 
@@ -812,6 +813,20 @@ impl TwitchClient {
     ) -> Result<InventorySnapshot, TwitchClientError> {
         let response: InventoryData = self.post_gql_typed(&operations::inventory()).await?;
         inventory_snapshot_from_typed(response)
+    }
+
+    /// `None` means the channel has no Weekly Visit Reward event for this account.
+    pub async fn fetch_weekly_visit_rewards_typed(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<WeeklyVisitRewards>, TwitchClientError> {
+        let response: WeeklyVisitData = self
+            .post_gql_typed(&operations::weekly_visit_rewards(channel_id))
+            .await?;
+        Ok(response
+            .channel
+            .and_then(|channel| channel.self_data)
+            .and_then(|self_data| self_data.rewards))
     }
 
     pub async fn fetch_drops_enabled_channels_typed(

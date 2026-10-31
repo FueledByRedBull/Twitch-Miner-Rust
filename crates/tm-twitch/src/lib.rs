@@ -40,7 +40,7 @@ pub use types::{
     DropCatalogCampaign, DropSession, FollowersPage, GqlPersistedExtensions, GqlPersistedOperation,
     GqlPersistedQuery, GqlRequest, InventoryDrop, InventorySnapshot, MinuteWatchedRequest,
     RecentClip, StreamInfo, TwitchClientError, TwitchContractError, TwitchEndpoints,
-    TwitchFailureClass, ViewerDropsDashboard, WatchStreakMilestone,
+    TwitchFailureClass, ViewerDropsDashboard, WatchStreakMilestone, WeeklyVisitRewards,
 };
 
 #[cfg(test)]

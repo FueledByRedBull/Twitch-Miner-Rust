@@ -641,6 +641,7 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::claim_drop_rewards("drop"),
         operations::drops_highlight_service_available("1"),
         operations::drop_current_session("1"),
+        operations::weekly_visit_rewards("1"),
         operations::drops_enabled_game_directory("game", 5),
         operations::user_points_contribution("abc"),
         operations::contribute_community_goal(1, "1", "goal", "transaction"),
@@ -2804,4 +2805,32 @@ fn game_directory_keeps_only_channels_with_a_login() {
         ] } } })),
         vec![String::from("alice")]
     );
+}
+
+#[test]
+fn weekly_visit_is_needed_only_for_an_open_unvisited_unearned_tier() {
+    let rewards = |overrides: serde_json::Value| {
+        let mut payload = serde_json::json!({
+            "eventConfig": {
+                "endDate": "2030-01-08T00:00:00Z",
+                "rewardTiers": [{}, {}]
+            },
+            "accumulatedWeeks": 1,
+            "hasVisitedToday": false,
+            "hasEarnedWeeklyRewardThisWeek": false,
+        });
+        for (key, value) in overrides.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        serde_json::from_value::<types::WeeklyVisitRewards>(payload).unwrap()
+    };
+    let now = time::macros::datetime!(2030-01-01 00:00 UTC);
+    let after = time::macros::datetime!(2030-02-01 00:00 UTC);
+    assert!(rewards(serde_json::json!({})).needs_visit(now));
+    assert!(!rewards(serde_json::json!({})).needs_visit(after));
+    assert!(!rewards(serde_json::json!({ "hasVisitedToday": true })).needs_visit(now));
+    assert!(
+        !rewards(serde_json::json!({ "hasEarnedWeeklyRewardThisWeek": true })).needs_visit(now)
+    );
+    assert!(!rewards(serde_json::json!({ "accumulatedWeeks": 2 })).needs_visit(now));
 }
