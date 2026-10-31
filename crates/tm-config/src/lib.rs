@@ -372,7 +372,36 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     })
 }
 
+fn validate_notification_urls(config: &ConfigFile) -> Result<(), ConfigError> {
+    let discord = config.discord.webhook_api.trim();
+    if !discord.is_empty()
+        && ![
+            "discord.com",
+            "ptb.discord.com",
+            "canary.discord.com",
+            "discordapp.com",
+        ]
+        .iter()
+        .any(|host| discord.starts_with(&format!("https://{host}/api/webhooks/")))
+    {
+        return Err(ConfigError::Validation(String::from(
+            "config.discord.webhook_api must be a Discord webhook URL (https://discord.com/api/webhooks/...)",
+        )));
+    }
+    let webhook = config.webhook.url.trim();
+    let host = webhook
+        .strip_prefix("https://")
+        .or_else(|| webhook.strip_prefix("http://"));
+    if !webhook.is_empty() && host.is_none_or(|host| host.is_empty() || host.starts_with('/')) {
+        return Err(ConfigError::Validation(String::from(
+            "config.webhook.url must be an http:// or https:// URL",
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
+    validate_notification_urls(config)?;
     let username = config.username.trim().to_lowercase();
     if username.is_empty() || username == "your-twitch-username" {
         return Err(ConfigError::Validation(String::from(

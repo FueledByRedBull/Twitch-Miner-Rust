@@ -124,6 +124,8 @@ pub enum ObservabilityError {
     DiscordHttp(#[from] reqwest::Error),
     #[error("discord delivery failed with status {0}")]
     DiscordStatus(reqwest::StatusCode),
+    #[error("discord rate limited this delivery")]
+    DiscordRateLimited { retry_after: std::time::Duration },
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +373,18 @@ impl DiscordClient {
             .form(&[("content", message), ("username", DISCORD_USERNAME)])
             .send()
             .await?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let seconds = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .unwrap_or(1.0);
+            return Err(ObservabilityError::DiscordRateLimited {
+                retry_after: std::time::Duration::from_secs_f64(seconds.min(3_600.0)),
+            });
+        }
         if !response.status().is_success() {
             return Err(ObservabilityError::DiscordStatus(response.status()));
         }

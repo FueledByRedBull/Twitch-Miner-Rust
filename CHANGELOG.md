@@ -38,6 +38,8 @@
 - New `webhook` setting posts chosen events as JSON to any HTTP endpoint.
 - `DROP_STATUS` events now fire. They report each quarter of a Drop's progress and
   channels benched for not crediting; the name was accepted before but never sent.
+- Discord events wait out a rate limit and retry, and a deleted webhook gets its own
+  log class. Discord and webhook URLs are now checked when the configuration loads.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
 ## 0.3.6 - Unreleased

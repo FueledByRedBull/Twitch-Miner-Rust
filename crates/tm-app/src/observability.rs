@@ -12,6 +12,9 @@ use tm_observability::{
 };
 use tm_twitch::InventoryDrop;
 
+const DISCORD_RATE_LIMIT_RETRIES: u32 = 2;
+const DISCORD_MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub(crate) struct AppObservability {
     pub(crate) discord: Option<tm_observability::DiscordWebhook>,
@@ -609,11 +612,33 @@ pub(crate) async fn send_discord_event(
     let Some(message) = discord_message(discord, message, Some(event)) else {
         return;
     };
-    if client.send(&discord.webhook_api, &message).await.is_err() {
-        tracing::warn!(
-            error_class = "delivery-failed",
-            "failed to send discord event"
-        );
+    let mut attempts_left = DISCORD_RATE_LIMIT_RETRIES;
+    loop {
+        match client.send(&discord.webhook_api, &message).await {
+            Ok(()) => return,
+            Err(tm_observability::ObservabilityError::DiscordRateLimited { retry_after })
+                if attempts_left > 0 && retry_after <= DISCORD_MAX_RETRY_WAIT =>
+            {
+                attempts_left -= 1;
+                tokio::time::sleep(retry_after).await;
+            }
+            Err(error) => {
+                let error_class = match error {
+                    // The webhook is gone, so every later event fails the same way.
+                    tm_observability::ObservabilityError::DiscordStatus(
+                        reqwest::StatusCode::UNAUTHORIZED
+                        | reqwest::StatusCode::FORBIDDEN
+                        | reqwest::StatusCode::NOT_FOUND,
+                    ) => "webhook-rejected",
+                    tm_observability::ObservabilityError::DiscordRateLimited { .. } => {
+                        "rate-limited"
+                    }
+                    _ => "delivery-failed",
+                };
+                tracing::warn!(error_class, "failed to send discord event");
+                return;
+            }
+        }
     }
 }
 
@@ -774,6 +799,36 @@ mod tests {
         let request = server.join().unwrap();
         assert!(request.contains(r#""event":"DROP_CLAIM""#));
         assert!(request.contains(r#""message":"done""#));
+    }
+
+    #[tokio::test]
+    async fn discord_event_waits_out_a_rate_limit_and_retries() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for response in [
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0.01\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer).unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let webhook = tm_observability::DiscordWebhook {
+            webhook_api: format!("http://{address}/hook"),
+            events: vec![tm_observability::Event::DropClaim],
+        };
+        super::send_discord_event(
+            Some(&webhook),
+            &tm_observability::DiscordClient::new(Duration::from_secs(5)).unwrap(),
+            tm_observability::Event::DropClaim,
+            "done",
+        )
+        .await;
+        server.join().unwrap();
     }
 
     fn test_observability(anonymized: bool) -> anyhow::Result<AppObservability> {

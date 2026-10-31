@@ -841,3 +841,29 @@ fn migrates_legacy_drop_claiming_into_independent_farming_controls() {
     );
     assert!(migrated["streamer_overrides"]["inherited"]["farm_drops"].is_null());
 }
+
+#[test]
+fn notification_urls_are_validated() {
+    let check = |discord: &str, webhook: &str| {
+        let mut config = ConfigFile {
+            username: String::from("alice"),
+            ..ConfigFile::default()
+        };
+        config.discord.webhook_api = discord.to_string();
+        config.webhook.url = webhook.to_string();
+        validate_config(&config).is_ok()
+    };
+    assert!(check("", ""));
+    assert!(check("https://discord.com/api/webhooks/1/token", ""));
+    assert!(check("https://discordapp.com/api/webhooks/1/token", ""));
+    assert!(!check("http://discord.com/api/webhooks/1/token", ""));
+    assert!(!check(
+        "https://discord.com.example/api/webhooks/1/token",
+        ""
+    ));
+    assert!(!check("not a url", ""));
+    assert!(check("", "https://ntfy.example/topic"));
+    assert!(check("", "http://homeassistant.local:8123/api/webhook/x"));
+    assert!(!check("", "ftp://example.com"));
+    assert!(!check("", "https://"));
+}
