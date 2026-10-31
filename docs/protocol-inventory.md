@@ -450,6 +450,10 @@ previous session's report.
 
 ### PubSub compatibility
 
+After three connection failures in a row, a connection alternates between PubSub
+and `wss://hermes.twitch.tv/v1` on each further failure, and stays on whichever
+one then holds. Hermes carries the same topics and events.
+
 The isolated PubSub compatibility path connects to
 `wss://pubsub-edge.twitch.tv/v1`. It supplies viewer prediction discovery and
 result events, immediate point/bonus events, moment IDs, raid IDs, and

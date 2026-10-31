@@ -33,6 +33,8 @@
   recent clip is no longer missed behind a channel's all-time top clips.
 - Streak recovery now also uses Twitch's missed-stream list, so it can recover a
   broadcast that ended before the miner started.
+- Event connections fail over to Twitch's Hermes transport after three failures in
+  a row, so predictions, moments, and raids keep working if PubSub goes away.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
 ## 0.3.6 - Unreleased

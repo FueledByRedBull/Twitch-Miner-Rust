@@ -1,11 +1,6 @@
-//! Offline, observation-only replay support for the Hermes framing seen in the
-//! inspected donor implementation.
-//!
-//! This adapter deliberately does not open sockets, authenticate, subscribe,
-//! reconnect, or execute runtime effects. It only validates recorded frames,
-//! maps a known subscription ID to an already configured `PubSub` topic, and
-//! reuses [`crate::parse_message`] to produce the existing [`MinerEvent`]
-//! values.
+//! Validates Hermes frames, maps a known subscription ID to an already configured
+//! `PubSub` topic, and reuses [`crate::parse_message`] to produce the existing
+//! [`MinerEvent`] values. It opens no sockets; `hermes_client` owns the connection.
 
 use std::collections::BTreeMap;
 

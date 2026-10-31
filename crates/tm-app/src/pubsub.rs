@@ -528,6 +528,8 @@ fn failed_pubsub_setup_report(error: &tm_pubsub::PubSubError) -> tm_pubsub::PubS
     }
 }
 
+const TRANSPORT_FAILOVER_AFTER_FAILURES: u32 = 3;
+
 struct PubSubConnectionParams {
     stop: tokio::sync::watch::Receiver<bool>,
     sender: tokio::sync::mpsc::Sender<SupervisedPubSubEvent>,
@@ -551,6 +553,7 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
         } = params;
         let mut stop = stop;
         let mut failure_attempt = 0_u32;
+        let mut use_hermes = false;
         loop {
             if *stop.borrow() {
                 break;
@@ -566,15 +569,30 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
                 let tracked_streamers = tracked_streamers.clone();
                 let topics = topics.clone();
                 async move {
-                    client
-                        .connect_topics_and_listen(
+                    if use_hermes {
+                        tm_pubsub::connect_hermes_topics_and_listen(
+                            &format!(
+                                "{}?clientId={}",
+                                tm_pubsub::HERMES_WEBSOCKET_URL,
+                                tm_twitch::CLIENT_ID
+                            ),
                             &topics,
                             &auth_token,
-                            Some(&username),
                             &tracked_streamers,
                             connection_sender,
                         )
                         .await
+                    } else {
+                        client
+                            .connect_topics_and_listen(
+                                &topics,
+                                &auth_token,
+                                Some(&username),
+                                &tracked_streamers,
+                                connection_sender,
+                            )
+                            .await
+                    }
                 }
             });
             let _children = crate::shutdown::AbortTasksOnDrop(vec![
@@ -596,6 +614,17 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
                         failure_attempt = 0;
                     } else {
                         failure_attempt = failure_attempt.saturating_add(1);
+                        // Alternate once one transport keeps failing; the one that
+                        // holds a connection then stays in use.
+                        if failure_attempt >= TRANSPORT_FAILOVER_AFTER_FAILURES {
+                            use_hermes = !use_hermes;
+                            tracing::warn!(
+                                task = "pubsub",
+                                error_class = "transport-failover",
+                                use_hermes,
+                                "switching event transport after repeated connection failures"
+                            );
+                        }
                     }
                     let outcome = classify_pubsub_connection_result(
                         &result,
