@@ -12,6 +12,8 @@
   revoked token left it running without earning.
 - Device login now saves Twitch's refresh token, and a rejected session is
   refreshed before the miner asks for a new device code.
+- `--import-token` saves a Twitch token read from standard input, for when device
+  login is unavailable.
 
 ## 0.3.6 - Unreleased
 

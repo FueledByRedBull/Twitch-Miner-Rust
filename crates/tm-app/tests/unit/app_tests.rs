@@ -13,7 +13,7 @@ mod tests {
     use std::time::{Duration, Instant as StdInstant};
 
     use crate::bootstrap::{
-        env_has_value, has_override, load_config_with_fallback_using,
+        env_has_value, has_override, import_session_token, load_config_with_fallback_using,
         load_or_login_session_with_auth_client, load_or_login_session_with_auth_client_and_retry,
         normalized_username, preview_config_with_fallback, should_fallback_to_user_config,
         validate_app_config, validate_timezone_override, TimezoneValidation,
@@ -811,6 +811,7 @@ mod tests {
             json: false,
             support_bundle: None,
             canary: false,
+            import_token: false,
         };
         assert!(!has_override(&cli));
 
@@ -823,6 +824,7 @@ mod tests {
             json: false,
             support_bundle: None,
             canary: false,
+            import_token: false,
         };
         assert!(has_override(&cli));
     }
@@ -1824,6 +1826,47 @@ mod tests {
         assert_eq!(session.auth_token(), Some("saved-token"));
         assert_eq!(session.user_id(), Some("user-123"));
         assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn imported_token_is_validated_and_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let responses = vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","client_id":"other","scopes":[]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client =
+            TwitchAuthClient::with_client_and_endpoints(reqwest::Client::new(), endpoints);
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        assert!(
+            import_session_token(&config, directory.path(), &auth_client, "rejected\n")
+                .await
+                .is_err()
+        );
+        assert!(AuthSession::load_from_dir(directory.path(), "tester").is_err());
+        assert!(
+            import_session_token(&config, directory.path(), &auth_client, "")
+                .await
+                .is_err()
+        );
+
+        import_session_token(&config, directory.path(), &auth_client, "oauth:abc123\n")
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert!(requests.lock().unwrap()[1].contains("OAuth abc123"));
+        let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
+        assert_eq!(saved.auth_token(), Some("abc123"));
+        assert_eq!(saved.user_id(), Some("user-456"));
     }
 
     #[tokio::test]

@@ -168,6 +168,38 @@ pub(crate) async fn load_and_validate_existing_session(
     Ok(session)
 }
 
+/// Replaces the saved session with a token the user obtained some other way,
+/// for when device login is unavailable. The token never appears in arguments.
+pub(crate) async fn import_session_token(
+    config: &ConfigFile,
+    base_dir: &Path,
+    auth_client: &TwitchAuthClient,
+    token: &str,
+) -> Result<()> {
+    let username = normalized_username(&config.username)?;
+    let token = token.trim();
+    let token = token.strip_prefix("oauth:").unwrap_or(token);
+    if token.is_empty() {
+        return Err(anyhow!("no token on standard input"));
+    }
+    let validation = auth_client
+        .validate_login_details(token, &generate_device_id(), &username, DEFAULT_USER_AGENT)
+        .await
+        .context("validate imported token")?;
+    if validation.client_id.as_deref() != Some(tm_twitch::CLIENT_ID) {
+        eprintln!(
+            "warning: this token belongs to a different Twitch client; requests may be rejected"
+        );
+    }
+    let mut session = AuthSession::new(&username, tm_auth::CookieStore::new());
+    session.set_auth_token(token);
+    session.set_user_id(validation.user_id);
+    session.set_scopes(validation.scopes);
+    session.save_to_dir(base_dir)?;
+    println!("session token saved for {username}");
+    Ok(())
+}
+
 pub(crate) async fn load_or_login_session_with_auth_client(
     config: &ConfigFile,
     base_dir: &Path,

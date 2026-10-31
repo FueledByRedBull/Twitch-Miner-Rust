@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
@@ -66,9 +66,9 @@ mod utilities;
 mod watching;
 
 use bootstrap::{
-    build_http_client, has_override, load_config_with_fallback, load_or_login_session,
-    log_timezone_validation, prepare_work_dir, preview_config_with_fallback, validate_app_config,
-    validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
+    build_http_client, has_override, import_session_token, load_config_with_fallback,
+    load_or_login_session, log_timezone_validation, prepare_work_dir, preview_config_with_fallback,
+    validate_app_config, validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
 };
 use drops::claim_startup_drops_if_enabled;
 use identity_cache::IdentityCache;
@@ -122,6 +122,9 @@ struct Cli {
     /// Run read-only live checks before a release; use a dedicated account
     #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle"])]
     canary: bool,
+    /// Read a Twitch OAuth token from standard input, validate it, and save it as the session
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary"])]
+    import_token: bool,
 }
 
 fn main() -> Result<()> {
@@ -149,6 +152,19 @@ async fn run_cli(cli: Cli) -> Result<()> {
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
             http_client,
+        )
+        .await;
+    }
+    if cli.import_token {
+        let mut token = String::new();
+        std::io::stdin()
+            .read_line(&mut token)
+            .context("read token from standard input")?;
+        return import_session_token(
+            &loaded_config.config,
+            &loaded_config.active_paths.work_dir,
+            &tm_auth::TwitchAuthClient::with_client(build_http_client()?),
+            &token,
         )
         .await;
     }

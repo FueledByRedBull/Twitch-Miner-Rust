@@ -130,6 +130,15 @@ untouched and retry validation in-process with capped backoff; the wait can be
 interrupted with `CTRL-C` or `SIGTERM`. Reauthorization tries the refresh token
 saved with the session first and asks for a new device code only if that fails.
 
+If device login is unavailable, import a token you already hold. It is read from
+standard input so it stays out of the process list and shell history, must belong
+to the configured login, and replaces the saved session. A token issued to a
+different Twitch client logs a warning, because Twitch may reject its requests.
+
+```sh
+docker compose run --rm -T twitch-miner --import-token --data-dir /data < token.txt
+```
+
 While running, the miner validates its session every 10 minutes. If Twitch
 definitively rejects it, the miner logs an error, sends a `SESSION_LOST` Discord
 event, and exits with a failure status. The container's restart policy then
@@ -142,6 +151,7 @@ starts it again, and startup reauthorizes.
 | `--check-config` | Validate the configuration and preview migrations without contacting Twitch. Use it before migrating. Add `--json` for scripts. |
 | `--health` | Check that the running miner's tasks are fresh. Docker uses this as its health check; run it after starting or updating. |
 | `--status` | Print the sanitized runtime status described below. |
+| `--import-token` | Read a Twitch OAuth token from standard input, validate it, and save it as the session. |
 | `--support-bundle <path>` | Write version, status, and file-count metadata without cookies, configuration values, or log contents. |
 
 ```sh

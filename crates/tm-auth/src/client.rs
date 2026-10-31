@@ -37,6 +37,7 @@ impl fmt::Debug for DeviceCodePrompt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginValidation {
     pub user_id: String,
+    pub client_id: Option<String>,
     pub scopes: Vec<String>,
 }
 
@@ -324,7 +325,15 @@ fn login_validation_from_payload(
         .filter_map(serde_json::Value::as_str)
         .map(str::to_string)
         .collect();
-    Ok(LoginValidation { user_id, scopes })
+    let client_id = payload
+        .get("client_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Ok(LoginValidation {
+        user_id,
+        client_id,
+        scopes,
+    })
 }
 
 impl Default for AuthEndpoints {
