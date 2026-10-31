@@ -395,10 +395,21 @@ impl TwitchClient {
         &self,
         channel_login: &str,
     ) -> Result<ChannelPointsContext, TwitchClientError> {
-        let response: crate::types::ChannelPointsData = self
-            .post_gql_typed(&operations::channel_points_context(channel_login))
+        // Balance and bonus claims stop without this read, so a retired hash
+        // falls back to the query text as playback tokens do.
+        let mut payload = self
+            .post_gql_value(serde_json::to_value(operations::channel_points_context(
+                channel_login,
+            ))?)
             .await?;
-        channel_points_context_from_typed(response)
+        if is_persisted_query_not_found(&payload) {
+            payload = self
+                .post_gql_value(serde_json::to_value(
+                    operations::channel_points_context_fallback(channel_login),
+                )?)
+                .await?;
+        }
+        channel_points_context_from_typed(decode_gql_data(&payload, "ChannelPointsContext")?)
     }
 
     pub async fn is_stream_live(&self, channel_id: &str) -> Result<bool, TwitchClientError> {

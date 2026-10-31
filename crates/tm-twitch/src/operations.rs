@@ -2,6 +2,7 @@ use serde_json::json;
 
 use crate::types::GqlPersistedOperation;
 
+const CHANNEL_POINTS_CONTEXT_QUERY: &str = "query ChannelPointsContext($channelLogin: String!) { community: user(login: $channelLogin) { channel { self { communityPoints { balance availableClaim { id } activeMultipliers { factor } } } communityPointsSettings { isEnabled goals { id title isInStock pointsContributed amountNeeded perStreamUserMaximumContribution status } } } } }";
 const PLAYBACK_ACCESS_TOKEN_QUERY: &str = "query PlaybackAccessToken($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!, $platform: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } videoPlaybackAccessToken(id: $vodID, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isVod) { value signature __typename } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +150,11 @@ pub fn channel_points_context(channel_login: &str) -> GqlPersistedOperation {
         "374314de591e69925fce3ddc2bcf085796f56ebb8cad67a0daa3165c03adc345",
         json!({ "channelLogin": channel_login }),
     )
+}
+
+#[must_use]
+pub(crate) fn channel_points_context_fallback(channel_login: &str) -> GqlPersistedOperation {
+    channel_points_context(channel_login).with_query(CHANNEL_POINTS_CONTEXT_QUERY)
 }
 
 #[must_use]

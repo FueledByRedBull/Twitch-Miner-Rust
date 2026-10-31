@@ -80,7 +80,10 @@ authorization nor mutation input and is not an account-action request.
 `REGISTERED` means HTTP 200 with a valid JSON response that is not a persisted
 query error. `BROKEN` is reserved for an explicit `PersistedQueryNotFound`.
 Transport failures, non-200 responses, invalid JSON, and
-`PersistedQueryNotSupported` are `INCONCLUSIVE`. This is diagnostic evidence,
+`PersistedQueryNotSupported` are `INCONCLUSIVE`. The probe exits non-zero when any
+hash is `BROKEN`, and the `Persisted Query Probe` workflow runs it daily.
+`ChannelPointsContext` and `PlaybackAccessToken` also retry with their query text
+when Twitch reports their hash missing, so these two survive a retired hash. This is diagnostic evidence,
 not a release gate or automatic hash-refresh mechanism; `REGISTERED` does not
 prove that an operation would execute with credentials or valid variables.
 Authenticated decoding reports exact `PersistedQueryNotFound` responses as the

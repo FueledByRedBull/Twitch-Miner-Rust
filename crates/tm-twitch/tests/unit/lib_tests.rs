@@ -2834,3 +2834,36 @@ fn weekly_visit_is_needed_only_for_an_open_unvisited_unearned_tier() {
     );
     assert!(!rewards(serde_json::json!({ "accumulatedWeeks": 2 })).needs_visit(now));
 }
+
+#[tokio::test]
+async fn channel_points_context_retries_with_query_text_when_the_hash_is_retired() {
+    let (base_url, requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, r#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#),
+        (
+            200,
+            r#"{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":7}}}}}}"#,
+        ),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let context = client.fetch_channel_points_context("tester").await.unwrap();
+    server.join().unwrap();
+    assert_eq!(context.balance, 7);
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+}

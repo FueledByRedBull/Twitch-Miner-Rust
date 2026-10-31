@@ -64,6 +64,9 @@ async fn run() -> Result<(), String> {
         "summary: REGISTERED={} BROKEN={} INCONCLUSIVE={}",
         counts[0], counts[1], counts[2]
     );
+    if counts[1] > 0 {
+        return Err(format!("{} persisted hashes are BROKEN", counts[1]));
+    }
     Ok(())
 }
 
