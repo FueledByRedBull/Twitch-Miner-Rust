@@ -556,6 +556,7 @@ struct PubSubConnectionParams {
     connection_index: usize,
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let PubSubConnectionParams {

@@ -215,6 +215,7 @@ pub(crate) async fn load_or_login_session_with_auth_client(
     .await
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     config: &ConfigFile,
     base_dir: &Path,

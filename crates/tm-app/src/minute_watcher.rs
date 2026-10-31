@@ -1111,6 +1111,7 @@ fn log_watch_selection_refresh_result(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn refresh_drop_campaign_eligibility(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,

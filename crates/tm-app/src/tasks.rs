@@ -81,6 +81,7 @@ pub(crate) struct BackgroundTaskParams<'a> {
     pub(crate) work_dir: &'a std::path::Path,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Result<BackgroundTasks> {
     let username = normalized_username(&params.config.username)?;
     let prediction_journal = PredictionPlacementJournal::open(params.work_dir)?;
