@@ -136,6 +136,10 @@ impl fmt::Debug for TokenPollResponse {
                 "access_token",
                 &self.access_token.as_ref().map(|_| "<redacted>"),
             )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("error", &self.error)
             .field("message", &self.message)
             .finish()
