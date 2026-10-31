@@ -31,6 +31,8 @@
 - `ChannelPointsContext` retries with its query text when Twitch retires its hash.
 - Clip search looks at the last day and then the last week, across pages, so a
   recent clip is no longer missed behind a channel's all-time top clips.
+- Streak recovery now also uses Twitch's missed-stream list, so it can recover a
+  broadcast that ended before the miner started.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
 ## 0.3.6 - Unreleased

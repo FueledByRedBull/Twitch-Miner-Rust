@@ -255,6 +255,9 @@ reports recovery only when a later typed `RewardList` preserves the same non-nul
 streak count and removes the targeted broadcast from `missedStreams`, or clears
 the expiring-risk envelope entirely. Unconfirmed playback retains the short
 retry cooldown; only typed confirmation receives the recovery-window cooldown.
+With recovery enabled, an offline channel this run never saw go offline has its
+`RewardList` missed-stream list read at most every six hours, one channel per
+minute, so a broadcast that ended before the miner started can still be recovered.
 Unresolved streak state is also reconciled once after a confirmed bonus claim
 and once after accepted offline-recovery playback settles, using the typed
 milestone rather than treating either trigger as proof.
