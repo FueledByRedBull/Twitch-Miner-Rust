@@ -1449,6 +1449,7 @@ pub(crate) fn build_minute_watched_event(
         (String::from("broadcast_id"), json!(stream.broadcast_id)),
         (String::from("user_id"), json!(user_id)),
         (String::from("player"), json!("site")),
+        (String::from("location"), json!("channel")),
         (String::from("live"), json!(true)),
         (String::from("channel"), json!(streamer.username)),
     ]);

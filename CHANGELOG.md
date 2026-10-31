@@ -5,6 +5,8 @@
 - Channels with an active Drop campaign now request every segment their media
   playlist lists each minute, not only the newest one, because Twitch stopped
   crediting Drop progress from the newest segment alone.
+- The minute-watched event now states `location: channel`, as a browser watching
+  the channel does.
 
 ## 0.3.6 - Unreleased
 

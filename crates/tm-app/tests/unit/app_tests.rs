@@ -3326,6 +3326,7 @@ mod tests {
 
         let farming = build_minute_watched_event(&streamer, &stream, "user-1");
         assert_eq!(farming["properties"]["broadcast_id"], "broadcast-1");
+        assert_eq!(farming["properties"]["location"], "channel");
         assert_eq!(farming["properties"]["game"], "Game Name");
         assert_eq!(farming["properties"]["game_id"], "42");
 
