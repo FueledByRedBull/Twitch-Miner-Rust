@@ -2588,7 +2588,7 @@ mod tests {
     }
 
     #[test]
-    fn excluded_and_unobserved_campaigns_do_not_pin() {
+    fn excluded_campaigns_do_not_pin_but_unstarted_ones_do() {
         let excluded = std::collections::HashSet::from([
             String::from("campaign-complete"),
             String::from("campaign-subscription-only"),
@@ -2605,7 +2605,7 @@ mod tests {
             .0
         );
         assert!(
-            !crate::drops::channel_drop_target(&[], &["new-campaign".into()], &excluded, ts(0)).0
+            crate::drops::channel_drop_target(&[], &["new-campaign".into()], &excluded, ts(0)).0
         );
     }
 

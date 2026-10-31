@@ -546,7 +546,9 @@ pub(crate) fn channel_drop_target(
             .iter()
             .filter(|drop| &drop.campaign_id == campaign)
             .collect();
-        // Missing inventory is not evidence of an unfinished watch reward.
+        // A campaign the channel offers but the inventory has not listed yet is
+        // one the account has not started; finished ones are in `excluded`.
+        eligible |= rewards.is_empty();
         eligible |= rewards.iter().any(|drop| {
             !drop.is_claimed
                 && !drop.subscription_required
@@ -697,7 +699,7 @@ mod tests {
         let campaigns = vec!["restricted".to_string()];
         assert_eq!(
             super::channel_drop_target(&[], &campaigns, &excluded, now),
-            (false, None)
+            (true, None)
         );
         let mut completed = reward.clone();
         completed.is_claimed = true;

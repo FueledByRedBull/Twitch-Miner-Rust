@@ -267,7 +267,8 @@ present list still requires a non-empty campaign ID. Its typed result also
 gates `DROPS` watch priority when `farm_drops` is enabled. One typed inventory
 snapshot per selection refresh retains campaign IDs and marks an ID complete
 only when its non-empty drop list is explicitly fully claimed. Per-channel
-available IDs are filtered against that completed set. New, incomplete,
+available IDs are filtered against that completed set, and a campaign with a
+claimed reward but no remaining inventory row counts as completed. New, incomplete,
 missing-progress, and transient-failure cases remain eligible; completed
 campaigns release their pin so the spare points slot is not suppressed. Unknown
 and empty available-campaign results are not promoted, a broadcast/game change

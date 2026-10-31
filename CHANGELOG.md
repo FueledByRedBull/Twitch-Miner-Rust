@@ -21,6 +21,9 @@
   pass on the null response.
 - New `drop_account_link` setting. By default the miner no longer spends watch time
   on campaigns whose game account is not linked, since they cannot pay out.
+- A channel offering a campaign you have not started now gets `DROPS` priority.
+  Before, a campaign had to appear in your inventory first, and it only appears
+  once started.
 
 ## 0.3.6 - Unreleased
 

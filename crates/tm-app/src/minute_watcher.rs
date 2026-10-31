@@ -1064,10 +1064,24 @@ async fn drop_catalog_for_link_check(
 }
 
 fn excluded_drop_campaign_ids(snapshot: tm_twitch::InventorySnapshot) -> HashSet<String> {
+    // A finished campaign can leave the in-progress list, so a claimed reward
+    // with no remaining inventory row also means there is nothing left to earn.
+    let in_progress: HashSet<&str> = snapshot
+        .drops
+        .iter()
+        .map(|drop| drop.campaign_id.as_str())
+        .collect();
+    let finished: Vec<String> = snapshot
+        .claimed_rewards
+        .iter()
+        .filter(|reward| !in_progress.contains(reward.campaign_id.as_str()))
+        .map(|reward| reward.campaign_id.clone())
+        .collect();
     snapshot
         .completed_campaign_ids
         .into_iter()
         .chain(snapshot.subscription_only_campaign_ids)
+        .chain(finished)
         .collect()
 }
 
