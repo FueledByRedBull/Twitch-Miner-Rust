@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.7 - Unreleased
 
 - Channels with an active Drop campaign now request every segment their media
   playlist lists each minute, not only the newest one, because Twitch stopped
@@ -45,7 +45,7 @@
   instead of five.
 - `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
 
-## 0.3.6 - Unreleased
+## 0.3.6 - 2026-10-27
 
 - `verify-release-evidence.ps1` keeps the record's timestamps as text under
   PowerShell 7, which needs 7.5 or later. PowerShell 7 parsed them into dates,

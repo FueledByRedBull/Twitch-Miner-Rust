@@ -11,10 +11,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "=0.4.13"
 serde_json = "1.0.145"
-tm-auth = { path = "../crates/tm-auth", version = "0.3.6" }
-tm-config = { path = "../crates/tm-config", version = "0.3.6" }
-tm-pubsub = { path = "../crates/tm-pubsub", version = "0.3.6" }
-tm-twitch = { path = "../crates/tm-twitch", version = "0.3.6" }
+tm-auth = { path = "../crates/tm-auth", version = "0.3.7" }
+tm-config = { path = "../crates/tm-config", version = "0.3.7" }
+tm-pubsub = { path = "../crates/tm-pubsub", version = "0.3.7" }
+tm-twitch = { path = "../crates/tm-twitch", version = "0.3.7" }
 
 [[bin]]
 name = "transport_parsers"
