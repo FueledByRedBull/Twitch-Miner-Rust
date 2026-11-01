@@ -10,7 +10,6 @@
   "watch_one_stream_when_drops_active": true,
   "claim_moments": true,
   "watch_streak_vod_recovery": false,
-  "weekly_visit_rewards": false,
   "betting(make_predictions)": false,
   "follow_raid": false,
   "community_goals": false,

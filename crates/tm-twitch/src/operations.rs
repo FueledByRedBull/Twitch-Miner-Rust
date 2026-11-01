@@ -109,11 +109,6 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
         read_only: true,
     },
     PersistedOperationContract {
-        operation_name: "WeeklyVisitRewardsQuery",
-        sha256_hash: "ce98e9db55db7e4abcc1f5ac65c933b73c58fa9c4c8afe3c5098a8ed79737a3c",
-        read_only: true,
-    },
-    PersistedOperationContract {
         operation_name: "UserPointsContribution",
         sha256_hash: "23ff2c2d60708379131178742327ead913b93b1bd6f665517a6d9085b73f661f",
         read_only: true,
@@ -357,15 +352,6 @@ pub fn drops_enabled_game_directory(slug: &str, limit: u32) -> GqlPersistedOpera
             },
             "sortTypeIsRecency": false,
         }),
-    )
-}
-
-#[must_use]
-pub fn weekly_visit_rewards(channel_id: &str) -> GqlPersistedOperation {
-    GqlPersistedOperation::new(
-        "WeeklyVisitRewardsQuery",
-        "ce98e9db55db7e4abcc1f5ac65c933b73c58fa9c4c8afe3c5098a8ed79737a3c",
-        json!({ "channelID": channel_id }),
     )
 }
 

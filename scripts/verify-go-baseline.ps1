@@ -119,8 +119,7 @@ $allowedRustOnly = @(
     'FilterableVideoTower_Videos',
     'ClipsCards__User',
     'DirectoryPage_Game',
-    'DropCurrentSessionContext',
-    'WeeklyVisitRewardsQuery'
+    'DropCurrentSessionContext'
 )
 $allowedHashMismatches = @('Inventory', 'PlaybackAccessToken')
 

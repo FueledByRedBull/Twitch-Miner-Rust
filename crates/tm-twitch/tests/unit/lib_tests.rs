@@ -641,7 +641,6 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::claim_drop_rewards("drop"),
         operations::drops_highlight_service_available("1"),
         operations::drop_current_session("1"),
-        operations::weekly_visit_rewards("1"),
         operations::drops_enabled_game_directory("game", 5),
         operations::user_points_contribution("abc"),
         operations::contribute_community_goal(1, "1", "goal", "transaction"),
@@ -2807,34 +2806,6 @@ fn game_directory_keeps_only_channels_with_a_login() {
     );
 }
 
-#[test]
-fn weekly_visit_is_needed_only_for_an_open_unvisited_unearned_tier() {
-    let rewards = |overrides: serde_json::Value| {
-        let mut payload = serde_json::json!({
-            "eventConfig": {
-                "endDate": "2030-01-08T00:00:00Z",
-                "rewardTiers": [{}, {}]
-            },
-            "accumulatedWeeks": 1,
-            "hasVisitedToday": false,
-            "hasEarnedWeeklyRewardThisWeek": false,
-        });
-        for (key, value) in overrides.as_object().unwrap() {
-            payload[key] = value.clone();
-        }
-        serde_json::from_value::<types::WeeklyVisitRewards>(payload).unwrap()
-    };
-    let now = time::macros::datetime!(2030-01-01 00:00 UTC);
-    let after = time::macros::datetime!(2030-02-01 00:00 UTC);
-    assert!(rewards(serde_json::json!({})).needs_visit(now));
-    assert!(!rewards(serde_json::json!({})).needs_visit(after));
-    assert!(!rewards(serde_json::json!({ "hasVisitedToday": true })).needs_visit(now));
-    assert!(
-        !rewards(serde_json::json!({ "hasEarnedWeeklyRewardThisWeek": true })).needs_visit(now)
-    );
-    assert!(!rewards(serde_json::json!({ "accumulatedWeeks": 2 })).needs_visit(now));
-}
-
 #[tokio::test]
 async fn channel_points_context_retries_with_query_text_when_the_hash_is_retired() {
     let (base_url, requests, server) = spawn_http_server([
@@ -2976,7 +2947,7 @@ async fn gql_requests_start_spaced_apart() {
 }
 
 #[test]
-fn drop_session_directory_and_weekly_visit_fixtures() {
+fn drop_session_and_directory_fixtures() {
     let session: types::GqlResponse<types::DropSessionData> =
         serde_json::from_value(protocol_fixture("twitch.drop_current_session.json")).unwrap();
     let session = session.data.unwrap().current_user.unwrap().session.unwrap();
@@ -2989,18 +2960,4 @@ fn drop_session_directory_and_weekly_visit_fixtures() {
         crate::responses::game_directory_logins_from_typed(directory.data.unwrap()),
         vec![String::from("alice")]
     );
-
-    let weekly: types::GqlResponse<types::WeeklyVisitData> =
-        serde_json::from_value(protocol_fixture("twitch.weekly_visit_rewards.json")).unwrap();
-    let rewards = weekly
-        .data
-        .unwrap()
-        .channel
-        .unwrap()
-        .self_data
-        .unwrap()
-        .rewards
-        .unwrap();
-    assert_eq!(rewards.accumulated_weeks, 1);
-    assert!(rewards.needs_visit(time::macros::datetime!(2030-01-01 00:00 UTC)));
 }

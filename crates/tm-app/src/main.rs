@@ -64,7 +64,6 @@ mod streak_recovery;
 mod tasks;
 mod utilities;
 mod watching;
-mod weekly_visits;
 
 use bootstrap::{
     build_http_client, has_override, import_session_token, load_config_with_fallback,

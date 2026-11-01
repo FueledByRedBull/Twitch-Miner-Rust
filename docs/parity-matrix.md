@@ -17,7 +17,7 @@ published container images.
 | --- | --- | --- |
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
-| Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context, credit eligibility, fair rotation, bounded transient HLS retries, playback priming with a broadcast-bound playlist cache, and broadcast-bound streak recovery are fixture-tested. Weekly Visit Rewards are opt-in and have no live evidence yet. Exact contracts and limits are normative in the [protocol inventory](protocol-inventory.md). |
+| Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context, credit eligibility, fair rotation, bounded transient HLS retries, playback priming with a broadcast-bound playlist cache, and broadcast-bound streak recovery are fixture-tested. Exact contracts and limits are normative in the [protocol inventory](protocol-inventory.md). |
 | Drops and moments | Improved | Drop progress, campaign selection, and claims have independent controls and typed fixture coverage. Claims also follow `user-drop-events` messages, channels that stop crediting are benched, and startup discovery can add channels for Drop games; these additions have no live evidence yet. Live evidence includes 14 progress/claim pairs; it does not claim exact campaign pin/unpin telemetry. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including an explicit first-outcome tie contract shared with Go/Python, deterministic coverage of the application-injected `1..=5` stealth amount offset, Twitch's documented `10`-to-`250000` per-viewer stake bounds, a typed rejection when `makePrediction.error` is present (as Python and Java read it; the fixture is synthetic), and PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
@@ -97,7 +97,7 @@ implementations. Advancing to the first green upstream revision would therefore
 remove those two documented Rust-only exceptions rather than add new ones. Broken
 upstream tests are never made an enforced gate here.
 
-Three more Rust-only operations back features the Go baseline does not have:
-`DirectoryPage_Game` for Drop channel discovery, `DropCurrentSessionContext` for
-Drop credit checks, and `WeeklyVisitRewardsQuery` for Weekly Visit Rewards. The
+Two more Rust-only operations back features the Go baseline does not have:
+`DirectoryPage_Game` for Drop channel discovery and `DropCurrentSessionContext` for
+Drop credit checks. The
 gate lists them by name, so any other new operation still fails it.
