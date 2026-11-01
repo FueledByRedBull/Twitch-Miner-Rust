@@ -35,6 +35,9 @@
 - Event connections fail over to Twitch's Hermes transport after three failures in
   a row, so predictions, moments, and raids keep working if PubSub goes away.
 - New `webhook` setting posts chosen events as JSON to any HTTP endpoint.
+- The defaults for `drop_account_link`, `drop_discovery_games`, and `webhook` are not
+  written into an existing configuration file, so 0.3.6 can still read it after a
+  rollback unless you set one of them.
 - `DROP_STATUS` events now fire. They report each quarter of a Drop's progress and
   channels benched for not crediting; the name was accepted before but never sent.
 - Discord events wait out a rate limit and retry, and a deleted webhook gets its own

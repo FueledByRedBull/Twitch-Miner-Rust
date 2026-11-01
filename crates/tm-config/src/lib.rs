@@ -321,7 +321,15 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     validate_known_keys(&value)?;
     validate_enum_values(&value)?;
 
-    changed |= fill_missing_top_level(&mut value, &default_config_value());
+    let mut top_level_defaults = default_config_value();
+    if existed {
+        if let Some(defaults) = top_level_defaults.as_object_mut() {
+            for key in OPT_IN_TOP_LEVEL_KEYS {
+                defaults.remove(*key);
+            }
+        }
+    }
+    changed |= fill_missing_top_level(&mut value, &top_level_defaults);
     let privacy_defaults = privacy_defaults();
     let discord_defaults = discord_defaults();
     let bet_defaults = bet_defaults();
@@ -910,6 +918,9 @@ const BET_CONFIG_KEYS: &[&str] = &[
 const FILTER_CONDITION_KEYS: &[&str] = &["by", "where", "value"];
 const PRIVACY_CONFIG_KEYS: &[&str] = &["anonymize_logs"];
 const DISCORD_CONFIG_KEYS: &[&str] = &["webhook_api", "events"];
+// Older releases reject keys they do not know, so writing these defaults into an
+// existing file would stop a rollback from starting. They apply when absent.
+const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &["drop_account_link", "drop_discovery_games", "webhook"];
 const WEBHOOK_CONFIG_KEYS: &[&str] = &["url", "events"];
 const STREAMER_OVERRIDE_KEYS: &[&str] = &[
     "make_predictions",
