@@ -270,7 +270,8 @@ milestone rather than treating either trigger as proof.
 
 `ViewerDropsDashboard` reports a null `dropCampaigns` as a distinct "catalog
 withheld" error rather than an empty list, because Twitch returns null to
-sessions it will not show the catalog to. The canary fails on it.
+sessions it will not show the catalog to. The canary prints a warning on it and
+fails on any other error from this query.
 
 The `self.isAccountConnected` and `accountLinkURL` campaign fields, read from
 both the inventory and the catalog, drive `drop_account_link`. A withheld catalog

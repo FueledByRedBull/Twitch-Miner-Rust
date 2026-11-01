@@ -225,10 +225,7 @@ async fn run_canary_read_checks(
             )
             .count(),
     );
-    let _ = canary_step(
-        "drops-dashboard",
-        context.twitch.fetch_drop_catalog_typed().await,
-    )?;
+    check_drop_catalog(context.twitch.fetch_drop_catalog_typed().await)?;
     let _ = canary_step(
         "available-drops",
         context
@@ -247,6 +244,20 @@ async fn run_canary_read_checks(
         stream_info_checked,
         playback_checked,
     })
+}
+
+// Twitch decides per session whether to show the catalog, so a withheld one says
+// nothing about the query contract. Every other error still fails the canary.
+fn check_drop_catalog<T>(
+    result: std::result::Result<T, TwitchClientError>,
+) -> std::result::Result<(), CanaryCheckError> {
+    match result {
+        Err(TwitchClientError::DropCatalogWithheld) => {
+            tracing::warn!("Twitch withheld the Drop campaign catalog from this session");
+            Ok(())
+        }
+        result => canary_step("drops-dashboard", result).map(|_| ()),
+    }
 }
 
 async fn run_canary_transport_checks(
@@ -539,6 +550,18 @@ mod tests {
 
         assert_eq!(message, "inventory:contract-or-shape");
         assert!(!message.contains("sensitive-response-field"));
+    }
+
+    #[test]
+    fn only_a_withheld_drop_catalog_passes_without_a_result() {
+        assert!(check_drop_catalog(Ok(())).is_ok());
+        assert!(check_drop_catalog::<()>(Err(TwitchClientError::DropCatalogWithheld)).is_ok());
+
+        let error = check_drop_catalog::<()>(Err(TwitchClientError::MissingField("data")));
+        assert_eq!(
+            error.err().map(|error| canary_failure_message(&error)),
+            Some(String::from("drops-dashboard:contract-or-shape"))
+        );
     }
 
     #[test]

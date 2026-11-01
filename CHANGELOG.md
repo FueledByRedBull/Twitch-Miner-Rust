@@ -18,8 +18,8 @@
   they are ready, and benches a channel for 30 minutes (doubling to at most four
   hours if it keeps stalling) if it credits no Drop
   minutes for 20 minutes.
-- The canary now fails when Twitch withholds the Drop campaign catalog. It used to
-  pass on the null response.
+- The canary now warns when Twitch withholds the Drop campaign catalog. It used to
+  pass silently on the null response.
 - New `drop_account_link` setting. By default the miner no longer spends watch time
   on campaigns whose game account is not linked, since they cannot pay out.
 - A channel offering a campaign you have not started now gets `DROPS` priority.
