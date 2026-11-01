@@ -11,7 +11,8 @@ responsibility:
   `MinerEvent` contract.
 - `tm-twitch` owns Twitch HTTP, GQL, and scraping contracts. HTTP execution and
   typed response normalization remain separate modules.
-- `tm-pubsub` owns the isolated PubSub `/v1` compatibility client and EventSub
+- `tm-pubsub` owns the isolated PubSub `/v1` compatibility client, the Hermes client
+  that event connections fail over to when PubSub keeps failing, and EventSub
   WebSocket transport. Production uses the fixed viewer-compatible topic set;
   an authenticated broadcaster may additionally use EventSub prediction topics.
   EventSub connection lifecycle, capacity planning, and protocol normalization
