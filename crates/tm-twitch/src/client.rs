@@ -103,7 +103,6 @@ struct PlaybackTokenClaims {
 
 /// A cached playlist is dropped this long before its token expires.
 const PLAYBACK_TOKEN_EXPIRY_MARGIN_SECONDS: u64 = 60;
-/// Upper bound on reuse, whatever expiry the token states.
 const MAX_CONCURRENT_GQL_REQUESTS: usize = 8;
 const GQL_REQUEST_SPACING: Duration = Duration::from_millis(50);
 /// Far above any real response; these stop a hostile or broken endpoint from
@@ -115,6 +114,10 @@ const MAX_PLAYLIST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CLIP_PAGES: usize = 3;
 /// A live playlist lists a few seconds of video; this bounds a hostile one.
 const MAX_OLDER_SEGMENT_REQUESTS: usize = 16;
+/// Older segments are optional, so a slow CDN must leave the watch tick enough of
+/// its deadline to send the minute-watched event.
+const OLDER_SEGMENTS_BUDGET: Duration = Duration::from_secs(20);
+/// Upper bound on reuse, whatever expiry the token states.
 const PLAYBACK_PLAYLIST_MAX_AGE_SECONDS: u64 = 60 * 60;
 
 #[derive(Debug, Clone)]
@@ -660,24 +663,27 @@ impl TwitchClient {
         if all_segments {
             // Older segments can age out of the CDN mid-tick, so only the
             // newest one decides whether the tick succeeded.
-            for url in segment_urls.iter().rev().take(MAX_OLDER_SEGMENT_REQUESTS) {
-                if validate_remote_endpoint(
-                    url,
-                    "media playlist",
-                    self.allow_loopback_remote_endpoints,
-                )
-                .is_ok()
-                {
-                    let _ = self
-                        .send_playback_read_request(
-                            remote_client,
-                            reqwest::Method::HEAD,
-                            url,
-                            "media segment",
-                        )
-                        .await;
+            let older_segments = async {
+                for url in segment_urls.iter().rev().take(MAX_OLDER_SEGMENT_REQUESTS) {
+                    if validate_remote_endpoint(
+                        url,
+                        "media playlist",
+                        self.allow_loopback_remote_endpoints,
+                    )
+                    .is_ok()
+                    {
+                        let _ = self
+                            .send_playback_read_request(
+                                remote_client,
+                                reqwest::Method::HEAD,
+                                url,
+                                "media segment",
+                            )
+                            .await;
+                    }
                 }
-            }
+            };
+            let _ = tokio::time::timeout(OLDER_SEGMENTS_BUDGET, older_segments).await;
         }
         Ok(())
     }
