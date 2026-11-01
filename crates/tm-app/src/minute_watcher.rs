@@ -742,6 +742,20 @@ async fn watch_streamer_login(
         )
         .await,
     );
+    if matches!(outcome, WatchAttemptOutcome::Success) && streamer.can_watch_drop_campaign() {
+        crate::drops::check_drop_stall(
+            &context.runtime,
+            &context.twitch,
+            &context.claim_coordinator,
+            &context.observability,
+            &streamer,
+            streamer
+                .stream
+                .as_ref()
+                .map_or("", |stream| stream.broadcast_id.as_str()),
+        )
+        .await;
+    }
     context
         .health
         .record_playback_ticks(context.twitch.playback_tick_counts());
@@ -900,7 +914,16 @@ async fn refresh_watch_selection_metadata_inner(
                         }
                     }
                     inventory_drops = Some(snapshot.drops.clone());
-                    excluded_drop_campaign_ids(snapshot)
+                    let catalog =
+                        drop_catalog_for_link_check(twitch, claim_coordinator.account_link()).await;
+                    let link_excluded = crate::drops::link_excluded_campaign_ids(
+                        &snapshot,
+                        &catalog,
+                        claim_coordinator.account_link(),
+                    );
+                    let mut excluded = excluded_drop_campaign_ids(snapshot);
+                    excluded.extend(link_excluded);
+                    excluded
                 }
                 Err(error) => {
                     failures += 1;
@@ -939,6 +962,7 @@ async fn refresh_watch_selection_metadata_inner(
         let observability = observability.clone();
         let streamer = streamer.clone();
         let excluded_campaign_ids = Arc::clone(&excluded_campaign_ids);
+        let benched = claim_coordinator.is_benched(&streamer.channel_id, std::time::Instant::now());
         let inventory_drops = Arc::clone(&inventory_drops);
         refreshes.spawn(async move {
             let previous_game = streamer_game_name(&streamer);
@@ -1000,6 +1024,7 @@ async fn refresh_watch_selection_metadata_inner(
                     &excluded_campaign_ids,
                     inventory_drops,
                     now,
+                    benched,
                 )
                 .await?;
             }
@@ -1020,11 +1045,43 @@ async fn refresh_watch_selection_metadata_inner(
     failures
 }
 
+/// The catalog is the only source for campaigns the account has not started, but
+/// Twitch can withhold it, so the inventory's link data still applies without it.
+async fn drop_catalog_for_link_check(
+    twitch: &TwitchClient,
+    account_link: tm_config::DropAccountLink,
+) -> Vec<tm_twitch::DropCatalogCampaign> {
+    if account_link == tm_config::DropAccountLink::All {
+        return Vec::new();
+    }
+    twitch
+        .fetch_drop_catalog_typed()
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(error_class = "drop-catalog", %error, "drop catalog unavailable");
+            Vec::new()
+        })
+}
+
 fn excluded_drop_campaign_ids(snapshot: tm_twitch::InventorySnapshot) -> HashSet<String> {
+    // A finished campaign can leave the in-progress list, so a claimed reward
+    // with no remaining inventory row also means there is nothing left to earn.
+    let in_progress: HashSet<&str> = snapshot
+        .drops
+        .iter()
+        .map(|drop| drop.campaign_id.as_str())
+        .collect();
+    let finished: Vec<String> = snapshot
+        .claimed_rewards
+        .iter()
+        .filter(|reward| !in_progress.contains(reward.campaign_id.as_str()))
+        .map(|reward| reward.campaign_id.clone())
+        .collect();
     snapshot
         .completed_campaign_ids
         .into_iter()
         .chain(snapshot.subscription_only_campaign_ids)
+        .chain(finished)
         .collect()
 }
 
@@ -1054,6 +1111,7 @@ fn log_watch_selection_refresh_result(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn refresh_drop_campaign_eligibility(
     runtime: &tm_runtime::RuntimeHandle,
     twitch: &TwitchClient,
@@ -1062,6 +1120,7 @@ async fn refresh_drop_campaign_eligibility(
     excluded_campaign_ids: &HashSet<String>,
     inventory_drops: &[tm_twitch::InventoryDrop],
     now: OffsetDateTime,
+    benched: bool,
 ) -> Result<()> {
     if !streamer.settings.farm_drops {
         return Ok(());
@@ -1072,7 +1131,7 @@ async fn refresh_drop_campaign_eligibility(
             .game_id
             .as_deref()
             .is_some_and(|game_id| !game_id.trim().is_empty());
-    if !has_game {
+    if !has_game || benched {
         runtime
             .set_drop_campaign_eligibility_if_current(
                 streamer.channel_id.clone(),
@@ -1137,7 +1196,11 @@ pub(crate) async fn send_minute_watched_for_streamer(
     stream.payload = vec![build_minute_watched_event(&streamer, &stream, user_id)];
 
     twitch
-        .prime_live_playback(&streamer.username, &stream.broadcast_id)
+        .prime_live_playback(
+            &streamer.username,
+            &stream.broadcast_id,
+            streamer.can_watch_drop_campaign(),
+        )
         .await
         .with_context(|| format!("prime live playback for {}", streamer.username))?;
 
@@ -1445,6 +1508,7 @@ pub(crate) fn build_minute_watched_event(
         (String::from("broadcast_id"), json!(stream.broadcast_id)),
         (String::from("user_id"), json!(user_id)),
         (String::from("player"), json!("site")),
+        (String::from("location"), json!("channel")),
         (String::from("live"), json!(true)),
         (String::from("channel"), json!(streamer.username)),
     ]);

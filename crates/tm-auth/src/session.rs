@@ -15,6 +15,7 @@ use crate::cookies::{
 };
 
 const SPECIAL_COOKIE_DOMAINS: [&str; 2] = ["twitch.tv", "id.twitch.tv"];
+const REFRESH_TOKEN_COOKIE_DOMAIN: &str = "refresh-token.invalid";
 
 #[derive(Debug, Error)]
 pub enum AuthSessionError {
@@ -143,6 +144,28 @@ impl AuthSession {
     }
 
     #[must_use]
+    pub fn refresh_token(&self) -> Option<&str> {
+        self.store
+            .get("refresh-token")
+            .map(|cookie| cookie.value.trim())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Stored beside the session cookies but never sent as one. Releases before
+    /// 0.3.7 send any stored cookie whose domain matches the request, so a domain
+    /// that matches no host keeps the token out of their requests after a rollback.
+    pub fn set_refresh_token(&mut self, refresh_token: impl Into<String>) {
+        self.store.insert(
+            String::from("refresh-token"),
+            crate::cookies::PersistedCookie {
+                value: refresh_token.into(),
+                path: None,
+                domain: Some(String::from(REFRESH_TOKEN_COOKIE_DOMAIN)),
+            },
+        );
+    }
+
+    #[must_use]
     pub fn user_id(&self) -> Option<&str> {
         self.store
             .get("persistent")
@@ -205,7 +228,7 @@ impl AuthSession {
             if value.is_empty() {
                 continue;
             }
-            if matches!(name.as_str(), "auth-token" | "persistent") {
+            if matches!(name.as_str(), "auth-token" | "persistent" | "refresh-token") {
                 continue;
             }
 
@@ -321,6 +344,22 @@ fn host_matches_cookie_domain(host: &str, domain: &str) -> bool {
 mod tests {
     use super::*;
     use crate::cookies::{CookieStore, PersistedCookie};
+
+    #[test]
+    fn stored_refresh_token_matches_no_host_for_older_releases() {
+        let mut session = sample_session();
+        session.set_refresh_token("refresh-secret");
+        assert_eq!(session.refresh_token(), Some("refresh-secret"));
+        let domain = session.store["refresh-token"].domain.as_deref().unwrap();
+        for host in [
+            "www.twitch.tv",
+            "gql.twitch.tv",
+            "id.twitch.tv",
+            "twitch.tv",
+        ] {
+            assert!(!host_matches_cookie_domain(host, domain));
+        }
+    }
 
     fn sample_session() -> AuthSession {
         AuthSession::new(

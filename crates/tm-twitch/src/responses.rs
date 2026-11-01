@@ -3,10 +3,12 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::types::{
-    ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome,
-    ClaimDropOutcome, ClaimedDropReward, CommunityGoalContributionData, FollowersData, GqlResponse,
-    InventoryData, InventoryDrop, InventorySnapshot, RecentClip, RecentClipsData, RewardListData,
-    StreamInfo, StreamInfoData, TwitchClientError, UserContributionData, WatchStreakMilestone,
+    campaign_is_unlinked, campaign_requires_link, ArchivedVideo, ArchivedVideosData,
+    AvailableDropsData, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome,
+    ClaimedDropReward, CommunityGoalContributionData, DropCatalogCampaign, DropCatalogData,
+    FollowersData, GameDirectoryData, GqlResponse, InventoryData, InventoryDrop, InventorySnapshot,
+    RecentClip, RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
+    UserContributionData, WatchStreakMilestone,
 };
 
 pub(crate) fn is_persisted_query_not_found(payload: &serde_json::Value) -> bool {
@@ -422,6 +424,21 @@ pub(crate) fn archived_videos_from_typed(
         .collect()
 }
 
+/// The cursor of the page after this one, if Twitch says there is one.
+pub(crate) fn next_clips_cursor(data: &RecentClipsData) -> Option<String> {
+    let clips = data.user.as_ref()?.clips.as_ref()?;
+    clips
+        .page_info
+        .as_ref()
+        .filter(|page_info| page_info.has_next_page)?;
+    clips
+        .edges
+        .last()?
+        .cursor
+        .clone()
+        .filter(|cursor| !cursor.is_empty())
+}
+
 pub(crate) fn recent_clips_from_typed(
     data: RecentClipsData,
 ) -> Result<Vec<RecentClip>, TwitchClientError> {
@@ -466,6 +483,26 @@ fn required_text(value: Option<String>, field: &'static str) -> Result<String, T
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or(TwitchClientError::MissingField(field))
+}
+
+/// An unknown game slug answers with a null game, which is simply no channels.
+pub(crate) fn game_directory_logins_from_typed(data: GameDirectoryData) -> Vec<String> {
+    data.game
+        .and_then(|game| game.streams)
+        .map_or_else(Vec::new, |streams| streams.edges)
+        .into_iter()
+        .filter_map(|edge| edge.node?.broadcaster?.login)
+        .filter(|login| !login.trim().is_empty())
+        .collect()
+}
+
+pub(crate) fn drop_catalog_from_typed(
+    data: DropCatalogData,
+) -> Result<Vec<DropCatalogCampaign>, TwitchClientError> {
+    data.current_user
+        .ok_or(TwitchClientError::MissingField("data.currentUser"))?
+        .campaigns
+        .ok_or(TwitchClientError::DropCatalogWithheld)
 }
 
 pub(crate) fn available_drop_campaign_ids_from_typed(
@@ -641,6 +678,19 @@ pub(crate) fn inventory_snapshot_from_typed(
                 .filter(|id| !id.is_empty())
             {
                 snapshot.subscription_only_campaign_ids.push(id.to_owned());
+            }
+        }
+        if let Some(id) = campaign
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if campaign_is_unlinked(campaign.self_data.as_ref()) {
+                snapshot.unlinked_campaign_ids.push(id.to_owned());
+            }
+            if campaign_requires_link(campaign.account_link_url.as_deref()) {
+                snapshot.link_required_campaign_ids.push(id.to_owned());
             }
         }
         snapshot.drops.extend(inventory_campaign_drops(campaign)?);

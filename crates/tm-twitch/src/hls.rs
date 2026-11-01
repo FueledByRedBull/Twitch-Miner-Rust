@@ -52,15 +52,26 @@ pub(crate) fn lowest_bandwidth_variant_url(
         .ok_or(TwitchClientError::MissingField("master playlist"))
 }
 
+#[cfg(test)]
 pub(crate) fn media_segment_url(
     base_url: &reqwest::Url,
     playlist: &str,
 ) -> Result<reqwest::Url, TwitchClientError> {
+    media_segment_urls(base_url, playlist)?
+        .pop()
+        .ok_or(TwitchClientError::MissingField("media playlist"))
+}
+
+/// Lists every complete media segment in the playlist, oldest first.
+pub(crate) fn media_segment_urls(
+    base_url: &reqwest::Url,
+    playlist: &str,
+) -> Result<Vec<reqwest::Url>, TwitchClientError> {
     validate_header(playlist, "media playlist")?;
 
     let mut expects_segment = false;
     let mut saw_stray_uri = false;
-    let mut newest_segment = None;
+    let mut segments = Vec::new();
     for line in playlist.lines().map(str::trim) {
         if line.is_empty() || line == "#EXTM3U" {
             continue;
@@ -90,7 +101,7 @@ pub(crate) fn media_segment_url(
         }
 
         if !expects_segment {
-            if newest_segment.is_some() {
+            if !segments.is_empty() {
                 return Err(TwitchClientError::InvalidField("media playlist"));
             }
             saw_stray_uri = true;
@@ -100,13 +111,15 @@ pub(crate) fn media_segment_url(
         let url = base_url
             .join(line)
             .map_err(|_| TwitchClientError::InvalidField("media playlist"))?;
-        newest_segment = Some(url);
+        segments.push(url);
         expects_segment = false;
     }
     if expects_segment {
         Err(TwitchClientError::InvalidField("media playlist"))
+    } else if segments.is_empty() {
+        Err(TwitchClientError::MissingField("media playlist"))
     } else {
-        newest_segment.ok_or(TwitchClientError::MissingField("media playlist"))
+        Ok(segments)
     }
 }
 

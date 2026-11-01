@@ -227,7 +227,7 @@ async fn run_canary_read_checks(
     );
     let _ = canary_step(
         "drops-dashboard",
-        context.twitch.fetch_viewer_drops_dashboard_typed().await,
+        context.twitch.fetch_drop_catalog_typed().await,
     )?;
     let _ = canary_step(
         "available-drops",
@@ -344,7 +344,7 @@ async fn prime_playback_if_live(
     if !target_is_live {
         return Ok(false);
     }
-    twitch.prime_live_playback(target, "").await?;
+    twitch.prime_live_playback(target, "", false).await?;
     Ok(true)
 }
 

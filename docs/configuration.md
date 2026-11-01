@@ -41,6 +41,8 @@ which is secret), optional `log/` files, `streak-cache.json`,
 | `streamers` | `[]` | Channels to watch. Their order is the `ORDER` priority. When the list is empty, the miner loads every channel you follow. |
 | `streamers_exclude` | `[]` | Logins that are never watched. |
 | `followers_order` | `DESC` | Order of followed channels when `streamers` is empty: `ASC` or `DESC`. |
+| `drop_account_link` | `linked` | Which Drop campaigns to farm by game-account link: `linked` skips campaigns you have not linked, `all` farms everything, `none` skips any campaign that involves a game account. |
+| `drop_discovery_games` | `[]` | Game slugs (the last part of the game's Twitch directory URL, such as `rocket-league`) to find channels for. At each start the miner adds up to five live channels with Drops enabled per game. They use your global settings and `streamers_exclude` still applies, but the list is only refreshed when the miner restarts. |
 | `game_priority` | `[]` | Games to prefer, in order. |
 | `game_exclude` | `[]` | Games whose streams are not watched. |
 | `watch_priority` | `["STREAK", "DROPS", "ORDER"]` | How the two watched channels are chosen. Priorities are tried in order; see the next table. |
@@ -89,6 +91,8 @@ pinning and fair rotation are separate rules, described in the
 | `show_game` | `true` | Include the game name in point messages. |
 | `timezone` | `null` | IANA time zone for timestamps, such as `Europe/Athens`. `null` uses the host's local time. |
 | `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, points, and results in logs and Discord messages. The saved log is named `miner.log` instead of after the account. |
+| `webhook.url` | `""` | Any HTTP(S) endpoint that should receive events, such as ntfy, Gotify, or Home Assistant. Each event is a POST with the JSON body `{"event": "DROP_CLAIM", "message": "..."}`. Empty disables it. Treat it as a secret. |
+| `webhook.events` | `[]` | Which events to send, from the same names as `discord.events`. |
 | `discord.webhook_api` | `""` | Discord webhook URL. Empty disables Discord. Treat it as a secret. |
 | `discord.events` | `[]` | Events to send. An empty list sends all events. |
 
@@ -96,8 +100,8 @@ Discord event names: `STARTUP`, `SHUTDOWN`, `STREAMER_ONLINE`,
 `STREAMER_OFFLINE`, `GAIN_FOR_WATCH`, `GAIN_FOR_WATCH_STREAK`,
 `GAIN_FOR_CLAIM`, `GAIN_FOR_RAID`, `BONUS_CLAIM`, `MOMENT_CLAIM`, `JOIN_RAID`,
 `DROP_CLAIM`, `DROP_STATUS`, `BET_START`, `BET_GENERAL`, `BET_FILTERS`,
-`BET_WIN`, `BET_LOSE`, `BET_REFUND`, `BET_FAILED`, `CHAT_MENTION`, and
-`WATCH_STATUS`.
+`BET_WIN`, `BET_LOSE`, `BET_REFUND`, `BET_FAILED`, `CHAT_MENTION`,
+`WATCH_STATUS`, and `SESSION_LOST`.
 
 ## Predictions (`bet`)
 

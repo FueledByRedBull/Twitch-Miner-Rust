@@ -13,7 +13,7 @@ mod tests {
     use std::time::{Duration, Instant as StdInstant};
 
     use crate::bootstrap::{
-        env_has_value, has_override, load_config_with_fallback_using,
+        env_has_value, has_override, import_session_token, load_config_with_fallback_using,
         load_or_login_session_with_auth_client, load_or_login_session_with_auth_client_and_retry,
         normalized_username, preview_config_with_fallback, should_fallback_to_user_config,
         validate_app_config, validate_timezone_override, TimezoneValidation,
@@ -753,6 +753,11 @@ mod tests {
                 } else if latest_request.starts_with("HEAD /segment.ts") {
                     playback_remaining = playback_remaining.saturating_sub(1);
                     empty_http_response("200 OK")
+                } else if latest_request.contains(r#""operationName":"ViewerDropsDashboard""#) {
+                    http_response(
+                        "200 OK",
+                        r#"{"data":{"currentUser":{"dropCampaigns":null}}}"#,
+                    )
                 } else {
                     let body = responses.pop_front().unwrap();
                     http_response("200 OK", &body)
@@ -811,6 +816,7 @@ mod tests {
             json: false,
             support_bundle: None,
             canary: false,
+            import_token: false,
         };
         assert!(!has_override(&cli));
 
@@ -823,6 +829,7 @@ mod tests {
             json: false,
             support_bundle: None,
             canary: false,
+            import_token: false,
         };
         assert!(has_override(&cli));
     }
@@ -1827,6 +1834,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn imported_token_is_validated_and_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let responses = vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","client_id":"other","scopes":[]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client =
+            TwitchAuthClient::with_client_and_endpoints(reqwest::Client::new(), endpoints);
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        assert!(
+            import_session_token(&config, directory.path(), &auth_client, "rejected\n")
+                .await
+                .is_err()
+        );
+        assert!(AuthSession::load_from_dir(directory.path(), "tester").is_err());
+        assert!(
+            import_session_token(&config, directory.path(), &auth_client, "")
+                .await
+                .is_err()
+        );
+
+        import_session_token(&config, directory.path(), &auth_client, "oauth:abc123\n")
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert!(requests.lock().unwrap()[1].contains("OAuth abc123"));
+        let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
+        assert_eq!(saved.auth_token(), Some("abc123"));
+        assert_eq!(saved.user_id(), Some("user-456"));
+    }
+
+    #[tokio::test]
+    async fn rejected_saved_session_is_refreshed_before_device_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("expired-token");
+        stored.set_refresh_token("old-refresh");
+        stored.save_to_dir(directory.path()).unwrap();
+
+        let responses = vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"access_token":"fresh-token","refresh_token":"new-refresh"}"#,
+            ),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+            ),
+        ];
+        let (endpoints, requests, server) = spawn_auth_validation_server(responses);
+        let auth_client = TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            endpoints,
+        );
+        let config = ConfigFile {
+            username: String::from("tester"),
+            ..ConfigFile::default()
+        };
+
+        let session = load_or_login_session_with_auth_client_and_retry(
+            &config,
+            directory.path(),
+            &auth_client,
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+        assert_eq!(session.refresh_token(), Some("new-refresh"));
+        let header = session.cookie_header_for_host("www.twitch.tv").unwrap();
+        assert!(!header.contains("refresh"));
+        assert!(requests.lock().unwrap()[1].contains("grant_type=refresh_token"));
+        let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
+        assert_eq!(saved.auth_token(), Some("fresh-token"));
+        assert_eq!(saved.refresh_token(), Some("new-refresh"));
+    }
+
+    #[tokio::test]
     async fn rejected_saved_session_falls_back_to_device_login() {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = AuthSession::new("tester", CookieStore::new());
@@ -2487,7 +2588,7 @@ mod tests {
     }
 
     #[test]
-    fn excluded_and_unobserved_campaigns_do_not_pin() {
+    fn excluded_campaigns_do_not_pin_but_unstarted_ones_do() {
         let excluded = std::collections::HashSet::from([
             String::from("campaign-complete"),
             String::from("campaign-subscription-only"),
@@ -2504,7 +2605,7 @@ mod tests {
             .0
         );
         assert!(
-            !crate::drops::channel_drop_target(&[], &["new-campaign".into()], &excluded, ts(0)).0
+            crate::drops::channel_drop_target(&[], &["new-campaign".into()], &excluded, ts(0)).0
         );
     }
 
@@ -3326,6 +3427,7 @@ mod tests {
 
         let farming = build_minute_watched_event(&streamer, &stream, "user-1");
         assert_eq!(farming["properties"]["broadcast_id"], "broadcast-1");
+        assert_eq!(farming["properties"]["location"], "channel");
         assert_eq!(farming["properties"]["game"], "Game Name");
         assert_eq!(farming["properties"]["game_id"], "42");
 
@@ -3437,7 +3539,7 @@ mod tests {
         );
         assert!(matches!(
             client.poll_access_token("device", "code").await.unwrap(),
-            TokenPollOutcome::AccessToken(token) if token == "secret-token"
+            TokenPollOutcome::AccessToken(tokens) if tokens.access_token == "secret-token"
         ));
         server.join().unwrap();
     }

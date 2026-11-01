@@ -143,17 +143,38 @@ fn is_rejected_mutation(error: &anyhow::Error) -> bool {
     )
 }
 
+const DROP_DISCOVERY_CHANNELS_PER_GAME: u32 = 5;
+
 pub(crate) async fn load_targets(
     config: &ConfigFile,
     twitch: &TwitchClient,
 ) -> Result<Vec<String>> {
-    if !config.streamers.is_empty() {
-        return Ok(config.streamers.clone());
+    let mut targets = if config.streamers.is_empty() {
+        twitch
+            .fetch_followers(100, config.followers_order.as_str())
+            .await
+            .context("load followers")?
+    } else {
+        config.streamers.clone()
+    };
+    // shortcut: channels are found once per start, because tracked channels are
+    // fixed at startup; a long run keeps them even after they go offline. Finding
+    // them while running needs runtime and presence support for adding channels.
+    for game in &config.drop_discovery_games {
+        match twitch
+            .fetch_drops_enabled_channels_typed(game, DROP_DISCOVERY_CHANNELS_PER_GAME)
+            .await
+        {
+            Ok(logins) => targets.extend(logins),
+            Err(error) => tracing::warn!(
+                operation = "run",
+                error_class = "drop-discovery",
+                %error,
+                "could not list Drop channels for {game}"
+            ),
+        }
     }
-    twitch
-        .fetch_followers(100, config.followers_order.as_str())
-        .await
-        .context("load followers")
+    Ok(targets)
 }
 
 pub(crate) async fn bootstrap_streamer(
@@ -478,9 +499,8 @@ mod tests {
         let address = listener.local_addr().expect("identity test server address");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
-        let expected_requests = if recover_through_cached_id { 5 } else { 3 };
         let server = thread::spawn(move || {
-            for _ in 0..expected_requests {
+            loop {
                 let (mut stream, _) = listener.accept().expect("accept identity test request");
                 let request = read_http_request(&mut stream);
                 recorded
@@ -514,6 +534,17 @@ mod tests {
                 stream
                     .write_all(&response)
                     .expect("write identity test response");
+                // A failed login lookup cancels the paced context read for the
+                // old login, usually before it is sent, so recovery cannot be
+                // counted in requests.
+                let finished = if recover_through_cached_id {
+                    request.contains(r#""channelLogin":"renamed"#)
+                } else {
+                    recorded.lock().expect("lock identity test requests").len() == 3
+                };
+                if finished {
+                    break;
+                }
             }
         });
         (
@@ -590,7 +621,6 @@ mod tests {
         let requests = requests
             .lock()
             .map_err(|_| anyhow!("identity requests poisoned"))?;
-        assert_eq!(requests.len(), 5);
         assert_eq!(
             requests
                 .iter()
@@ -598,9 +628,6 @@ mod tests {
                 .count(),
             1
         );
-        assert!(requests
-            .iter()
-            .any(|request| request.contains(r#""channelLogin":"alice"#)));
         assert!(requests
             .iter()
             .any(|request| request.contains(r#""channelLogin":"renamed"#)));

@@ -1,0 +1,10 @@
+{
+  "id": "n",
+  "type": "notification",
+  "timestamp": "2030-01-01T00:00:00Z",
+  "notification": {
+    "type": "pubsub",
+    "subscription": { "id": "subscription-1" },
+    "pubsub": "{\"type\":\"drop-claim\",\"data\":{\"drop_instance_id\":\"i\"}}"
+  }
+}

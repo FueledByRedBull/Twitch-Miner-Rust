@@ -1,0 +1,12 @@
+{
+  "data": {
+    "game": {
+      "streams": {
+        "edges": [
+          { "node": { "broadcaster": { "login": "alice" } } },
+          { "node": { "broadcaster": null } }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "type": "MESSAGE",
+  "data": {
+    "topic": "user-drop-events.viewer",
+    "message": "{\"type\":\"drop-progress\",\"data\":{\"drop_id\":\"d\",\"current_progress_min\":3,\"required_progress_min\":60}}"
+  }
+}

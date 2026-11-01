@@ -79,6 +79,7 @@ pub enum Event {
     DropStatus,
     ChatMention,
     WatchStatus,
+    SessionLost,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +124,8 @@ pub enum ObservabilityError {
     DiscordHttp(#[from] reqwest::Error),
     #[error("discord delivery failed with status {0}")]
     DiscordStatus(reqwest::StatusCode),
+    #[error("discord rate limited this delivery")]
+    DiscordRateLimited { retry_after: std::time::Duration },
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +252,37 @@ pub fn normalize_event_name(raw: &str) -> Option<Event> {
         "DROP_STATUS" => Some(Event::DropStatus),
         "CHAT_MENTION" => Some(Event::ChatMention),
         "WATCH_STATUS" => Some(Event::WatchStatus),
+        "SESSION_LOST" => Some(Event::SessionLost),
         _ => None,
+    }
+}
+
+#[must_use]
+pub fn event_name(event: Event) -> &'static str {
+    match event {
+        Event::Startup => "STARTUP",
+        Event::Shutdown => "SHUTDOWN",
+        Event::StreamerOnline => "STREAMER_ONLINE",
+        Event::StreamerOffline => "STREAMER_OFFLINE",
+        Event::GainForRaid => "GAIN_FOR_RAID",
+        Event::GainForClaim => "GAIN_FOR_CLAIM",
+        Event::GainForWatch => "GAIN_FOR_WATCH",
+        Event::GainForWatchStreak => "GAIN_FOR_WATCH_STREAK",
+        Event::BetWin => "BET_WIN",
+        Event::BetLose => "BET_LOSE",
+        Event::BetRefund => "BET_REFUND",
+        Event::BetFilters => "BET_FILTERS",
+        Event::BetGeneral => "BET_GENERAL",
+        Event::BetFailed => "BET_FAILED",
+        Event::BetStart => "BET_START",
+        Event::BonusClaim => "BONUS_CLAIM",
+        Event::MomentClaim => "MOMENT_CLAIM",
+        Event::JoinRaid => "JOIN_RAID",
+        Event::DropClaim => "DROP_CLAIM",
+        Event::DropStatus => "DROP_STATUS",
+        Event::ChatMention => "CHAT_MENTION",
+        Event::WatchStatus => "WATCH_STATUS",
+        Event::SessionLost => "SESSION_LOST",
     }
 }
 
@@ -315,6 +348,12 @@ pub fn discord_message(
     Some(clean_message)
 }
 
+#[derive(Serialize)]
+struct WebhookPayload<'a> {
+    event: &'a str,
+    message: &'a str,
+}
+
 impl DiscordClient {
     pub fn new(timeout: std::time::Duration) -> Result<Self, reqwest::Error> {
         Ok(Self {
@@ -332,6 +371,40 @@ impl DiscordClient {
             .client
             .post(webhook_api)
             .form(&[("content", message), ("username", DISCORD_USERNAME)])
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let seconds = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .unwrap_or(1.0);
+            return Err(ObservabilityError::DiscordRateLimited {
+                retry_after: std::time::Duration::from_secs_f64(seconds.min(3_600.0)),
+            });
+        }
+        if !response.status().is_success() {
+            return Err(ObservabilityError::DiscordStatus(response.status()));
+        }
+        Ok(())
+    }
+
+    /// Posts one event to the generic webhook as `{"event", "message"}`.
+    pub async fn send_webhook(
+        &self,
+        url: &str,
+        event: Event,
+        message: &str,
+    ) -> Result<(), ObservabilityError> {
+        let response = self
+            .client
+            .post(url)
+            .json(&WebhookPayload {
+                event: event_name(event),
+                message,
+            })
             .send()
             .await?;
         if !response.status().is_success() {

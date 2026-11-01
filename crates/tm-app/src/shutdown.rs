@@ -30,6 +30,7 @@ pub(crate) async fn shutdown_background_tasks(
         ("chat", tasks.chat),
         ("streak-cache", tasks.streak_cache),
         ("streak-recovery", tasks.streak_recovery),
+        ("session-watch", tasks.session_watch),
     ] {
         if let Some(task) = task {
             waits.spawn(async move {
@@ -217,6 +218,7 @@ mod tests {
                 chat: None,
                 streak_cache: None,
                 streak_recovery: None,
+                session_watch: None,
             },
         )
         .await;

@@ -51,6 +51,13 @@ pub enum TwitchClientError {
     },
     #[error("missing response field: {0}")]
     MissingField(&'static str),
+    #[error("response body exceeded its size limit")]
+    ResponseTooLarge,
+    /// Twitch answered with a null campaign list instead of an empty one, which
+    /// it does for sessions it will not show the catalog to. That is not "no
+    /// campaigns" and must not be read as one.
+    #[error("twitch withheld the Drop campaign catalog from this session")]
+    DropCatalogWithheld,
     #[error("invalid response field: {0}")]
     InvalidField(&'static str),
     #[error("graphql errors for {context}: {errors}")]
@@ -511,10 +518,20 @@ pub(crate) struct RecentClipsUser {
 pub(crate) struct RecentClipsConnection {
     #[serde(default)]
     pub(crate) edges: Vec<RecentClipEdge>,
+    #[serde(rename = "pageInfo", default)]
+    pub(crate) page_info: Option<RecentClipsPageInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RecentClipsPageInfo {
+    #[serde(rename = "hasNextPage", default)]
+    pub(crate) has_next_page: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RecentClipEdge {
+    #[serde(default)]
+    pub(crate) cursor: Option<String>,
     pub(crate) node: Option<RecentClipNode>,
 }
 
@@ -620,6 +637,16 @@ pub(crate) struct InventoryCampaign {
     pub(crate) display_name: Option<String>,
     #[serde(rename = "timeBasedDrops", default)]
     pub(crate) drops: Vec<InventoryTimeDrop>,
+    #[serde(rename = "self", default)]
+    pub(crate) self_data: Option<DropCampaignSelf>,
+    #[serde(rename = "accountLinkURL", default)]
+    pub(crate) account_link_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropCampaignSelf {
+    #[serde(rename = "isAccountConnected", default)]
+    pub is_account_connected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -675,6 +702,109 @@ pub(crate) struct InventoryDropSelf {
     pub(crate) current_progress: Option<i64>,
     #[serde(rename = "isClaimed")]
     pub(crate) is_claimed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionData {
+    #[serde(rename = "currentUser")]
+    pub(crate) current_user: Option<DropSessionUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionUser {
+    #[serde(rename = "dropCurrentSession")]
+    pub(crate) session: Option<DropSessionNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionNode {
+    pub(crate) channel: Option<DropSessionChannel>,
+    #[serde(rename = "currentMinutesWatched")]
+    pub(crate) current_minutes_watched: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropSessionChannel {
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryData {
+    pub(crate) game: Option<GameDirectoryGame>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryGame {
+    pub(crate) streams: Option<GameDirectoryStreams>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryStreams {
+    pub(crate) edges: Vec<GameDirectoryEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryEdge {
+    pub(crate) node: Option<GameDirectoryNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryNode {
+    pub(crate) broadcaster: Option<GameDirectoryBroadcaster>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct GameDirectoryBroadcaster {
+    pub(crate) login: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropCatalogData {
+    #[serde(rename = "currentUser")]
+    pub(crate) current_user: Option<DropCatalogUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DropCatalogUser {
+    #[serde(rename = "dropCampaigns")]
+    pub(crate) campaigns: Option<Vec<DropCatalogCampaign>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DropCatalogCampaign {
+    pub id: Option<String>,
+    pub status: Option<String>,
+    #[serde(rename = "self", default)]
+    pub self_data: Option<DropCampaignSelf>,
+    #[serde(rename = "accountLinkURL", default)]
+    pub account_link_url: Option<String>,
+}
+
+impl DropCatalogCampaign {
+    #[must_use]
+    pub fn is_unlinked(&self) -> bool {
+        campaign_is_unlinked(self.self_data.as_ref())
+    }
+
+    #[must_use]
+    pub fn requires_link(&self) -> bool {
+        campaign_requires_link(self.account_link_url.as_deref())
+    }
+}
+
+pub(crate) fn campaign_is_unlinked(self_data: Option<&DropCampaignSelf>) -> bool {
+    self_data.and_then(|data| data.is_account_connected) == Some(false)
+}
+
+pub(crate) fn campaign_requires_link(account_link_url: Option<&str>) -> bool {
+    account_link_url.is_some_and(|url| !url.trim().is_empty())
+}
+
+/// The Drop session Twitch is currently crediting for this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSession {
+    pub channel_id: Option<String>,
+    pub current_minutes: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -839,6 +969,8 @@ pub struct InventorySnapshot {
     pub drops: Vec<InventoryDrop>,
     pub completed_campaign_ids: Vec<String>,
     pub subscription_only_campaign_ids: Vec<String>,
+    pub unlinked_campaign_ids: Vec<String>,
+    pub link_required_campaign_ids: Vec<String>,
     pub claimed_rewards: Vec<ClaimedDropReward>,
 }
 

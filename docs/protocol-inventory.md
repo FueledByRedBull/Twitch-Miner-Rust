@@ -28,6 +28,8 @@ baseline, including its documented hash differences, is in the
 | `Inventory` | Read-only |
 | `ViewerDropsDashboard` | Read-only |
 | `DropsHighlightService_AvailableDrops` | Read-only |
+| `DropCurrentSessionContext` | Read-only |
+| `DirectoryPage_Game` | Read-only |
 | `UserPointsContribution` | Read-only |
 | `ClaimCommunityPoints` | Mutation |
 | `CommunityMomentCallout_Claim` | Mutation |
@@ -77,13 +79,20 @@ authorization nor mutation input and is not an account-action request.
 `REGISTERED` means HTTP 200 with a valid JSON response that is not a persisted
 query error. `BROKEN` is reserved for an explicit `PersistedQueryNotFound`.
 Transport failures, non-200 responses, invalid JSON, and
-`PersistedQueryNotSupported` are `INCONCLUSIVE`. This is diagnostic evidence,
+`PersistedQueryNotSupported` are `INCONCLUSIVE`. The probe exits non-zero when any
+hash is `BROKEN`, and the `Persisted Query Probe` workflow runs it daily.
+`ChannelPointsContext` and `PlaybackAccessToken` also retry with their query text
+when Twitch reports their hash missing, so these two survive a retired hash. This is diagnostic evidence,
 not a release gate or automatic hash-refresh mechanism; `REGISTERED` does not
 prove that an operation would execute with credentials or valid variables.
 Authenticated decoding reports exact `PersistedQueryNotFound` responses as the
 fixed `persisted-query-not-found` class and retains only the operation name.
 
 ## Remote endpoints and client identity
+
+GQL requests run at most eight at a time and start at least 50 ms apart, including
+retries. Response bodies have fixed limits: 8 MiB for GQL, 16 MiB for the homepage
+and settings script, and 1 MiB for playlists. A larger body fails the request.
 
 Every request target that Twitch supplies inside a document rather than one the
 miner compiles in is checked before use: the settings script, playback master
@@ -133,7 +142,9 @@ the next attempt without replaying missed ticks; it does not queue catch-up
 requests. Watch-selection work can still add time between passes.
 A full preflight performs one `PlaybackAccessToken` GQL request, one
 master-playlist GET, one selected media-playlist GET, and one
-newest-complete-segment HEAD before the spade POST. The media-playlist URL that
+newest-complete-segment HEAD before the spade POST. On a channel with an active
+Drop campaign the tick also sends a HEAD for each older segment the playlist
+lists, up to 16. Only the newest segment's result decides the tick. The media-playlist URL that
 passed it is then reused for the same channel and broadcast, so later ticks
 perform only the media-playlist GET and the segment HEAD. The URL is dropped
 when the broadcast ID changes, 60 seconds before the playback token's stated
@@ -212,8 +223,10 @@ authorize a channel. Completed, subscription-only, prerequisite-blocked, future
 and infeasible rewards do not receive deadline priority. Missing planning
 metadata retains the existing campaign/channel-order behavior without inventing
 eligibility or deadlines. Targets older than ten minutes lose deadline priority.
-This ranks rewards on tracked channels; it does not discover new channels or
-guarantee optimal global campaign coverage. Releasing a channel resets its
+This ranks rewards on tracked channels and does not guarantee optimal global
+campaign coverage. `drop_discovery_games` adds channels only at startup, through
+`DirectoryPage_Game` with the `DROPS_ENABLED` filter; a failed lookup logs a
+warning and startup continues. Releasing a channel resets its
 watched minutes; that reset must not send the campaign pin immediately back to
 it. A streak candidate arriving just after a fair rotation waits until the next
 turn instead of displacing a channel that has only just started watching.
@@ -233,7 +246,8 @@ Twitch will credit every partial watch interval.
 ## Offline streak recovery
 
 Offline streak recovery uses the three typed read-only operations above
-(`RewardList`, `FilterableVideoTower_Videos`, and `ClipsCards__User`). Archived
+(`RewardList`, `FilterableVideoTower_Videos`, and `ClipsCards__User`, searched
+with `LAST_DAY` then `LAST_WEEK`, up to three pages each). Archived
 videos require an ID, duration, and optional broadcast identifier; the scheduler
 accepts a VOD only when its broadcast identifier exactly matches the missed live
 broadcast and it is at least five minutes long. Clip nodes require an ID, slug,
@@ -244,11 +258,22 @@ reports recovery only when a later typed `RewardList` preserves the same non-nul
 streak count and removes the targeted broadcast from `missedStreams`, or clears
 the expiring-risk envelope entirely. Unconfirmed playback retains the short
 retry cooldown; only typed confirmation receives the recovery-window cooldown.
+With recovery enabled, an offline channel this run never saw go offline has its
+`RewardList` missed-stream list read at most every six hours, one channel per
+minute, so a broadcast that ended before the miner started can still be recovered.
 Unresolved streak state is also reconciled once after a confirmed bonus claim
 and once after accepted offline-recovery playback settles, using the typed
 milestone rather than treating either trigger as proof.
 
 ## Drops
+
+`ViewerDropsDashboard` reports a null `dropCampaigns` as a distinct "catalog
+withheld" error rather than an empty list, because Twitch returns null to
+sessions it will not show the catalog to. The canary fails on it.
+
+The `self.isAccountConnected` and `accountLinkURL` campaign fields, read from
+both the inventory and the catalog, drive `drop_account_link`. A withheld catalog
+only removes the catalog's contribution; the inventory's fields still apply.
 
 `DropsHighlightService_AvailableDrops` treats a null channel or null campaign
 list as an empty result, matching the Go reference, while every entry in a
@@ -256,7 +281,8 @@ present list still requires a non-empty campaign ID. Its typed result also
 gates `DROPS` watch priority when `farm_drops` is enabled. One typed inventory
 snapshot per selection refresh retains campaign IDs and marks an ID complete
 only when its non-empty drop list is explicitly fully claimed. Per-channel
-available IDs are filtered against that completed set. New, incomplete,
+available IDs are filtered against that completed set, and a campaign with a
+claimed reward but no remaining inventory row counts as completed. New, incomplete,
 missing-progress, and transient-failure cases remain eligible; completed
 campaigns release their pin so the spare points slot is not suppressed. Unknown
 and empty available-campaign results are not promoted, a broadcast/game change
@@ -427,6 +453,10 @@ previous session's report.
 
 ### PubSub compatibility
 
+After three connection failures in a row, a connection alternates between PubSub
+and `wss://hermes.twitch.tv/v1` on each further failure, and stays on whichever
+one then holds. Hermes carries the same topics and events.
+
 The isolated PubSub compatibility path connects to
 `wss://pubsub-edge.twitch.tv/v1`. It supplies viewer prediction discovery and
 result events, immediate point/bonus events, moment IDs, raid IDs, and
@@ -438,11 +468,22 @@ Each channel also gets an undocumented `video-playback-by-id` presence topic,
 listed after every other topic. Above the 500-topic limit (10 connections) the
 list is truncated with a warning, so presence topics are dropped first and the
 account topics are always kept.
+A connection that goes 60 seconds without a PONG is treated as dead and
+reconnected. PubSub, Hermes, and EventSub frames are limited to 1 MiB.
 Server-requested reconnects use the clean-close retry policy: a five-second base
 plus a deterministic per-connection offset of up to six seconds, with backoff
 for repeated short-lived connections. A
 connection lasting at least five minutes resets the retry count. Subscriptions
 must be acknowledged again before their capability is reported ready.
+
+Accounts that farm or claim Drops also listen on `user-drop-events.<user>`. A
+`drop-progress` message records that Twitch is crediting minutes, and a
+`drop-claim` message triggers an immediate inventory read and claim. Watched Drop
+channels that have had no such message for five minutes are checked with
+`DropCurrentSessionContext` every five minutes; a channel that credits nothing
+for 20 minutes loses Drop priority for 30 minutes, doubling up to four hours each
+time it stalls again until it earns a minute, and raises a `DROP_STATUS`
+event.
 
 ### IRC
 

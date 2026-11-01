@@ -123,5 +123,7 @@ fn event_kind(event: &MinerEvent) -> &'static str {
         MinerEvent::PredictionChannel { .. } => "prediction-channel",
         MinerEvent::PredictionUser { .. } => "prediction-user",
         MinerEvent::CommunityGoal { .. } => "community-goal",
+        MinerEvent::DropProgress { .. } => "drop-progress",
+        MinerEvent::DropReadyToClaim { .. } => "drop-ready",
     }
 }

@@ -11,6 +11,7 @@ mod client;
 mod errors;
 mod eventsub;
 mod hermes;
+mod hermes_client;
 mod parse;
 mod prediction;
 mod topics;
@@ -29,6 +30,7 @@ pub use hermes::{
     HERMES_MAX_REPLAY_FRAMES, HERMES_MAX_SUBSCRIPTIONS, HERMES_MAX_SUBSCRIPTION_ID_BYTES,
     HERMES_MAX_TOPIC_BYTES,
 };
+pub use hermes_client::{connect_hermes_topics_and_listen, HERMES_WEBSOCKET_URL};
 pub use parse::{
     bad_auth_cookie_file, channel_id_from_payload, parse_message, parse_transport_message,
 };

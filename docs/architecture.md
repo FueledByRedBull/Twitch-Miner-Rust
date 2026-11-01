@@ -18,9 +18,10 @@ responsibility:
   are separate modules behind one facade.
 - `tm-irc` owns IRC protocol handling.
 - `tm-runtime` owns the single-writer runtime state model.
-- `tm-observability` owns logging, privacy helpers, and Discord webhook payloads.
+- `tm-observability` owns logging, privacy helpers, and notification payloads.
 
-Discord is the sole built-in outbound notifier. Generic notifier backends and
+The built-in outbound notifiers are Discord and one generic JSON webhook, which
+reaches other services without per-provider code. Further notifier backends and
 analytics exporters are intentionally out of scope unless a concrete operator
 requirement justifies adding them.
 

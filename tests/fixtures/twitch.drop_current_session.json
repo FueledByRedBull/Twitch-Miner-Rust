@@ -1,0 +1,10 @@
+{
+  "data": {
+    "currentUser": {
+      "dropCurrentSession": {
+        "channel": { "id": "100" },
+        "currentMinutesWatched": 12
+      }
+    }
+  }
+}

@@ -49,6 +49,14 @@ pub enum MinerEvent {
         goal: Option<CommunityGoal>,
         goal_id: Option<String>,
     },
+    DropProgress {
+        drop_id: String,
+        current_minutes: i64,
+        required_minutes: i64,
+    },
+    DropReadyToClaim {
+        drop_instance_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

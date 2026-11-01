@@ -18,11 +18,11 @@ published container images.
 | Device-code login and session persistence | Parity | Current and legacy cookie fixtures; private atomic writes and backup. |
 | Explicit streamers, followers, exclusions, and priority lists | Parity | Config/runtime fixtures and orchestration tests. |
 | Channel-points context, bonus chest, streaks, and minute watching | Extended parity | Typed context, credit eligibility, fair rotation, bounded transient HLS retries, playback priming with a broadcast-bound playlist cache, and broadcast-bound streak recovery are fixture-tested. Exact contracts and limits are normative in the [protocol inventory](protocol-inventory.md). |
-| Drops and moments | Improved | Drop progress, campaign selection, and claims have independent controls and typed fixture coverage. Live evidence includes 14 progress/claim pairs; it does not claim exact campaign pin/unpin telemetry. |
+| Drops and moments | Improved | Drop progress, campaign selection, and claims have independent controls and typed fixture coverage. Claims also follow `user-drop-events` messages, channels that stop crediting are benched, and startup discovery can add channels for Drop games; these additions have no live evidence yet. Live evidence includes 14 progress/claim pairs; it does not claim exact campaign pin/unpin telemetry. |
 | Predictions and betting strategies | Parity | Domain decision and runtime-effect tests, including an explicit first-outcome tie contract shared with Go/Python, deterministic coverage of the application-injected `1..=5` stealth amount offset, Twitch's documented `10`-to-`250000` per-viewer stake bounds, a typed rejection when `makePrediction.error` is present (as Python and Java read it; the fixture is synthetic), and PubSub pending-state updates followed by terminal viewer results. |
 | Community goals and contributions | Parity | GQL/PubSub fixtures and contribution tests. |
-| EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | Typed, independently supervised transports with bounded reconnect, handoff, dedupe, and polling fallback. Like Go and Python, PubSub also subscribes each channel's `video-playback-by-id` presence topic; it is listed last, so the 500-topic limit drops it first. EventSub observes the raid lifecycle while PubSub supplies the legacy raid ID; live evidence records 20 successful raid mutations and 19 matching rewards within 15 minutes, and the unmatched observation is not called a mutation failure. This validates the hybrid boundary rather than an EventSub-only viewer contract. |
-| Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. Discord is the sole built-in notifier; see the [architecture](architecture.md). |
+| EventSub presence, PubSub viewer compatibility, IRC presence, and chat mentions | Improved | Typed, independently supervised transports with bounded reconnect, handoff, dedupe, and polling fallback. Event connections move to Hermes when PubSub keeps failing; this path has no live evidence yet. Like Go and Python, PubSub also subscribes each channel's `video-playback-by-id` presence topic; it is listed last, so the 500-topic limit drops it first. EventSub observes the raid lifecycle while PubSub supplies the legacy raid ID; live evidence records 20 successful raid mutations and 19 matching rewards within 15 minutes, and the unmatched observation is not called a mutation failure. This validates the hybrid boundary rather than an EventSub-only viewer contract. |
+| Discord notifications and anonymized logging | Parity | Event filtering, redaction, and payload tests. Discord and a generic JSON webhook are the built-in notifiers; see the [architecture](architecture.md). |
 | Log persistence | Improved | Size rotation, bounded archives, and 30-day archive pruning. |
 | Runtime supervision and health | Improved | Task-exit/panic supervision, separate activity/success freshness, and bounded recovery are status-tested. |
 | Docker amd64 and arm64 | Supported | One published manifest is verified for both child platforms, attestations, embedded revision, and smoke behavior. ARMv7 is not supported. |
@@ -94,5 +94,10 @@ comparison against that head shows the persisted-operation surface changed only
 by adding `ClipsCards__User` and `FilterableVideoTower_Videos`, with no removals
 and no hash rotations; both hashes already match this project's
 implementations. Advancing to the first green upstream revision would therefore
-remove the two documented Rust-only exceptions rather than add new ones. Broken
+remove those two documented Rust-only exceptions rather than add new ones. Broken
 upstream tests are never made an enforced gate here.
+
+Two more Rust-only operations back features the Go baseline does not have:
+`DirectoryPage_Game` for Drop channel discovery and `DropCurrentSessionContext` for
+Drop credit checks. The
+gate lists them by name, so any other new operation still fails it.

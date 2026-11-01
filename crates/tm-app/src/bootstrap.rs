@@ -168,6 +168,38 @@ pub(crate) async fn load_and_validate_existing_session(
     Ok(session)
 }
 
+/// Replaces the saved session with a token the user obtained some other way,
+/// for when device login is unavailable. The token never appears in arguments.
+pub(crate) async fn import_session_token(
+    config: &ConfigFile,
+    base_dir: &Path,
+    auth_client: &TwitchAuthClient,
+    token: &str,
+) -> Result<()> {
+    let username = normalized_username(&config.username)?;
+    let token = token.trim();
+    let token = token.strip_prefix("oauth:").unwrap_or(token);
+    if token.is_empty() {
+        return Err(anyhow!("no token on standard input"));
+    }
+    let validation = auth_client
+        .validate_login_details(token, &generate_device_id(), &username, DEFAULT_USER_AGENT)
+        .await
+        .context("validate imported token")?;
+    if validation.client_id.as_deref() != Some(tm_twitch::CLIENT_ID) {
+        eprintln!(
+            "warning: this token belongs to a different Twitch client; requests may be rejected"
+        );
+    }
+    let mut session = AuthSession::new(&username, tm_auth::CookieStore::new());
+    session.set_auth_token(token);
+    session.set_user_id(validation.user_id);
+    session.set_scopes(validation.scopes);
+    session.save_to_dir(base_dir)?;
+    println!("session token saved for {username}");
+    Ok(())
+}
+
 pub(crate) async fn load_or_login_session_with_auth_client(
     config: &ConfigFile,
     base_dir: &Path,
@@ -183,6 +215,7 @@ pub(crate) async fn load_or_login_session_with_auth_client(
     .await
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     config: &ConfigFile,
     base_dir: &Path,
@@ -218,6 +251,13 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
                         return Ok(session);
                     }
                     SavedSessionValidation::Reauthorize => {
+                        if refresh_saved_session(&mut session, auth_client, &device_id, &username)
+                            .await
+                        {
+                            session.save_to_dir(base_dir)?;
+                            tracing::info!(username = %username, "refreshed saved session");
+                            return Ok(session);
+                        }
                         tracing::warn!(
                             username = %username,
                             "saved cookies are invalid; starting device login"
@@ -256,7 +296,7 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     );
     let started = tokio::time::Instant::now();
     let mut poll_interval = prompt.interval;
-    let auth_token = loop {
+    let tokens = loop {
         if started.elapsed() >= prompt.expires_in {
             return Err(anyhow!("device code expired before authorization"));
         }
@@ -264,7 +304,7 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
             .poll_access_token(&device_id, &prompt.device_code)
             .await?
         {
-            TokenPollOutcome::AccessToken(token) => break token,
+            TokenPollOutcome::AccessToken(tokens) => break tokens,
             outcome @ (TokenPollOutcome::Pending | TokenPollOutcome::SlowDown) => {
                 poll_interval = outcome.next_interval(poll_interval);
                 tokio::time::sleep(poll_interval).await;
@@ -273,15 +313,67 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     };
 
     let validation = auth_client
-        .validate_login_details(&auth_token, &device_id, &username, DEFAULT_USER_AGENT)
+        .validate_login_details(
+            &tokens.access_token,
+            &device_id,
+            &username,
+            DEFAULT_USER_AGENT,
+        )
         .await?;
     let mut session = AuthSession::new(&username, tm_auth::CookieStore::new());
-    session.set_auth_token(auth_token);
+    session.set_auth_token(tokens.access_token);
+    if let Some(refresh_token) = tokens.refresh_token {
+        session.set_refresh_token(refresh_token);
+    }
     session.set_user_id(validation.user_id);
     session.set_scopes(validation.scopes);
     session.save_to_dir(base_dir)?;
     tracing::info!(username = %username, "device login completed");
     Ok(session)
+}
+
+/// Any failure here falls through to device login, which recovers every case.
+async fn refresh_saved_session(
+    session: &mut AuthSession,
+    auth_client: &TwitchAuthClient,
+    device_id: &str,
+    username: &str,
+) -> bool {
+    let Some(refresh_token) = session.refresh_token().map(str::to_string) else {
+        return false;
+    };
+    let tokens = match auth_client
+        .refresh_access_token(device_id, &refresh_token)
+        .await
+    {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            tracing::warn!(operation = "auth", %error, "session refresh failed");
+            return false;
+        }
+    };
+    let validation = match auth_client
+        .validate_login_details(
+            &tokens.access_token,
+            device_id,
+            username,
+            DEFAULT_USER_AGENT,
+        )
+        .await
+    {
+        Ok(validation) => validation,
+        Err(error) => {
+            tracing::warn!(operation = "auth", %error, "refreshed session failed validation");
+            return false;
+        }
+    };
+    session.set_auth_token(tokens.access_token);
+    if let Some(rotated) = tokens.refresh_token {
+        session.set_refresh_token(rotated);
+    }
+    session.set_user_id(validation.user_id);
+    session.set_scopes(validation.scopes);
+    true
 }
 
 async fn validate_saved_session_with_retry(
@@ -363,7 +455,7 @@ fn saved_session_retry_delay(
         .min(retry_max)
 }
 
-fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
+pub(crate) fn saved_session_requires_reauthorization(error: &AuthClientError) -> bool {
     matches!(
         error,
         AuthClientError::UnexpectedStatus { status, .. }

@@ -37,10 +37,10 @@ pub use parsers::{
 };
 pub use types::{
     ArchivedVideo, ChannelPointsContext, ClaimBonusOutcome, ClaimDropOutcome, ClaimedDropReward,
-    FollowersPage, GqlPersistedExtensions, GqlPersistedOperation, GqlPersistedQuery, GqlRequest,
-    InventoryDrop, InventorySnapshot, MinuteWatchedRequest, RecentClip, StreamInfo,
-    TwitchClientError, TwitchContractError, TwitchEndpoints, TwitchFailureClass,
-    ViewerDropsDashboard, WatchStreakMilestone,
+    DropCatalogCampaign, DropSession, FollowersPage, GqlPersistedExtensions, GqlPersistedOperation,
+    GqlPersistedQuery, GqlRequest, InventoryDrop, InventorySnapshot, MinuteWatchedRequest,
+    RecentClip, StreamInfo, TwitchClientError, TwitchContractError, TwitchEndpoints,
+    TwitchFailureClass, ViewerDropsDashboard, WatchStreakMilestone,
 };
 
 #[cfg(test)]

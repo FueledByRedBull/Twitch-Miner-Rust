@@ -26,12 +26,18 @@
   "game_exclude": [],
   "watch_priority": ["STREAK", "DROPS", "ORDER"],
   "followers_order": "DESC",
+  "drop_account_link": "linked",
+  "drop_discovery_games": [],
   "timezone": null,
   "privacy": {
     "anonymize_logs": true
   },
   "discord": {
     "webhook_api": "",
+    "events": []
+  },
+  "webhook": {
+    "url": "",
     "events": []
   },
   "streamer_overrides": {},

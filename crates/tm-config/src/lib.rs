@@ -105,10 +105,39 @@ pub struct PrivacyConfig {
     pub anonymize_logs: bool,
 }
 
+/// Which Drop campaigns may be farmed, by their game-account link requirement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DropAccountLink {
+    /// Skip campaigns whose game account this Twitch account has not linked.
+    #[default]
+    Linked,
+    /// Farm every campaign, including ones that cannot pay out until linked.
+    All,
+    /// Skip every campaign that involves a game account.
+    None,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DiscordConfig {
     pub webhook_api: String,
     pub events: Vec<String>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    pub url: String,
+    pub events: Vec<String>,
+}
+
+impl fmt::Debug for WebhookConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebhookConfig")
+            .field("url", &"<redacted>")
+            .field("events", &self.events)
+            .finish()
+    }
 }
 
 impl fmt::Debug for DiscordConfig {
@@ -160,10 +189,16 @@ pub struct ConfigFile {
     pub watch_priority: Vec<String>,
     #[serde(default)]
     pub followers_order: FollowersOrder,
+    #[serde(default)]
+    pub drop_account_link: DropAccountLink,
+    #[serde(default)]
+    pub drop_discovery_games: Vec<String>,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
     pub discord: DiscordConfig,
+    #[serde(default)]
+    pub webhook: WebhookConfig,
     pub streamer_overrides: HashMap<String, StreamerSettingsOverride>,
 }
 
@@ -210,9 +245,15 @@ pub fn default_config_value() -> Value {
         "game_exclude": [],
         "watch_priority": ["STREAK", "DROPS", "ORDER"],
         "followers_order": "DESC",
+        "drop_account_link": "linked",
+        "drop_discovery_games": [],
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
+        },
+        "webhook": {
+            "url": "",
+            "events": []
         },
         "discord": {
             "webhook_api": "",
@@ -328,7 +369,36 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     })
 }
 
+fn validate_notification_urls(config: &ConfigFile) -> Result<(), ConfigError> {
+    let discord = config.discord.webhook_api.trim();
+    if !discord.is_empty()
+        && ![
+            "discord.com",
+            "ptb.discord.com",
+            "canary.discord.com",
+            "discordapp.com",
+        ]
+        .iter()
+        .any(|host| discord.starts_with(&format!("https://{host}/api/webhooks/")))
+    {
+        return Err(ConfigError::Validation(String::from(
+            "config.discord.webhook_api must be a Discord webhook URL (https://discord.com/api/webhooks/...)",
+        )));
+    }
+    let webhook = config.webhook.url.trim();
+    let host = webhook
+        .strip_prefix("https://")
+        .or_else(|| webhook.strip_prefix("http://"));
+    if !webhook.is_empty() && host.is_none_or(|host| host.is_empty() || host.starts_with('/')) {
+        return Err(ConfigError::Validation(String::from(
+            "config.webhook.url must be an http:// or https:// URL",
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
+    validate_notification_urls(config)?;
     let username = config.username.trim().to_lowercase();
     if username.is_empty() || username == "your-twitch-username" {
         return Err(ConfigError::Validation(String::from(
@@ -814,10 +884,13 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "game_exclude",
     "watch_priority",
     "followers_order",
+    "drop_account_link",
+    "drop_discovery_games",
     "bet",
     "timezone",
     "privacy",
     "discord",
+    "webhook",
     "streamer_overrides",
 ];
 
@@ -837,6 +910,7 @@ const BET_CONFIG_KEYS: &[&str] = &[
 const FILTER_CONDITION_KEYS: &[&str] = &["by", "where", "value"];
 const PRIVACY_CONFIG_KEYS: &[&str] = &["anonymize_logs"];
 const DISCORD_CONFIG_KEYS: &[&str] = &["webhook_api", "events"];
+const WEBHOOK_CONFIG_KEYS: &[&str] = &["url", "events"];
 const STREAMER_OVERRIDE_KEYS: &[&str] = &[
     "make_predictions",
     "follow_raid",
@@ -859,6 +933,7 @@ fn validate_known_keys(value: &Value) -> Result<(), ConfigError> {
     validate_keys(root, "config", TOP_LEVEL_CONFIG_KEYS)?;
     validate_nested_keys(root, "privacy", "config.privacy", PRIVACY_CONFIG_KEYS)?;
     validate_nested_keys(root, "discord", "config.discord", DISCORD_CONFIG_KEYS)?;
+    validate_nested_keys(root, "webhook", "config.webhook", WEBHOOK_CONFIG_KEYS)?;
     validate_nested_keys(root, "bet", "config.bet", BET_CONFIG_KEYS)?;
 
     if let Some(bet) = root.get("bet").and_then(Value::as_object) {

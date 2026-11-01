@@ -12,6 +12,7 @@ use crate::utilities::time_now;
 
 const RECOVERY_WINDOW_SECONDS: i64 = 23 * 60 * 60 + 30 * 60;
 const RETRY_COOLDOWN_SECONDS: u64 = 15 * 60;
+const MISSED_STREAM_CHECK_INTERVAL_SECONDS: i64 = 6 * 60 * 60;
 const MIN_VOD_SECONDS: u32 = 5 * 60;
 const MAX_RECOVERY_SECONDS: u64 = 8 * 60;
 const VOD_EVENT_INTERVAL_SECONDS: u64 = 60;
@@ -41,6 +42,7 @@ pub(crate) fn spawn_streak_recovery_loop(
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut retry_after = HashMap::<String, OffsetDateTime>::new();
+        let mut missed_checks = HashMap::<String, OffsetDateTime>::new();
         loop {
             tokio::select! {
                 changed = stop.changed() => {
@@ -55,7 +57,18 @@ pub(crate) fn spawn_streak_recovery_loop(
                         health.failure("streak-recovery", "snapshot");
                         continue;
                     };
-                    let Some(streamer) = select_recovery_candidate(&snapshot.streamers, &retry_after, now) else {
+                    let candidate = match select_recovery_candidate(&snapshot.streamers, &retry_after, now) {
+                        Some(streamer) => Some(streamer),
+                        None => next_missed_stream_candidate(
+                            twitch.as_ref(),
+                            &snapshot.streamers,
+                            &mut missed_checks,
+                            &retry_after,
+                            now,
+                        )
+                        .await,
+                    };
+                    let Some(streamer) = candidate else {
                         health.success("streak-recovery");
                         continue;
                     };
@@ -119,6 +132,54 @@ fn select_recovery_candidate(
         .collect::<Vec<_>>();
     candidates.sort_by_key(|candidate| (candidate.0, candidate.1, candidate.2));
     candidates.first().map(|candidate| candidate.3.clone())
+}
+
+/// Covers broadcasts that ended before this run saw them go offline, which only
+/// Twitch's missed-stream list knows about. Reads one channel per call, at most
+/// once per interval, so a long channel list stays a slow background read.
+async fn next_missed_stream_candidate(
+    twitch: &TwitchClient,
+    streamers: &[Streamer],
+    checked_at: &mut HashMap<String, OffsetDateTime>,
+    retry_after: &HashMap<String, OffsetDateTime>,
+    now: OffsetDateTime,
+) -> Option<Streamer> {
+    let streamer = streamers.iter().find(|streamer| {
+        streamer.can_earn_channel_points()
+            && streamer.presence_known
+            && !streamer.is_online
+            && streamer.offline_at.is_none()
+            && streamer.settings.watch_streak
+            && streamer.settings.watch_streak_vod_recovery
+            && checked_at.get(&streamer.channel_id).is_none_or(|checked| {
+                (now - *checked).whole_seconds() >= MISSED_STREAM_CHECK_INTERVAL_SECONDS
+            })
+    })?;
+    checked_at.insert(streamer.channel_id.clone(), now);
+    let milestone = twitch
+        .fetch_watch_streak_milestone(&streamer.channel_id)
+        .await
+        .ok()??;
+    let broadcast_id = missed_broadcast_to_recover(&milestone, retry_after, now)?;
+    let mut candidate = streamer.clone();
+    candidate.stream.get_or_insert_default().broadcast_id = broadcast_id;
+    Some(candidate)
+}
+
+fn missed_broadcast_to_recover(
+    milestone: &WatchStreakMilestone,
+    retry_after: &HashMap<String, OffsetDateTime>,
+    now: OffsetDateTime,
+) -> Option<String> {
+    milestone
+        .missed_broadcast_ids
+        .iter()
+        .flatten()
+        .find(|id| {
+            milestone_targets_broadcast(milestone, id, now)
+                && retry_after.get(*id).is_none_or(|retry| *retry <= now)
+        })
+        .cloned()
 }
 
 async fn recover_streamer(
@@ -468,9 +529,9 @@ async fn preempted(runtime: &tm_runtime::RuntimeHandle, streamer: &Streamer) -> 
         })
         .is_none_or(|current| {
             current.is_online
-                || !current
+                || current
                     .stream
-                    .is_some_and(|stream| stream.watch_streak_missing)
+                    .is_some_and(|stream| !stream.watch_streak_missing)
         })
 }
 
@@ -555,7 +616,34 @@ fn log_unconfirmed(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    #[test]
+    fn missed_broadcast_needs_an_open_streak_and_no_pending_retry() {
+        use std::collections::HashMap;
+        let now = tm_domain::OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let milestone = tm_twitch::WatchStreakMilestone {
+            value: Some(3),
+            achievement_timestamp: now,
+            expires_at: Some(now + std::time::Duration::from_secs(60)),
+            missed_broadcast_ids: Some(vec![String::from("a"), String::from("b")]),
+        };
+        let choose = |retry: &HashMap<String, tm_domain::OffsetDateTime>| {
+            super::missed_broadcast_to_recover(&milestone, retry, now)
+        };
+        assert_eq!(choose(&HashMap::new()).as_deref(), Some("a"));
+        let waiting = HashMap::from([(String::from("a"), now + std::time::Duration::from_secs(1))]);
+        assert_eq!(choose(&waiting).as_deref(), Some("b"));
+        let expired = tm_twitch::WatchStreakMilestone {
+            expires_at: Some(now),
+            ..milestone.clone()
+        };
+        assert_eq!(
+            super::missed_broadcast_to_recover(&expired, &HashMap::new(), now),
+            None
+        );
+    }
+
     use super::*;
 
     fn ts(value: i64) -> OffsetDateTime {

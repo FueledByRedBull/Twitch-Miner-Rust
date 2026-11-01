@@ -2,6 +2,7 @@ use serde_json::json;
 
 use crate::types::GqlPersistedOperation;
 
+const CHANNEL_POINTS_CONTEXT_QUERY: &str = "query ChannelPointsContext($channelLogin: String!) { community: user(login: $channelLogin) { channel { self { communityPoints { balance availableClaim { id } activeMultipliers { factor } } } communityPointsSettings { isEnabled goals { id title isInStock pointsContributed amountNeeded perStreamUserMaximumContribution status } } } } }";
 const PLAYBACK_ACCESS_TOKEN_QUERY: &str = "query PlaybackAccessToken($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!, $platform: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } videoPlaybackAccessToken(id: $vodID, params: {platform: $platform, playerBackend: \"mediaplayer\", playerType: $playerType}) @include(if: $isVod) { value signature __typename } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,16 @@ pub const PERSISTED_OPERATION_CONTRACTS: &[PersistedOperationContract] = &[
         read_only: true,
     },
     PersistedOperationContract {
+        operation_name: "DropCurrentSessionContext",
+        sha256_hash: "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b",
+        read_only: true,
+    },
+    PersistedOperationContract {
+        operation_name: "DirectoryPage_Game",
+        sha256_hash: "86bcceb4e8b1a51256ff8eed8bd8aae4acacf80d737efe904f84f3aeadf8cafd",
+        read_only: true,
+    },
+    PersistedOperationContract {
         operation_name: "UserPointsContribution",
         sha256_hash: "23ff2c2d60708379131178742327ead913b93b1bd6f665517a6d9085b73f661f",
         read_only: true,
@@ -134,6 +145,11 @@ pub fn channel_points_context(channel_login: &str) -> GqlPersistedOperation {
         "374314de591e69925fce3ddc2bcf085796f56ebb8cad67a0daa3165c03adc345",
         json!({ "channelLogin": channel_login }),
     )
+}
+
+#[must_use]
+pub(crate) fn channel_points_context_fallback(channel_login: &str) -> GqlPersistedOperation {
+    channel_points_context(channel_login).with_query(CHANNEL_POINTS_CONTEXT_QUERY)
 }
 
 #[must_use]
@@ -203,12 +219,17 @@ pub fn recent_archived_videos(channel_login: &str) -> GqlPersistedOperation {
 }
 
 #[must_use]
-pub fn recent_clips(channel_login: &str) -> GqlPersistedOperation {
+pub fn recent_clips(
+    channel_login: &str,
+    filter: &str,
+    cursor: Option<&str>,
+) -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "ClipsCards__User",
         "1cd671bfa12cec480499c087319f26d21925e9695d1f80225aae6a4354f23088",
         json!({
-            "criteria": { "filter": "ALL_TIME" },
+            "criteria": { "filter": filter },
+            "cursor": cursor,
             "limit": 20,
             "login": channel_login.to_lowercase()
         }),
@@ -296,6 +317,41 @@ pub fn drops_highlight_service_available(channel_id: &str) -> GqlPersistedOperat
         "DropsHighlightService_AvailableDrops",
         "782dad0f032942260171d2d80a654f88bdd0c5a9dddc392e9bc92218a0f42d20",
         json!({ "channelID": channel_id }),
+    )
+}
+
+#[must_use]
+pub fn drop_current_session(channel_id: &str) -> GqlPersistedOperation {
+    GqlPersistedOperation::new(
+        "DropCurrentSessionContext",
+        "4d06b702d25d652afb9ef835d2a550031f1cf762b193523a92166f40ea3d142b",
+        json!({ "channelID": channel_id, "channelLogin": "" }),
+    )
+}
+
+/// Live channels of a game that have Drops enabled, most viewed first.
+#[must_use]
+pub fn drops_enabled_game_directory(slug: &str, limit: u32) -> GqlPersistedOperation {
+    GqlPersistedOperation::new(
+        "DirectoryPage_Game",
+        "86bcceb4e8b1a51256ff8eed8bd8aae4acacf80d737efe904f84f3aeadf8cafd",
+        json!({
+            "limit": limit,
+            "slug": slug,
+            "imageWidth": 50,
+            "includeCostreaming": false,
+            "options": {
+                "broadcasterLanguages": [],
+                "freeformTags": null,
+                "includeRestricted": ["SUB_ONLY_LIVE"],
+                "recommendationsContext": { "platform": "web" },
+                "sort": "VIEWER_COUNT",
+                "systemFilters": ["DROPS_ENABLED"],
+                "tags": [],
+                "requestID": "JIRA-VXP-2397",
+            },
+            "sortTypeIsRecency": false,
+        }),
     )
 }
 

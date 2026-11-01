@@ -13,13 +13,14 @@ use tm_domain::{Stream, MAX_PREDICTION_POINTS};
 
 use crate::contracts::{extract_build_id, extract_settings_script_url, extract_spade_url};
 use crate::cookies::{claim_bonus_cookie_header, is_twitch_cookie_url, merge_cookie_headers};
-use crate::hls::{lowest_bandwidth_variant_url, media_segment_url};
+use crate::hls::{lowest_bandwidth_variant_url, media_segment_urls};
 use crate::ids::{generate_client_session_id, generate_device_id, generate_transaction_id};
 use crate::parsers::minute_watched_request;
 use crate::responses::{
     archived_videos_from_typed, available_drop_campaign_ids_from_typed,
-    channel_points_context_from_typed, decode_gql_data, followers_page_from_typed,
-    inventory_snapshot_from_typed, is_persisted_query_not_found, recent_clips_from_typed,
+    channel_points_context_from_typed, decode_gql_data, drop_catalog_from_typed,
+    followers_page_from_typed, game_directory_logins_from_typed, inventory_snapshot_from_typed,
+    is_persisted_query_not_found, next_clips_cursor, recent_clips_from_typed,
     stream_info_from_typed, user_contributions_from_typed, validate_make_prediction_response,
     validate_typed_claim_bonus_response, validate_typed_claim_drop_response,
     validate_typed_community_goal_response, watch_streak_milestone_from_typed,
@@ -27,11 +28,11 @@ use crate::responses::{
 use crate::types::{
     ArchivedVideo, ArchivedVideosData, AvailableDropsData, ChannelPointsContext, ClaimBonusData,
     ClaimBonusOutcome, ClaimDropData, ClaimDropOutcome, CommunityGoalContributionData,
-    EmptyMutationData, FollowersData, GqlPersistedOperation, InventoryData, InventoryDrop,
+    DropCatalogCampaign, DropCatalogData, DropSession, DropSessionData, EmptyMutationData,
+    FollowersData, GameDirectoryData, GqlPersistedOperation, InventoryData, InventoryDrop,
     InventorySnapshot, LiveStatusData, MakePredictionData, PlaybackAccessTokenData, RecentClip,
     RecentClipsData, RewardListData, StreamInfo, StreamInfoData, TwitchClientError,
-    TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, ViewerDropsDashboard,
-    WatchStreakMilestone,
+    TwitchEndpoints, UserContributionData, UserIdData, UserLoginData, WatchStreakMilestone,
 };
 use crate::{operations, CLIENT_ID};
 
@@ -61,6 +62,8 @@ pub struct TwitchClient {
     playback_playlists: Mutex<std::collections::HashMap<String, CachedMediaPlaylist>>,
     playback_full_preflights: AtomicU64,
     playback_cached_ticks: AtomicU64,
+    gql_slots: tokio::sync::Semaphore,
+    gql_next_start: std::sync::Mutex<tokio::time::Instant>,
     endpoints: TwitchEndpoints,
 }
 
@@ -100,6 +103,20 @@ struct PlaybackTokenClaims {
 
 /// A cached playlist is dropped this long before its token expires.
 const PLAYBACK_TOKEN_EXPIRY_MARGIN_SECONDS: u64 = 60;
+const MAX_CONCURRENT_GQL_REQUESTS: usize = 8;
+const GQL_REQUEST_SPACING: Duration = Duration::from_millis(50);
+/// Far above any real response; these stop a hostile or broken endpoint from
+/// filling memory on a small device.
+const MAX_GQL_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PAGE_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PLAYLIST_BODY_BYTES: usize = 1024 * 1024;
+/// Bounds the clip search for one channel; each page holds 20 clips.
+const MAX_CLIP_PAGES: usize = 3;
+/// A live playlist lists a few seconds of video; this bounds a hostile one.
+const MAX_OLDER_SEGMENT_REQUESTS: usize = 16;
+/// Older segments are optional, so a slow CDN must leave the watch tick enough of
+/// its deadline to send the minute-watched event.
+const OLDER_SEGMENTS_BUDGET: Duration = Duration::from_secs(20);
 /// Upper bound on reuse, whatever expiry the token states.
 const PLAYBACK_PLAYLIST_MAX_AGE_SECONDS: u64 = 60 * 60;
 
@@ -194,6 +211,8 @@ impl TwitchClient {
             playback_playlists: Mutex::default(),
             playback_full_preflights: AtomicU64::new(0),
             playback_cached_ticks: AtomicU64::new(0),
+            gql_slots: tokio::sync::Semaphore::new(MAX_CONCURRENT_GQL_REQUESTS),
+            gql_next_start: std::sync::Mutex::new(tokio::time::Instant::now()),
             endpoints,
         }
     }
@@ -255,7 +274,9 @@ impl TwitchClient {
                 context: "fetch homepage",
             });
         }
-        let build_id = extract_build_id(&response.text().await?)?;
+        let build_id = extract_build_id(
+            &bounded_text(response, MAX_PAGE_BODY_BYTES, TwitchClientError::Http).await?,
+        )?;
         let mut cache = self
             .client_version
             .lock()
@@ -298,7 +319,9 @@ impl TwitchClient {
                 context: "fetch settings page",
             });
         }
-        Ok(extract_settings_script_url(&response.text().await?)?)
+        Ok(extract_settings_script_url(
+            &bounded_text(response, MAX_PAGE_BODY_BYTES, TwitchClientError::Http).await?,
+        )?)
     }
 
     pub async fn fetch_spade_url(&self, channel_login: &str) -> Result<String, TwitchClientError> {
@@ -339,7 +362,9 @@ impl TwitchClient {
                 context: "fetch settings script",
             });
         }
-        let spade_url = extract_spade_url(&response.text().await?)?;
+        let spade_url = extract_spade_url(
+            &bounded_text(response, MAX_PAGE_BODY_BYTES, TwitchClientError::Http).await?,
+        )?;
         // The settings script is fetched over TLS through the validated resolver,
         // but the spade value inside it is still unconstrained text and the
         // payload carries account identifiers. Hold it to the same bar as playback.
@@ -391,10 +416,21 @@ impl TwitchClient {
         &self,
         channel_login: &str,
     ) -> Result<ChannelPointsContext, TwitchClientError> {
-        let response: crate::types::ChannelPointsData = self
-            .post_gql_typed(&operations::channel_points_context(channel_login))
+        // Balance and bonus claims stop without this read, so a retired hash
+        // falls back to the query text as playback tokens do.
+        let mut payload = self
+            .post_gql_value(serde_json::to_value(operations::channel_points_context(
+                channel_login,
+            ))?)
             .await?;
-        channel_points_context_from_typed(response)
+        if is_persisted_query_not_found(&payload) {
+            payload = self
+                .post_gql_value(serde_json::to_value(
+                    operations::channel_points_context_fallback(channel_login),
+                )?)
+                .await?;
+        }
+        channel_points_context_from_typed(decode_gql_data(&payload, "ChannelPointsContext")?)
     }
 
     pub async fn is_stream_live(&self, channel_id: &str) -> Result<bool, TwitchClientError> {
@@ -414,7 +450,8 @@ impl TwitchClient {
         stream_info_from_typed(response)
     }
 
-    /// Requests the newest media segment of a live channel.
+    /// Requests the newest media segment of a live channel and, with
+    /// `all_segments`, the older segments its playlist still lists.
     ///
     /// With a non-empty `broadcast_id`, the media-playlist URL that passed the
     /// full preflight is reused for that broadcast until its playback token
@@ -424,6 +461,7 @@ impl TwitchClient {
         &self,
         channel_login: &str,
         broadcast_id: &str,
+        all_segments: bool,
     ) -> Result<(), TwitchClientError> {
         let channel_login = normalize_channel_login(channel_login)
             .ok_or(TwitchClientError::InvalidField("channel_login"))?;
@@ -433,7 +471,11 @@ impl TwitchClient {
         // worked. A tick that fails, or is cancelled by its caller's deadline
         // while waiting on a dead host, therefore cannot leave it behind.
         if let Some(cached) = self.take_media_playlist(&channel_login, broadcast_id) {
-            if self.prime_media_playlist(&cached.url).await.is_ok() {
+            if self
+                .prime_media_playlist(&cached.url, all_segments)
+                .await
+                .is_ok()
+            {
                 self.playback_cached_ticks.fetch_add(1, Ordering::Relaxed);
                 self.playback_playlists
                     .lock()
@@ -446,7 +488,8 @@ impl TwitchClient {
         }
 
         let (variant_url, expires_at_unix) = self.resolve_media_playlist(&channel_login).await?;
-        self.prime_media_playlist(&variant_url).await?;
+        self.prime_media_playlist(&variant_url, all_segments)
+            .await?;
         self.playback_full_preflights
             .fetch_add(1, Ordering::Relaxed);
         if let Some(expires_at_unix) = expires_at_unix.filter(|_| !broadcast_id.is_empty()) {
@@ -552,10 +595,10 @@ impl TwitchClient {
             });
         }
         let master_url = master.url().clone();
-        let master_body = master
-            .text()
-            .await
-            .map_err(|error| sanitize_playback_error(&error, "master playlist"))?;
+        let master_body = bounded_text(master, MAX_PLAYLIST_BODY_BYTES, |error| {
+            sanitize_playback_error(&error, "master playlist")
+        })
+        .await?;
         let variant_url = lowest_bandwidth_variant_url(&master_url, &master_body)?;
         let expires_at_unix = serde_json::from_str::<PlaybackTokenClaims>(&token.value)
             .ok()
@@ -566,6 +609,7 @@ impl TwitchClient {
     async fn prime_media_playlist(
         &self,
         variant_url: &reqwest::Url,
+        all_segments: bool,
     ) -> Result<(), TwitchClientError> {
         validate_remote_endpoint(
             variant_url,
@@ -588,11 +632,14 @@ impl TwitchClient {
             });
         }
         let variant_url = variant.url().clone();
-        let variant_body = variant
-            .text()
-            .await
-            .map_err(|error| sanitize_playback_error(&error, "media playlist"))?;
-        let segment_url = media_segment_url(&variant_url, &variant_body)?;
+        let variant_body = bounded_text(variant, MAX_PLAYLIST_BODY_BYTES, |error| {
+            sanitize_playback_error(&error, "media playlist")
+        })
+        .await?;
+        let mut segment_urls = media_segment_urls(&variant_url, &variant_body)?;
+        let segment_url = segment_urls
+            .pop()
+            .ok_or(TwitchClientError::MissingField("media playlist"))?;
         validate_remote_endpoint(
             &segment_url,
             "media playlist",
@@ -612,6 +659,31 @@ impl TwitchClient {
                 status: segment.status(),
                 context: "prime playback media segment",
             });
+        }
+        if all_segments {
+            // Older segments can age out of the CDN mid-tick, so only the
+            // newest one decides whether the tick succeeded.
+            let older_segments = async {
+                for url in segment_urls.iter().rev().take(MAX_OLDER_SEGMENT_REQUESTS) {
+                    if validate_remote_endpoint(
+                        url,
+                        "media playlist",
+                        self.allow_loopback_remote_endpoints,
+                    )
+                    .is_ok()
+                    {
+                        let _ = self
+                            .send_playback_read_request(
+                                remote_client,
+                                reqwest::Method::HEAD,
+                                url,
+                                "media segment",
+                            )
+                            .await;
+                    }
+                }
+            };
+            let _ = tokio::time::timeout(OLDER_SEGMENTS_BUDGET, older_segments).await;
         }
         Ok(())
     }
@@ -659,10 +731,30 @@ impl TwitchClient {
         &self,
         channel_login: &str,
     ) -> Result<Vec<RecentClip>, TwitchClientError> {
-        let response: RecentClipsData = self
-            .post_gql_typed(&operations::recent_clips(channel_login))
-            .await?;
-        recent_clips_from_typed(response)
+        let mut clips = Vec::new();
+        for filter in ["LAST_DAY", "LAST_WEEK"] {
+            let mut cursor = None;
+            for _ in 0..MAX_CLIP_PAGES {
+                let response: RecentClipsData = self
+                    .post_gql_typed(&operations::recent_clips(
+                        channel_login,
+                        filter,
+                        cursor.as_deref(),
+                    ))
+                    .await?;
+                cursor = next_clips_cursor(&response);
+                for clip in recent_clips_from_typed(response)? {
+                    // The week's list repeats the day's clips.
+                    if !clips.iter().any(|known: &RecentClip| known.id == clip.id) {
+                        clips.push(clip);
+                    }
+                }
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        Ok(clips)
     }
 
     pub async fn fetch_followers(
@@ -778,11 +870,24 @@ impl TwitchClient {
         inventory_snapshot_from_typed(response)
     }
 
-    pub async fn fetch_viewer_drops_dashboard_typed(
+    pub async fn fetch_drops_enabled_channels_typed(
         &self,
-    ) -> Result<ViewerDropsDashboard, TwitchClientError> {
-        self.post_gql_typed(&operations::viewer_drops_dashboard())
-            .await
+        game_slug: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, TwitchClientError> {
+        let response: GameDirectoryData = self
+            .post_gql_typed(&operations::drops_enabled_game_directory(game_slug, limit))
+            .await?;
+        Ok(game_directory_logins_from_typed(response))
+    }
+
+    pub async fn fetch_drop_catalog_typed(
+        &self,
+    ) -> Result<Vec<DropCatalogCampaign>, TwitchClientError> {
+        let response: DropCatalogData = self
+            .post_gql_typed(&operations::viewer_drops_dashboard())
+            .await?;
+        drop_catalog_from_typed(response)
     }
 
     pub async fn claim_drop(
@@ -799,6 +904,23 @@ impl TwitchClient {
             .post_mutation_typed(&operations::claim_drop_rewards(drop_instance_id))
             .await?;
         validate_typed_claim_drop_response(response)
+    }
+
+    /// `None` means Twitch is crediting no Drop to this account right now.
+    pub async fn fetch_drop_session_typed(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<DropSession>, TwitchClientError> {
+        let response: DropSessionData = self
+            .post_gql_typed(&operations::drop_current_session(channel_id))
+            .await?;
+        Ok(response
+            .current_user
+            .and_then(|user| user.session)
+            .map(|session| DropSession {
+                channel_id: session.channel.and_then(|channel| channel.id),
+                current_minutes: session.current_minutes_watched.unwrap_or_default(),
+            }))
     }
 
     pub async fn fetch_available_drop_campaigns_typed(
@@ -920,14 +1042,36 @@ impl TwitchClient {
         if retry_read_only {
             return self.send_read_gql_value(build_request, "post gql").await;
         }
-        let response = build_request().send().await?;
+        let response = self.send_paced_gql(build_request()).await?;
         if !response.status().is_success() {
             return Err(TwitchClientError::UnexpectedStatus {
                 status: response.status(),
                 context: "post gql",
             });
         }
-        Ok(response.json().await?)
+        bounded_json(response).await
+    }
+
+    /// Every GQL attempt, retries included, takes a turn: at most
+    /// `MAX_CONCURRENT_GQL_REQUESTS` run at once and they start `GQL_REQUEST_SPACING`
+    /// apart, so a long channel list cannot burst at Twitch.
+    async fn send_paced_gql(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        // The semaphore is owned by this client and never closed.
+        let _permit = self.gql_slots.acquire().await.ok();
+        let start_at = {
+            let mut next = self
+                .gql_next_start
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let start_at = next.max(tokio::time::Instant::now());
+            *next = start_at + GQL_REQUEST_SPACING;
+            start_at
+        };
+        tokio::time::sleep_until(start_at).await;
+        request.send().await
     }
 
     async fn send_read_gql_value<F>(
@@ -939,7 +1083,7 @@ impl TwitchClient {
         F: FnMut() -> reqwest::RequestBuilder,
     {
         for attempt in 0..MAX_READ_ATTEMPTS {
-            match build_request().send().await {
+            match self.send_paced_gql(build_request()).await {
                 Ok(response) => {
                     let status = response.status();
                     if is_retryable_read_status(status) && attempt + 1 < MAX_READ_ATTEMPTS {
@@ -951,7 +1095,7 @@ impl TwitchClient {
                     if !status.is_success() {
                         return Err(TwitchClientError::UnexpectedStatus { status, context });
                     }
-                    let payload = response.json().await?;
+                    let payload = bounded_json(response).await?;
                     if gql_has_only_transient_service_errors(&payload)
                         && attempt + 1 < MAX_READ_ATTEMPTS
                     {
@@ -1316,6 +1460,35 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         && !is_ietf_protocol_assignment
         && !is_documentation
         && !is_6to4
+}
+
+async fn bounded_body(
+    mut response: reqwest::Response,
+    limit: usize,
+    map_error: impl Fn(reqwest::Error) -> TwitchClientError,
+) -> Result<Vec<u8>, TwitchClientError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(&map_error)? {
+        if body.len() + chunk.len() > limit {
+            return Err(TwitchClientError::ResponseTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn bounded_text(
+    response: reqwest::Response,
+    limit: usize,
+    map_error: impl Fn(reqwest::Error) -> TwitchClientError,
+) -> Result<String, TwitchClientError> {
+    let body = bounded_body(response, limit, map_error).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+async fn bounded_json(response: reqwest::Response) -> Result<serde_json::Value, TwitchClientError> {
+    let body = bounded_body(response, MAX_GQL_BODY_BYTES, TwitchClientError::Http).await?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn sanitize_playback_error(error: &reqwest::Error, context: &'static str) -> TwitchClientError {

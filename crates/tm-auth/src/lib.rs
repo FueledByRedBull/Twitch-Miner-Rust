@@ -10,8 +10,8 @@ pub mod device_flow;
 pub mod session;
 
 pub use client::{
-    AuthClientError, AuthEndpoints, DeviceCodePrompt, LoginValidation, TokenPollOutcome,
-    TwitchAuthClient, ACTIVATE_URL,
+    AuthClientError, AuthEndpoints, DeviceCodePrompt, IssuedTokens, LoginValidation,
+    TokenPollOutcome, TwitchAuthClient, ACTIVATE_URL,
 };
 pub use cookies::{
     cookie_file_path, cookies_dir, decode_cookie_store, encode_cookie_store,
@@ -21,7 +21,8 @@ pub use cookies::{
 };
 pub use device_flow::{
     build_device_code_request, build_device_code_request_with_scope, build_token_poll_request,
-    build_validate_login_request, device_flow_scope, device_flow_scope_for_eventsub,
-    DeviceCodeResponse, DeviceFlowState, LoginValidationRequest, OAuthRequest,
+    build_token_refresh_request, build_validate_login_request, device_flow_scope,
+    device_flow_scope_for_eventsub, DeviceCodeResponse, DeviceFlowState, LoginValidationRequest,
+    OAuthRequest,
 };
 pub use session::{AuthSession, AuthSessionError};

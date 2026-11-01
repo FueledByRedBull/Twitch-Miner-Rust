@@ -598,7 +598,7 @@ fn persisted_operations_match_expected_names() {
         "FilterableVideoTower_Videos"
     );
     assert_eq!(
-        operations::recent_clips("abc").operation_name,
+        operations::recent_clips("abc", "LAST_DAY", None).operation_name,
         "ClipsCards__User"
     );
     assert_eq!(
@@ -614,6 +614,10 @@ fn persisted_operations_match_expected_names() {
         "DropsHighlightService_AvailableDrops"
     );
     assert_eq!(operations::inventory().operation_name, "Inventory");
+    assert_eq!(
+        operations::drop_current_session("1").operation_name,
+        "DropCurrentSessionContext"
+    );
 }
 
 #[test]
@@ -627,7 +631,7 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::playback_access_token("abc"),
         operations::reward_list("abc"),
         operations::recent_archived_videos("abc"),
-        operations::recent_clips("abc"),
+        operations::recent_clips("abc", "LAST_DAY", None),
         operations::claim_community_points("1", "2"),
         operations::community_moment_claim("moment"),
         operations::join_raid("raid"),
@@ -636,6 +640,8 @@ fn persisted_operation_inventory_matches_builders_and_has_unique_names() {
         operations::viewer_drops_dashboard(),
         operations::claim_drop_rewards("drop"),
         operations::drops_highlight_service_available("1"),
+        operations::drop_current_session("1"),
+        operations::drops_enabled_game_directory("game", 5),
         operations::user_points_contribution("abc"),
         operations::contribute_community_goal(1, "1", "goal", "transaction"),
     ];
@@ -988,7 +994,10 @@ async fn playback_network_errors_do_not_expose_tokenized_urls() {
         },
     );
 
-    let error = client.prime_live_playback("tester", "").await.unwrap_err();
+    let error = client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap_err();
     let message = error.to_string();
     assert!(matches!(error, TwitchClientError::PlaybackRequest { .. }));
     assert!(!message.contains("secret-signature"));
@@ -1029,7 +1038,7 @@ async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
         (200, ""),
     ]);
     client_for(&base_url)
-        .prime_live_playback("tester", "")
+        .prime_live_playback("tester", "", false)
         .await
         .unwrap();
     assert_eq!(requests.load(Ordering::SeqCst), 6);
@@ -1038,7 +1047,7 @@ async fn playback_hls_reads_retry_transient_failures_but_not_other_4xx() {
     let (base_url, requests, server) =
         spawn_http_server([(200, build_id), (200, token), (400, "")]);
     let error = client_for(&base_url)
-        .prime_live_playback("tester", "")
+        .prime_live_playback("tester", "", false)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1166,8 +1175,14 @@ async fn playback_priming_without_a_broadcast_repeats_all_four_requests() {
         endpoints,
     );
 
-    client.prime_live_playback("tester", "").await.unwrap();
-    client.prime_live_playback("tester", "").await.unwrap();
+    client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     let requests = requests.lock().unwrap();
@@ -1225,7 +1240,10 @@ async fn playback_query_is_sent_only_after_persisted_hash_miss() {
         endpoints,
     );
 
-    client.prime_live_playback("tester", "").await.unwrap();
+    client
+        .prime_live_playback("tester", "", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     let requests = requests.lock().unwrap();
@@ -1668,6 +1686,9 @@ fn spawn_caching_playback_server(
                 )
             } else if request.starts_with("HEAD /segment.ts") {
                 String::new()
+            } else if request.starts_with("HEAD /older-segment.ts") {
+                status = "404 Not Found";
+                String::new()
             } else {
                 panic!("unexpected playback request: {request}");
             };
@@ -1725,16 +1746,46 @@ fn playback_test_client(endpoints: TwitchEndpoints) -> TwitchClient {
 }
 
 #[tokio::test]
+async fn drop_playback_requests_older_segments_and_tolerates_their_failure() {
+    // Client version, one full preflight, one older-segment HEAD that fails.
+    let (endpoints, requests, server) =
+        spawn_caching_playback_server(1 + 4 + 1, unix_now() + 3600, None, false);
+    let client = playback_test_client(endpoints);
+
+    client
+        .prime_live_playback("tester", "first", true)
+        .await
+        .unwrap();
+    server.join().unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(playback_request_counts(&requests), [1, 1, 1, 1]);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("HEAD /older-segment.ts"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn playback_reuses_the_media_playlist_until_the_broadcast_changes() {
     // Client version, one full preflight, one cached tick, one full preflight.
     let (endpoints, requests, server) =
         spawn_caching_playback_server(1 + 4 + 2 + 4, unix_now() + 3600, None, false);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
-    client.prime_live_playback("tester", "first").await.unwrap();
     client
-        .prime_live_playback("tester", "second")
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "second", false)
         .await
         .unwrap();
     server.join().unwrap();
@@ -1752,8 +1803,14 @@ async fn playback_does_not_reuse_a_playlist_whose_token_is_about_to_expire() {
         spawn_caching_playback_server(1 + 4 + 4, unix_now() + 30, None, false);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     assert_eq!(
@@ -1769,8 +1826,14 @@ async fn failed_cached_playlist_gets_one_full_preflight() {
         spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), false);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
     server.join().unwrap();
 
     assert_eq!(
@@ -1786,14 +1849,20 @@ async fn cancelled_cached_tick_does_not_keep_the_cached_playlist() {
         spawn_caching_playback_server(1 + 4 + 1 + 4, unix_now() + 3600, Some(2), true);
     let client = playback_test_client(endpoints);
 
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
     tokio::time::timeout(
         Duration::from_millis(100),
-        client.prime_live_playback("tester", "first"),
+        client.prime_live_playback("tester", "first", false),
     )
     .await
     .unwrap_err();
-    client.prime_live_playback("tester", "first").await.unwrap();
+    client
+        .prime_live_playback("tester", "first", false)
+        .await
+        .unwrap();
 
     assert_eq!(
         playback_request_counts(&requests.lock().unwrap()),
@@ -2693,4 +2762,202 @@ fn integrity_failures_are_classified_separately_from_other_gql_errors() {
         decode_gql_data::<serde_json::Value>(&other, "Inventory"),
         Err(TwitchClientError::GqlErrors { .. })
     ));
+}
+
+#[test]
+fn null_drop_catalog_is_withheld_and_an_empty_one_is_not() {
+    let decode = |payload: serde_json::Value| {
+        crate::responses::drop_catalog_from_typed(serde_json::from_value(payload).unwrap())
+    };
+    assert!(matches!(
+        decode(serde_json::json!({ "currentUser": { "dropCampaigns": null } })),
+        Err(TwitchClientError::DropCatalogWithheld)
+    ));
+    assert!(
+        decode(serde_json::json!({ "currentUser": { "dropCampaigns": [] } }))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        decode(serde_json::json!({
+            "currentUser": { "dropCampaigns": [{ "id": "c", "status": "ACTIVE" }] }
+        }))
+        .unwrap()[0]
+            .id
+            .as_deref(),
+        Some("c")
+    );
+}
+
+#[test]
+fn game_directory_keeps_only_channels_with_a_login() {
+    let decode = |payload: serde_json::Value| {
+        crate::responses::game_directory_logins_from_typed(serde_json::from_value(payload).unwrap())
+    };
+    assert!(decode(serde_json::json!({ "game": null })).is_empty());
+    assert_eq!(
+        decode(serde_json::json!({ "game": { "streams": { "edges": [
+            { "node": { "broadcaster": { "login": "alice" } } },
+            { "node": { "broadcaster": null } },
+            { "node": null },
+            { "node": { "broadcaster": { "login": " " } } },
+        ] } } })),
+        vec![String::from("alice")]
+    );
+}
+
+#[tokio::test]
+async fn channel_points_context_retries_with_query_text_when_the_hash_is_retired() {
+    let (base_url, requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, r#"{"errors":[{"message":"PersistedQueryNotFound"}]}"#),
+        (
+            200,
+            r#"{"data":{"community":{"channel":{"self":{"communityPoints":{"balance":7}}}}}}"#,
+        ),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let context = client.fetch_channel_points_context("tester").await.unwrap();
+    server.join().unwrap();
+    assert_eq!(context.balance, 7);
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn recent_clips_search_the_day_then_the_week_and_follow_pages() {
+    let clip = |id: &str| {
+        format!(
+            r#"{{"cursor":"after-{id}","node":{{"id":"{id}","slug":"s","url":"u","durationSeconds":5.0}}}}"#
+        )
+    };
+    let page = |clip: String, more: bool| {
+        format!(
+            r#"{{"data":{{"user":{{"clips":{{"edges":[{clip}],"pageInfo":{{"hasNextPage":{more}}}}}}}}}}}"#
+        )
+    };
+    let day_first: &'static str = Box::leak(page(clip("a"), true).into_boxed_str());
+    let day_second: &'static str = Box::leak(page(clip("b"), false).into_boxed_str());
+    let week: &'static str = Box::leak(page(clip("b"), false).into_boxed_str());
+    let (base_url, requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, day_first),
+        (200, day_second),
+        (200, week),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    let clips = client.fetch_recent_clips("tester").await.unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        clips
+            .iter()
+            .map(|clip| clip.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn oversized_gql_response_is_rejected_without_being_buffered() {
+    let oversized: &'static str = Box::leak(" ".repeat(8 * 1024 * 1024 + 1).into_boxed_str());
+    let (base_url, _requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, oversized),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+    assert!(matches!(
+        client.fetch_channel_id("tester").await,
+        Err(TwitchClientError::ResponseTooLarge)
+    ));
+    server.join().unwrap();
+}
+
+#[tokio::test]
+async fn gql_requests_start_spaced_apart() {
+    let (base_url, _requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (200, r#"{"data":{"user":{"id":"1"}}}"#),
+        (200, r#"{"data":{"user":{"id":"1"}}}"#),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::new(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: format!("{base_url}/gql"),
+            ..TwitchEndpoints::default()
+        },
+    );
+    let started = tokio::time::Instant::now();
+    client.fetch_channel_id("tester").await.unwrap();
+    client.fetch_channel_id("tester").await.unwrap();
+    server.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(50));
+}
+
+#[test]
+fn drop_session_and_directory_fixtures() {
+    let session: types::GqlResponse<types::DropSessionData> =
+        serde_json::from_value(protocol_fixture("twitch.drop_current_session.json")).unwrap();
+    let session = session.data.unwrap().current_user.unwrap().session.unwrap();
+    assert_eq!(session.channel.unwrap().id.as_deref(), Some("100"));
+    assert_eq!(session.current_minutes_watched, Some(12));
+
+    let directory: types::GqlResponse<types::GameDirectoryData> =
+        serde_json::from_value(protocol_fixture("twitch.game_directory.json")).unwrap();
+    assert_eq!(
+        crate::responses::game_directory_logins_from_typed(directory.data.unwrap()),
+        vec![String::from("alice")]
+    );
 }

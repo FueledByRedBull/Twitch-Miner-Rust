@@ -263,3 +263,34 @@ fn watch_status_notification_respects_event_filter() {
     webhook.events = vec![Event::StreamerOnline];
     assert!(discord_message(&webhook, "Overdue first credit", Some(Event::WatchStatus)).is_none());
 }
+
+#[test]
+fn every_event_name_round_trips() {
+    for event in [
+        Event::Startup,
+        Event::Shutdown,
+        Event::StreamerOnline,
+        Event::StreamerOffline,
+        Event::GainForRaid,
+        Event::GainForClaim,
+        Event::GainForWatch,
+        Event::GainForWatchStreak,
+        Event::BetWin,
+        Event::BetLose,
+        Event::BetRefund,
+        Event::BetFilters,
+        Event::BetGeneral,
+        Event::BetFailed,
+        Event::BetStart,
+        Event::BonusClaim,
+        Event::MomentClaim,
+        Event::JoinRaid,
+        Event::DropClaim,
+        Event::DropStatus,
+        Event::ChatMention,
+        Event::WatchStatus,
+        Event::SessionLost,
+    ] {
+        assert_eq!(normalize_event_name(event_name(event)), Some(event));
+    }
+}

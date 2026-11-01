@@ -1,6 +1,51 @@
 # Changelog
 
-## 0.3.6 - Unreleased
+## 0.3.7 - Unreleased
+
+- Channels with an active Drop campaign now request every segment their media
+  playlist lists each minute, not only the newest one, because Twitch stopped
+  crediting Drop progress from the newest segment alone.
+- The minute-watched event now states `location: channel`, as a browser watching
+  the channel does.
+- The miner checks its session every 10 minutes and exits with a failure status
+  once Twitch rejects it, with a new `SESSION_LOST` Discord event. Before, a
+  revoked token left it running without earning.
+- Device login now saves Twitch's refresh token, and a rejected session is
+  refreshed before the miner asks for a new device code.
+- `--import-token` saves a Twitch token read from standard input, for when device
+  login is unavailable.
+- The miner listens for Twitch's Drop events, so rewards are claimed as soon as
+  they are ready, and benches a channel for 30 minutes (doubling to at most four
+  hours if it keeps stalling) if it credits no Drop
+  minutes for 20 minutes.
+- The canary now fails when Twitch withholds the Drop campaign catalog. It used to
+  pass on the null response.
+- New `drop_account_link` setting. By default the miner no longer spends watch time
+  on campaigns whose game account is not linked, since they cannot pay out.
+- A channel offering a campaign you have not started now gets `DROPS` priority.
+  Before, a campaign had to appear in your inventory first, and it only appears
+  once started.
+- New `drop_discovery_games` setting adds live channels with Drops enabled for the
+  games you list, each time the miner starts.
+- `ChannelPointsContext` retries with its query text when Twitch retires its hash.
+- Clip search looks at the last day and then the last week, across pages, so a
+  recent clip is no longer missed behind a channel's all-time top clips.
+- Streak recovery now also uses Twitch's missed-stream list, so it can recover a
+  broadcast that ended before the miner started.
+- Event connections fail over to Twitch's Hermes transport after three failures in
+  a row, so predictions, moments, and raids keep working if PubSub goes away.
+- New `webhook` setting posts chosen events as JSON to any HTTP endpoint.
+- `DROP_STATUS` events now fire. They report each quarter of a Drop's progress and
+  channels benched for not crediting; the name was accepted before but never sent.
+- Discord events wait out a rate limit and retry, and a deleted webhook gets its own
+  log class. Discord and webhook URLs are now checked when the configuration loads.
+- GQL requests are paced and capped at eight at a time. Response bodies and event
+  connection frames have size limits, and a dead PubSub connection is noticed in about
+  a minute
+  instead of five.
+- `apq_probe` exits non-zero on a broken hash, and a daily workflow now runs it.
+
+## 0.3.6 - 2026-10-27
 
 - `verify-release-evidence.ps1` keeps the record's timestamps as text under
   PowerShell 7, which needs 7.5 or later. PowerShell 7 parsed them into dates,
