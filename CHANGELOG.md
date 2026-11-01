@@ -15,7 +15,8 @@
 - `--import-token` saves a Twitch token read from standard input, for when device
   login is unavailable.
 - The miner listens for Twitch's Drop events, so rewards are claimed as soon as
-  they are ready, and benches a channel for 30 minutes if it credits no Drop
+  they are ready, and benches a channel for 30 minutes (doubling to at most four
+  hours if it keeps stalling) if it credits no Drop
   minutes for 20 minutes.
 - The canary now fails when Twitch withholds the Drop campaign catalog. It used to
   pass on the null response.

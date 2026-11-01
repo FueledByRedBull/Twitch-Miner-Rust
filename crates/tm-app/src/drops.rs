@@ -17,6 +17,9 @@ const MAX_TRACKED_CLAIMS: usize = 256;
 const DROP_STALL_WINDOW: Duration = Duration::from_secs(20 * 60);
 const DROP_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DROP_STALL_BENCH: Duration = Duration::from_secs(30 * 60);
+/// A channel that keeps stalling, such as one whose campaign needs a subscription,
+/// sits out twice as long each time, up to this long.
+const DROP_STALL_MAX_BENCH: Duration = Duration::from_secs(4 * 60 * 60);
 
 #[derive(Clone, Default)]
 pub(crate) struct DropClaimCoordinator {
@@ -35,6 +38,8 @@ struct DropClaimState {
     announced_quarters: HashMap<String, i64>,
     watches: HashMap<String, DropChannelWatch>,
     benched: HashMap<String, Instant>,
+    /// Benches a channel has served since it last earned a Drop minute.
+    bench_strikes: HashMap<String, u32>,
 }
 
 struct DropChannelWatch {
@@ -149,17 +154,29 @@ impl DropClaimCoordinator {
             .and_then(|session| session.channel_id.as_deref())
             .is_some_and(|credited| credited != channel_id);
         let minutes = session.map(|session| session.current_minutes);
-        if credited_elsewhere || (minutes.is_some() && minutes != watch.minutes) {
+        let changed = minutes.is_some() && minutes != watch.minutes;
+        let earned = changed && watch.minutes.is_some() && !credited_elsewhere;
+        if credited_elsewhere || changed {
             watch.progressed_at = now;
         }
         watch.minutes = minutes;
-        if now.duration_since(watch.progressed_at) < DROP_STALL_WINDOW {
+        let progressed_at = watch.progressed_at;
+        if earned {
+            state.bench_strikes.remove(channel_id);
+        }
+        if now.duration_since(progressed_at) < DROP_STALL_WINDOW {
             return false;
         }
         state.watches.remove(channel_id);
-        state
-            .benched
-            .insert(channel_id.to_string(), now + DROP_STALL_BENCH);
+        let strikes = state
+            .bench_strikes
+            .entry(channel_id.to_string())
+            .or_insert(0);
+        let bench = DROP_STALL_BENCH
+            .saturating_mul(2_u32.saturating_pow(*strikes))
+            .min(DROP_STALL_MAX_BENCH);
+        *strikes = strikes.saturating_add(1);
+        state.benched.insert(channel_id.to_string(), now + bench);
         true
     }
 
@@ -426,11 +443,11 @@ pub(crate) async fn check_drop_stall(
     tracing::warn!(
         task = "drop",
         error_class = "drop-progress-stalled",
-        "no Drop progress on {name}; trying other channels for 30 minutes"
+        "no Drop progress on {name}; trying other channels for now"
     );
     observability.spawn_event(
         DiscordEvent::DropStatus,
-        format!("No Drop progress on {name}; trying other channels for 30 minutes"),
+        format!("No Drop progress on {name}; trying other channels for now"),
     );
 }
 
@@ -707,6 +724,52 @@ mod tests {
         assert_eq!(milestone(30), None);
         assert_eq!(milestone(60), None);
         assert_eq!(coordinator.progress_milestone("zero", 1, 0), None);
+    }
+
+    #[test]
+    fn repeated_stalls_double_the_bench_until_a_minute_is_earned() {
+        let coordinator = super::DropClaimCoordinator::default();
+        let start = Instant::now();
+        let session = |minutes: i64| tm_twitch::DropSession {
+            channel_id: Some(String::from("a")),
+            current_minutes: minutes,
+        };
+        // Watches with no credit, checking every five minutes, until benched.
+        let stall = |from: Instant| {
+            let at = |step: u32| from + super::DROP_STALL_CHECK_INTERVAL * step;
+            for step in 0..4 {
+                coordinator.stall_check_due("a", at(step));
+                assert!(!coordinator.observe_drop_session("a", None, at(step)));
+            }
+            coordinator.stall_check_due("a", at(4));
+            assert!(coordinator.observe_drop_session("a", None, at(4)));
+            at(4)
+        };
+        let minutes = |count: u64| Duration::from_secs(count * 60);
+
+        let benched_at = stall(start);
+        assert!(coordinator.is_benched("a", benched_at + minutes(29)));
+        assert!(!coordinator.is_benched("a", benched_at + minutes(31)));
+
+        let benched_at = stall(benched_at + minutes(31));
+        assert!(coordinator.is_benched("a", benched_at + minutes(59)));
+        assert!(!coordinator.is_benched("a", benched_at + minutes(61)));
+
+        let mut benched_at = benched_at + minutes(61);
+        for _ in 0..6 {
+            benched_at = stall(benched_at) + super::DROP_STALL_MAX_BENCH;
+        }
+        benched_at = stall(benched_at);
+        assert!(coordinator.is_benched("a", benched_at + minutes(239)));
+        assert!(!coordinator.is_benched("a", benched_at + minutes(241)));
+
+        // Earning a minute clears the record, so the next stall starts at 30 again.
+        let back = benched_at + minutes(241);
+        coordinator.stall_check_due("a", back);
+        assert!(!coordinator.observe_drop_session("a", Some(&session(1)), back));
+        assert!(!coordinator.observe_drop_session("a", Some(&session(2)), back + minutes(5)));
+        let benched_at = stall(back + minutes(10));
+        assert!(!coordinator.is_benched("a", benched_at + minutes(31)));
     }
 
     #[test]

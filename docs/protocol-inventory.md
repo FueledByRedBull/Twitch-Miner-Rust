@@ -481,7 +481,8 @@ Accounts that farm or claim Drops also listen on `user-drop-events.<user>`. A
 `drop-claim` message triggers an immediate inventory read and claim. Watched Drop
 channels that have had no such message for five minutes are checked with
 `DropCurrentSessionContext` every five minutes; a channel that credits nothing
-for 20 minutes loses Drop priority for 30 minutes and raises a `DROP_STATUS`
+for 20 minutes loses Drop priority for 30 minutes, doubling up to four hours each
+time it stalls again until it earns a minute, and raises a `DROP_STATUS`
 event.
 
 ### IRC
