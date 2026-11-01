@@ -430,6 +430,53 @@ fn preview_reports_migration_without_writing_and_write_back_creates_backup() {
 }
 
 #[test]
+fn existing_config_stays_readable_by_a_rollback_release() {
+    let dir = unique_temp_dir("rollback-readable");
+    fs::create_dir_all(&dir).unwrap();
+
+    let mut previous_release = default_config_value();
+    for key in OPT_IN_TOP_LEVEL_KEYS {
+        previous_release.as_object_mut().unwrap().remove(*key);
+    }
+    let path = dir.join("config.json");
+    let original = serde_json::to_vec_pretty(&previous_release).unwrap();
+    fs::write(&path, &original).unwrap();
+    let config = load_or_create_config(&path).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(config.drop_account_link, DropAccountLink::Linked);
+    assert!(config.drop_discovery_games.is_empty());
+    assert!(config.webhook.url.is_empty());
+
+    let migrated_path = dir.join("migrated.json");
+    fs::write(&migrated_path, br#"{"username":"Alice"}"#).unwrap();
+    load_or_create_config(&migrated_path).unwrap();
+    let migrated: Value = serde_json::from_slice(&fs::read(&migrated_path).unwrap()).unwrap();
+    for key in OPT_IN_TOP_LEVEL_KEYS {
+        assert!(migrated.get(*key).is_none(), "{key} was written");
+    }
+
+    let chosen_path = dir.join("chosen.json");
+    fs::write(
+        &chosen_path,
+        br#"{"username":"Alice","drop_account_link":"all"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_or_create_config(&chosen_path)
+            .unwrap()
+            .drop_account_link,
+        DropAccountLink::All
+    );
+
+    let fresh_path = dir.join("fresh.json");
+    load_or_create_config(&fresh_path).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh_path).unwrap()).unwrap();
+    for key in OPT_IN_TOP_LEVEL_KEYS {
+        assert!(fresh.get(*key).is_some(), "{key} missing from a new file");
+    }
+}
+
+#[test]
 fn atomic_write_replaces_existing_file_and_cleans_failed_temporary_files() {
     let dir = unique_temp_dir("atomic-write");
     fs::create_dir_all(&dir).unwrap();
