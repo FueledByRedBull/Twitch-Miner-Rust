@@ -1,0 +1,67 @@
+# systemd unit for running the static release binary without Docker. Installation,
+# the dedicated user, and the optional session key are described in
+# docs/operations.md#running-without-docker. Written for systemd 250 or newer.
+[Unit]
+Description=Twitch channel-points miner
+Documentation=https://github.com/FueledByRedBull/Twitch-Miner-Rust/blob/main/docs/operations.md
+After=network-online.target
+Wants=network-online.target
+# A crash loop stops after five starts in ten minutes instead of repeating
+# forever; clear it with `systemctl reset-failed twitch-miner`.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=twitch-miner
+Group=twitch-miner
+ExecStart=/usr/local/bin/twitch-miner --data-dir /var/lib/twitch-miner
+# A clean exit (SIGTERM, `systemctl stop`) is not restarted. A lost session, a
+# failed background task, or an expired device login exits with an error, and
+# the restart delay keeps a persistent failure from repeating device-login
+# notifications every few seconds.
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+UMask=0077
+
+# The miner writes only inside its data directory: configuration, session,
+# logs, earnings ledger, runtime status, and every temporary file are created
+# beside the file they replace. StateDirectory= makes that directory the only
+# writable path under ProtectSystem=strict.
+StateDirectory=twitch-miner
+StateDirectoryMode=0700
+
+# Optional session encryption: put the 64-hex-character key in a root-owned file
+# and uncomment both lines. The key is then readable only by this service.
+#LoadCredential=session-key:/etc/twitch-miner/session.key
+#Environment=TCPM_COOKIE_KEY_FILE=%d/session-key
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+# AF_UNIX is required: the async runtime's signal handling uses a socket pair.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+#!/sbin/openrc-run
+# OpenRC service for running the static release binary without Docker.
+# Installation and the dedicated user are described in
+# docs/operations.md#running-without-docker.
+#
+# Optional session encryption: in /etc/conf.d/twitch-miner add
+#   export TCPM_COOKIE_KEY_FILE=/etc/twitch-miner/session.key
+# with a key file owned by twitch-miner and mode 0600.
+
+name="twitch-miner"
+description="Twitch channel-points miner"
+
+supervisor=supervise-daemon
+command="/usr/local/bin/twitch-miner"
+command_args="--data-dir /var/lib/twitch-miner"
+command_user="twitch-miner:twitch-miner"
+directory="/var/lib/twitch-miner"
+umask=077
+
+# The miner logs to standard output and standard error; keep both in syslog.
+output_logger="logger -t twitch-miner -p daemon.info"
+error_logger="logger -t twitch-miner -p daemon.err"
+
+# supervise-daemon restarts the miner whenever it exits without being stopped.
+# The delay keeps a persistent failure from repeating device-login notifications
+# every few seconds, and the miner is left stopped after six exits within ten
+# minutes.
+respawn_delay=30
+respawn_max=5
+respawn_period=600
+retry="SIGTERM/30/SIGKILL/5"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath --directory --owner "$command_user" --mode 0700 "$directory"
+}

@@ -120,6 +120,228 @@ To watch logs, run the miner in the foreground. For a background process,
 redirect `stdout` and `stderr` to `run.out.log` and `run.err.log`, follow them
 with `Get-Content -Wait`, and stop the process with `Stop-Process`.
 
+## Running without Docker
+
+The `Release Binaries` workflow builds one archive per target for tags and
+manual runs:
+
+| Target | Built on | Executed in CI |
+| --- | --- | --- |
+| `x86_64-unknown-linux-musl` | Ubuntu 24.04 | yes |
+| `aarch64-unknown-linux-musl` | Ubuntu 24.04 Arm | yes |
+| `armv7-unknown-linux-musleabihf` | Ubuntu 24.04, cross-compiled | no: no hosted runner has an ARMv7 CPU, so CI only checks that the file is a static 32-bit ARM executable |
+| `x86_64-apple-darwin` | macOS 15 Intel | yes |
+| `aarch64-apple-darwin` | macOS 15 Arm | yes |
+
+The Linux binaries are static and run on any distribution, including Alpine.
+The ARMv7 build targets hard-float ARMv7 such as a 32-bit Raspberry Pi OS on a
+Pi 2 or newer; ARMv6 (Pi 1, Pi Zero) is not supported, and the Docker images
+remain AMD64 and ARM64 only. The macOS binaries are not signed or notarized; a
+browser download carries a quarantine flag that
+`xattr -d com.apple.quarantine twitch-miner` removes. Windows uses the ZIP and
+MSI described in [Running on Windows](#running-on-windows).
+
+Each archive is named `twitch-miner-<version>-<target>.tar.gz` and holds the
+`twitch-miner` executable, `LICENSE`, `README.md`, `config.example.json` and
+`BUILD-METADATA.txt`. The Linux archives also carry
+[`deploy/systemd/twitch-miner.service`](../deploy/systemd/twitch-miner.service)
+and [`deploy/openrc/twitch-miner`](../deploy/openrc/twitch-miner).
+
+### Verifying a download
+
+The archives are workflow artifacts kept for 30 days, each with a `.sha256` file
+and a signed build-provenance attestation from the workflow run. Nothing
+publishes them to a GitHub Release by itself; see the
+[release process](release-process.md#release-binaries). Check the checksum, then
+the attestation, which ties the archive to this repository's workflow and to the
+tag you expect:
+
+```sh
+sha256sum --check twitch-miner-<version>-<target>.tar.gz.sha256
+gh attestation verify twitch-miner-<version>-<target>.tar.gz \
+  --repo FueledByRedBull/Twitch-Miner-Rust \
+  --signer-workflow FueledByRedBull/Twitch-Miner-Rust/.github/workflows/release-binaries.yml \
+  --source-ref refs/tags/v<version>
+```
+
+On macOS use `shasum -a 256 --check`. A checksum file next to the archive only
+detects a damaged download; the attestation is what ties the bytes to the
+workflow. A manual run from a branch is attested too, with that branch as its
+source ref, which the `--source-ref` check rejects.
+
+However the miner runs, keep one instance per Twitch account and the data
+directory private, and pass `--data-dir` to every manual command, as in the
+container.
+
+### systemd
+
+[`twitch-miner.service`](../deploy/systemd/twitch-miner.service) runs the binary
+as a dedicated user with `/var/lib/twitch-miner` as its data directory:
+
+```sh
+sudo useradd --system --no-create-home --home-dir /var/lib/twitch-miner \
+  --shell /usr/sbin/nologin twitch-miner
+sudo install -m 0755 twitch-miner /usr/local/bin/twitch-miner
+sudo install -m 0644 deploy/systemd/twitch-miner.service /etc/systemd/system/twitch-miner.service
+sudo install -d -m 0700 -o twitch-miner -g twitch-miner /var/lib/twitch-miner
+sudo install -m 0600 -o twitch-miner -g twitch-miner config.example.json /var/lib/twitch-miner/config.json
+sudoedit /var/lib/twitch-miner/config.json
+sudo -u twitch-miner twitch-miner --data-dir /var/lib/twitch-miner --check-config
+sudo systemctl daemon-reload
+sudo systemctl enable --now twitch-miner
+journalctl -u twitch-miner -f
+```
+
+On first start the journal shows the device code, as in
+[Sessions and login](#sessions-and-login). Later checks run as the service user:
+
+```sh
+sudo -u twitch-miner twitch-miner --health --data-dir /var/lib/twitch-miner
+sudo -u twitch-miner twitch-miner --status --data-dir /var/lib/twitch-miner
+```
+
+**Restarts.** `Restart=on-failure` with a 30-second delay restarts the miner
+after the exits the container's restart policy also covers: a lost session, a
+failed background task, an expired device login. A normal stop is not
+restarted. After five starts in ten minutes systemd gives up and the unit stays
+failed until `systemctl reset-failed twitch-miner`. systemd has no equivalent of
+the container health check, so a miner that hangs without exiting is not
+restarted; watch `--health` if that matters. `TimeoutStopSec=30` matches the
+30-second stop grace period of the Compose files.
+
+**Sandbox.** The unit gives the service no capabilities and no new privileges,
+a read-only system, no access to `/home`, a private `/tmp` and `/dev`,
+read-only kernel interfaces, only IPv4, IPv6 and Unix sockets (the async
+runtime's signal handling needs the Unix one), no namespaces or real-time
+scheduling, no writable-and-executable memory, and a system-call filter of
+`@system-service` without `@privileged` and `@resources`. The one writable path
+is `/var/lib/twitch-miner`: the miner reads `config.json` there, writes its
+session, logs, ledger and status there, and creates every temporary file beside
+the file it replaces. Keep `config.json` in that directory. A `--config` path
+elsewhere would need `ReadWritePaths=`, because the miner can rewrite the file
+when it migrates it. The configuration reload watcher only reads.
+
+The Compose files drop all capabilities, mount the root read-only and set
+`no-new-privileges`; the unit covers all three. They set no memory or process
+limit, so the unit sets none either. `systemctl show twitch-miner -p MemoryPeak`
+shows what a run really used, and `MemoryMax=` or `TasksMax=` can then go in a
+`systemctl edit` drop-in.
+
+**Encrypting the session.** To use [`TCPM_COOKIE_KEY_FILE`](#encrypting-the-saved-session)
+without making the key readable by the service user, keep it in a root-owned
+file and let systemd hand it over as a credential:
+
+```sh
+sudo install -d -m 0700 /etc/twitch-miner
+(umask 077; openssl rand -hex 32 | sudo tee /etc/twitch-miner/session.key >/dev/null)
+sudo systemctl edit twitch-miner
+```
+
+```ini
+[Service]
+LoadCredential=session-key:/etc/twitch-miner/session.key
+Environment=TCPM_COOKIE_KEY_FILE=%d/session-key
+```
+
+`%d` is the unit's credentials directory (systemd 250 or newer), so the key is
+visible only inside the running service. `--auth-status`, `--import-token` and
+`--decrypt-session` need the same key, which the service user cannot read from
+`/etc`; run them through the same credential:
+
+```sh
+sudo systemd-run --pipe --wait --uid=twitch-miner \
+  -p LoadCredential=session-key:/etc/twitch-miner/session.key \
+  -p Environment=TCPM_COOKIE_KEY_FILE=%d/session-key \
+  /usr/local/bin/twitch-miner --auth-status --data-dir /var/lib/twitch-miner
+```
+
+Keep the key out of backups of the data directory.
+
+### OpenRC
+
+[`deploy/openrc/twitch-miner`](../deploy/openrc/twitch-miner) runs the binary
+under `supervise-daemon` as the same user and data directory. The commands are
+for Alpine; use your distribution's user tools elsewhere:
+
+```sh
+addgroup -S twitch-miner
+adduser -S -D -H -h /var/lib/twitch-miner -s /sbin/nologin -G twitch-miner twitch-miner
+install -m 0755 twitch-miner /usr/local/bin/twitch-miner
+install -m 0755 deploy/openrc/twitch-miner /etc/init.d/twitch-miner
+install -d -m 0700 -o twitch-miner -g twitch-miner /var/lib/twitch-miner
+install -m 0600 -o twitch-miner -g twitch-miner config.example.json /var/lib/twitch-miner/config.json
+vi /var/lib/twitch-miner/config.json
+rc-update add twitch-miner default
+rc-service twitch-miner start
+```
+
+Output goes to syslog under the tag `twitch-miner` (`logread -f` on Alpine).
+`supervise-daemon` restarts the miner after the same exits as the container's
+restart policy, waiting 30 seconds each time, and leaves it stopped after six
+exits within ten minutes. Unlike systemd, it also restarts a miner that exited
+cleanly without being stopped, and the script applies no sandbox beyond the
+dedicated user and a `0077` umask. For the session key, add
+`export TCPM_COOKIE_KEY_FILE=/etc/twitch-miner/session.key` to
+`/etc/conf.d/twitch-miner`, with a key file owned by `twitch-miner` and mode
+`0600`.
+
+### Windows scheduled task
+
+[`deploy/windows/install-task.ps1`](../deploy/windows/install-task.ps1)
+registers a scheduled task named `TwitchMiner` that starts the executable at
+system startup under an account you choose, whether or not anyone is logged on,
+and restarts it after a failure. It is deliberately a scheduled task and not a
+Windows service. A service has to speak the service-control protocol, which
+needs a Windows-service dependency and control code in the binary; the miner is
+a plain console program that handles only `CTRL-C`.
+
+The consequence is that nothing can ask it to stop. Ending the task, shutting
+the machine down, or `Stop-Process` terminates the process on the spot, without
+the shutdown that `CTRL-C` or `SIGTERM` performs. State files are published
+through a temporary file, a flush and a rename, so a killed miner leaves
+`config.json`, the session, the prediction journal, `streak-cache.json` and
+`runtime-status.json` either old or new and never half written, and a
+prediction is reserved in the journal before it is sent, so a kill leaves it
+unresolved rather than forgotten. What a kill does lose is the work a graceful
+stop finishes:
+
+- streak-cache changes from the last 30 seconds;
+- rewards still queued for the earnings ledger, a few at most;
+- notifications still being delivered, including the `Ending session` message
+  and the session summary;
+- any request in flight, which is not replayed (see
+  [mutation safety](protocol-inventory.md#mutation-safety)).
+
+A kill can also leave `.*.tmp` files in the data directory, and on Windows a
+status-file replace cut between its two renames can leave `runtime-status.json`
+absent until the next heartbeat. Delete stray `.tmp` files once the miner is
+stopped. When a clean stop matters, stop the miner with `CTRL-C` in a console
+instead of ending the task.
+
+From an elevated PowerShell, with the executable and a data directory (the
+script creates a missing directory and restricts it to the account, SYSTEM and
+Administrators; an existing directory keeps its permissions, which must keep
+other users out because it holds the saved session):
+
+```powershell
+.\deploy\windows\install-task.ps1 `
+  -ExecutablePath 'C:\Program Files\TwitchMiner\twitch-miner.exe' `
+  -DataDirectory 'C:\ProgramData\TwitchMiner'
+Start-ScheduledTask -TaskName TwitchMiner
+```
+
+The script prompts for the account's credential, fails without elevation, and
+refuses to overwrite an existing task. The account needs the "Log on as a batch
+job" right and access to the data directory; a dedicated local account is best.
+The restart-on-failure rule belongs to Task Scheduler, not the miner: it retries
+a failed run every minute, up to 999 times, and a clean exit is not restarted,
+so a persistent failure repeats until the count is spent. A task has no
+console, so set `"save_logs": true` for log files, and complete the first device
+login in a foreground run as the same account and data directory before
+registering the task. The script is not part of the ZIP or the MSI; take it from
+the repository at the tag you installed. `.\deploy\windows\install-task.ps1
+-Uninstall` removes the task and leaves the data directory.
+
 ## Sessions and login
 
 On first start the miner prints a device code: open
@@ -619,7 +841,8 @@ cookie directory on ephemeral storage.
 builds and loads one image for the local platform for smoke testing. With
 `-Push` it builds and publishes `linux/amd64` and `linux/arm64` under a
 revision-scoped `candidate-<full-sha>` tag; stable tags belong to the protected
-promotion workflow. ARMv7 is not supported.
+promotion workflow. ARMv7 images are not built; the static ARMv7 binary is
+described in [running without Docker](#running-without-docker).
 
 ```powershell
 ./scripts/build-multiarch.ps1

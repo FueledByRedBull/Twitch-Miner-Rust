@@ -88,6 +88,53 @@ if ($windowsBuildScript -notmatch 'LastWriteTimeUtc' -or
     throw 'Windows packaging must normalize portable archive timestamps and validate the MSI database.'
 }
 
+$binariesWorkflow = Get-Content -Raw .github/workflows/release-binaries.yml
+foreach ($target in @(
+        'x86_64-unknown-linux-musl',
+        'aarch64-unknown-linux-musl',
+        'armv7-unknown-linux-musleabihf',
+        'x86_64-apple-darwin',
+        'aarch64-apple-darwin'
+    )) {
+    if ($binariesWorkflow -notmatch "(?m)^\s+-\s+target:\s*$([regex]::Escape($target))\s*$") {
+        throw "Release binaries workflow does not build $target."
+    }
+}
+if ($binariesWorkflow -notmatch 'cargo zigbuild --locked --release' -or
+    $binariesWorkflow -notmatch 'cargo build --locked --release' -or
+    $binariesWorkflow -notmatch '(?m)^  ZIG_VERSION:\s*\d+\.\d+\.\d+\s*$' -or
+    $binariesWorkflow -notmatch '(?m)^  CARGO_ZIGBUILD_VERSION:\s*\d+\.\d+\.\d+\s*$' -or
+    [regex]::Matches($binariesWorkflow, 'zig_sha256:\s*[0-9a-f]{64}\s').Count -lt 2 -or
+    $binariesWorkflow -notmatch 'sha256sum --check') {
+    throw 'Release binaries must be built with --locked --release and exactly pinned, checksum-verified Zig and cargo-zigbuild.'
+}
+$attestJob = [regex]::Match($binariesWorkflow, '(?ms)^  attest:\r?\n(.*?)(?=^  [A-Za-z0-9_-]+:\r?$|\z)')
+if (-not $attestJob.Success -or
+    $attestJob.Groups[1].Value -notmatch "(?m)^    if:\s*github\.event_name != 'pull_request'\s*$" -or
+    $attestJob.Groups[1].Value -notmatch '(?m)^      id-token:\s*write\s*$' -or
+    $attestJob.Groups[1].Value -notmatch '(?m)^      attestations:\s*write\s*$' -or
+    $attestJob.Groups[1].Value -notmatch 'actions/attest-build-provenance@[0-9a-f]{40}' -or
+    [regex]::Matches($binariesWorkflow, 'attest-build-provenance@').Count -ne 1 -or
+    [regex]::Matches($binariesWorkflow, 'id-token:\s*write').Count -ne 1 -or
+    [regex]::Matches($binariesWorkflow, 'attestations:\s*write').Count -ne 1 -or
+    $binariesWorkflow -notmatch '(?m)^permissions:\r?\n  contents:\s*read\s*$') {
+    throw 'Release binary attestations must run only on tag and manual runs, in one job that alone holds id-token and attestations write access.'
+}
+if ($binariesWorkflow -notmatch "(?ms)^on:.*?^  push:\r?\n    tags:\r?\n      - 'v\*'\s*\r?\n" -or
+    $binariesWorkflow -match '(?m)^  push:\r?\n    branches:' -or
+    $binariesWorkflow -notmatch '(?m)^  pull_request:\r?\n    paths:' -or
+    $binariesWorkflow -match 'contents:\s*write|gh release|action-gh-release') {
+    throw 'Release binaries must build on v* tags, manual runs and path-filtered pull requests, and must not publish a GitHub Release.'
+}
+# Tag and manual release builds stay cold: any cache step is limited to pull requests.
+$cacheSteps = [regex]::Matches($binariesWorkflow, '(?m)^\s*(?:-\s+)?uses:\s*(?:Swatinem/rust-cache|actions/cache)\b')
+$pullRequestCacheSteps = [regex]::Matches(
+    $binariesWorkflow,
+    "(?m)^        if:\s*github\.event_name == 'pull_request'\s*\r?\n\s+uses:\s*Swatinem/rust-cache@[0-9a-f]{40}")
+if ($cacheSteps.Count -ne $pullRequestCacheSteps.Count) {
+    throw 'Release binary caches must be restored only on pull request runs so tag builds stay cold.'
+}
+
 if (-not (Test-Path -LiteralPath 'fuzz/Cargo.lock' -PathType Leaf) -or
     -not (Test-Path -LiteralPath 'fuzz/Cargo.toml' -PathType Leaf)) {
     throw 'The isolated fuzz workspace must retain its own manifest and lockfile.'

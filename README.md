@@ -79,6 +79,9 @@ docker compose up --build
 On Linux the container runs as UID/GID `1000:1000`, so `data/` must be writable
 by that user. To deploy a published image by digest, run on a Raspberry Pi, or
 use the Windows ZIP/MSI build, see the [operations guide](docs/operations.md).
+To run a static binary without Docker (Linux x86_64, ARM64 or ARMv7, macOS) under
+systemd, OpenRC or a Windows scheduled task, see
+[running without Docker](docs/operations.md#running-without-docker).
 
 ## Run from source
 
