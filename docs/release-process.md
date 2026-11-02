@@ -342,6 +342,8 @@ extracted executable comparison as the cross-package identity check. CI also
 installs the MSI quietly on a disposable Windows runner, checks the full version
 and revision under Program Files without active runtime files, and uninstalls it
 before publishing the artifact. The build also runs WiX MSI database validation.
+The Rust cache is used on pull requests and `main` but skipped on tag refs, so a
+release tag builds cold.
 How to run the Windows build is in the
 [operations guide](operations.md#running-on-windows).
 

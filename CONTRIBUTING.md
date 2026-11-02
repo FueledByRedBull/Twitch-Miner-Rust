@@ -67,6 +67,10 @@ branch floor and a separate 46.0% `tm-app` ratchet, and runs bounded pure-parser
 fuzzing from the isolated `fuzz/` workspace. Do not expand it to network effects
 or weaken the coverage floors.
 
+A pull request that changes only `docs/`, root-level Markdown, or `LICENSE`
+skips the Rust jobs, and `required-checks` accepts exactly those skips. Pushes to
+`main` and tags always run every job.
+
 ## Scope-specific requirements
 
 Protocol changes need a sanitized fixture, parser test, and parity-matrix

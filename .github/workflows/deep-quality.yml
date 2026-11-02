@@ -13,6 +13,10 @@ jobs:
   critical-branch-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Coverage maps come from instrumentation, not debug info.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -24,12 +28,21 @@ jobs:
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-llvm-cov@0.8.7
+      # The repository pins 1.94.0, so without this the cache action's rustc
+      # lookups would install a toolchain the job otherwise never uses.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-07-01
+        with:
+          shared-key: deep-quality-branch-coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Measure critical-core branch coverage
         run: >-
           cargo +nightly-2026-07-01 llvm-cov
           --branch
           --package tm-auth
           --package tm-domain
+          --package tm-net
           --package tm-pubsub
           --package tm-runtime
           --package tm-twitch
@@ -76,9 +89,52 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: nightly-2026-07-01
+      # cargo-fuzz sets the sanitizer and coverage RUSTFLAGS itself for the cargo
+      # it starts, so they never reach this action's key. Cargo fingerprints them,
+      # and the key carries the nightly through its rustc version.
+      # Placed before the install so the cargo-installed binary is cached too.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: deep-quality-fuzz
+          workspaces: fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # taiki-e/install-action has no manifest for cargo-fuzz at the pinned
+      # version, so it would only fall back to cargo-binstall.
       - name: Install pinned cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - name: Fuzz transport parsers
-        run: cargo +nightly-2026-07-01 fuzz run transport_parsers -- -max_total_time=120 -max_len=65536
-      - name: Fuzz structured input parsers
-        run: cargo +nightly-2026-07-01 fuzz run structured_input -- -max_total_time=120 -max_len=65536
+      - name: Build fuzz targets
+        run: cargo +nightly-2026-07-01 fuzz build
+      - name: Restore fuzz corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz both targets concurrently
+        run: |
+          # The cache may hold older copies of the tracked seeds; the checkout wins.
+          git checkout -- fuzz/corpus
+          targets=(transport_parsers structured_input)
+          pids=()
+          for target in "${targets[@]}"; do
+            (
+              set -o pipefail
+              cargo +nightly-2026-07-01 fuzz run "$target" -- -max_total_time=120 -max_len=65536 2>&1 |
+                sed -u "s/^/[$target] /"
+            ) &
+            pids+=("$!")
+          done
+          status=0
+          for i in "${!pids[@]}"; do
+            if ! wait "${pids[$i]}"; then
+              echo "::error::Fuzz target ${targets[$i]} failed"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Save fuzz corpus
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
