@@ -5,6 +5,7 @@ use tm_auth::TwitchAuthClient;
 use tm_domain::Streamer;
 use tm_twitch::{generate_device_id, TwitchClient};
 
+use crate::alarms;
 use crate::bootstrap::{build_http_client, normalized_username};
 use crate::chat::spawn_chat_manager_loop;
 use crate::context::spawn_context_refresh_loop;
@@ -21,6 +22,7 @@ use crate::session_watch::{spawn_session_watch_loop, SESSION_CHECK_INTERVAL};
 use crate::status::HealthTracker;
 use crate::streak_cache::{spawn_streak_cache_loop, StreakCache};
 use crate::streak_recovery::spawn_streak_recovery_loop;
+use crate::utilities::configured_timezone;
 
 pub(crate) struct BackgroundTasks {
     pub(crate) eventsub: Option<tokio::task::JoinHandle<()>>,
@@ -33,6 +35,7 @@ pub(crate) struct BackgroundTasks {
     pub(crate) streak_cache: Option<tokio::task::JoinHandle<()>>,
     pub(crate) streak_recovery: Option<tokio::task::JoinHandle<()>>,
     pub(crate) session_watch: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) earnings_watch: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct TransportTasks {
@@ -53,6 +56,7 @@ impl BackgroundTasks {
             ("streak-cache", self.streak_cache.as_ref()),
             ("streak-recovery", self.streak_recovery.as_ref()),
             ("session-watch", self.session_watch.as_ref()),
+            ("earnings-watch", self.earnings_watch.as_ref()),
         ]
         .into_iter()
         .filter_map(|(name, task)| {
@@ -180,6 +184,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
         streak_cache,
         streak_recovery,
         session_watch: Some(spawn_session_watch(params)?),
+        earnings_watch: Some(spawn_earnings_watch(params)),
     })
 }
 
@@ -193,6 +198,21 @@ fn spawn_session_watch(params: &BackgroundTaskParams<'_>) -> Result<tokio::task:
         params.observability.clone(),
         SESSION_CHECK_INTERVAL,
     ))
+}
+
+fn spawn_earnings_watch(params: &BackgroundTaskParams<'_>) -> tokio::task::JoinHandle<()> {
+    params
+        .health
+        .register(alarms::TASK_NAME, alarms::STALE_AFTER);
+    alarms::spawn_earnings_watch_loop(
+        params.stop_rx.clone(),
+        alarms::EarningsWatchContext {
+            observability: params.observability.clone(),
+            health: params.health.clone(),
+            work_dir: params.work_dir.to_path_buf(),
+            timezone: configured_timezone(params.config),
+        },
+    )
 }
 
 fn register_background_health(params: &BackgroundTaskParams<'_>) {
@@ -331,6 +351,7 @@ mod tests {
             streak_cache: None,
             streak_recovery: None,
             session_watch: None,
+            earnings_watch: None,
         }
     }
 
@@ -448,8 +469,10 @@ mod tests {
         assert!(tasks.streak_recovery.is_none());
         assert!(tasks.chat.is_some());
         assert!(tasks.streak_cache.is_some());
+        assert!(tasks.earnings_watch.is_some());
         assert_eq!(health.task_consecutive_failures("chat"), Some(0));
         assert_eq!(health.task_consecutive_failures("streak-cache"), Some(0));
+        assert_eq!(health.task_consecutive_failures("earnings-watch"), Some(0));
         shutdown_background_tasks(stop_tx, tasks).await;
 
         let streamer = tm_domain::Streamer {
@@ -489,6 +512,7 @@ mod tests {
         assert!(tasks.streak_recovery.is_some());
         assert!(tasks.chat.is_some());
         assert!(tasks.streak_cache.is_some());
+        assert!(tasks.earnings_watch.is_some());
         for task in [
             "eventsub",
             "pubsub",
@@ -500,6 +524,7 @@ mod tests {
             "drop",
             "chat",
             "streak-cache",
+            "earnings-watch",
             "streak-recovery",
         ] {
             assert_eq!(health.task_consecutive_failures(task), Some(0), "{task}");
@@ -555,6 +580,7 @@ mod tests {
         assert!(tasks.streak_recovery.is_none());
         assert!(tasks.chat.is_some());
         assert!(tasks.streak_cache.is_some());
+        assert!(tasks.earnings_watch.is_some());
         for task in [
             "eventsub",
             "pubsub",
@@ -565,6 +591,7 @@ mod tests {
             "minute-watch",
             "chat",
             "streak-cache",
+            "earnings-watch",
         ] {
             assert_eq!(health.task_consecutive_failures(task), Some(0), "{task}");
         }

@@ -9,7 +9,7 @@
 //! in `tm-twitch`, `tm-pubsub`, and `tm-irc`.
 //!
 //! The normal path in [`run_cli`] resolves paths and handles immediate
-//! health/status/config/support-bundle commands, then loads and validates the
+//! health/status/earnings/config/support-bundle commands, then loads and validates the
 //! config, prepares the work directory, and initializes tracing. It creates the
 //! session/client, bootstraps streamer context, presence, and streak cache,
 //! starts the `tm-runtime` state handle, spawns the background tasks, publishes ready
@@ -25,7 +25,7 @@
 //!
 //! [`tasks::spawn_background_tasks`] registers and supervises `EventSub`, `PubSub`,
 //! presence fallback, context refresh, minute watching, drops,
-//! chat, streak-cache, and optional streak-recovery loops. [`shutdown`] watches
+//! chat, streak-cache, earnings-alarm, and optional streak-recovery loops. [`shutdown`] watches
 //! signals and task liveness, broadcasts stop, joins with a grace period, then
 //! closes the runtime state handle and records the session summary.
 //!
@@ -44,13 +44,16 @@ use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
 use tm_twitch::TwitchClient;
 
+mod alarms;
 mod bootstrap;
 mod canary;
 mod chat;
 mod context;
 mod drops;
+mod earnings;
 mod eventsub;
 mod identity_cache;
+mod ledger;
 mod minute_watcher;
 mod observability;
 mod prediction_journal;
@@ -95,7 +98,10 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 // These booleans are the stable, mutually constrained flat CLI surface consumed
 // by health checks and deployment scripts, not independent runtime policy.
 #[allow(clippy::struct_excessive_bools)]
-#[command(version = build_info::VERSION)]
+#[command(
+    version = build_info::VERSION,
+    group(clap::ArgGroup::new("json_target").args(["check_config", "earnings"]))
+)]
 /// Unofficial Twitch channel-points miner.
 struct Cli {
     /// Configuration file [default: config.json in the data directory]
@@ -113,9 +119,18 @@ struct Cli {
     /// Print the running miner's sanitized status
     #[arg(long, conflicts_with = "check_config")]
     status: bool,
-    /// Print the configuration check as JSON (with --check-config)
-    #[arg(long, requires = "check_config")]
+    /// Print the configuration check or earnings report as JSON (with --check-config or --earnings)
+    #[arg(long, requires = "json_target")]
     json: bool,
+    /// Summarize recorded point rewards from the earnings ledger, without contacting Twitch
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary", "import_token"])]
+    earnings: bool,
+    /// Days of history for --earnings (default 7)
+    #[arg(long, value_name = "N", requires = "earnings", value_parser = clap::value_parser!(u32).range(1..=3650))]
+    days: Option<u32>,
+    /// How --earnings groups rewards (default day)
+    #[arg(long, value_enum, requires = "earnings")]
+    by: Option<earnings::EarningsGrouping>,
     /// Write a privacy-safe support file without cookies, configuration values, or logs
     #[arg(long, value_name = "PATH", conflicts_with_all = ["health", "status", "check_config", "canary"])]
     support_bundle: Option<PathBuf>,
@@ -177,6 +192,14 @@ fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
     }
     if cli.status {
         return Some(status::print_status(&paths.work_dir));
+    }
+    if cli.earnings {
+        return Some(earnings::print_earnings(
+            &paths.work_dir,
+            cli.days.unwrap_or(7),
+            cli.by.unwrap_or(earnings::EarningsGrouping::Day),
+            cli.json,
+        ));
     }
     if cli.check_config {
         return Some(check_config(&paths.config_path, cli.json));
@@ -400,6 +423,14 @@ async fn run_prepared_miner(prepared: PreparedMiner, requested_paths: AppPaths) 
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let health = status::HealthTracker::default();
+    let (ledger, ledger_task) = ledger::LedgerHandle::start(
+        &active_paths.work_dir,
+        utilities::configured_timezone(&config),
+        stop_rx.clone(),
+        health.earnings(),
+    );
+    observability.track_task(ledger_task);
+    let observability = observability.with_ledger(ledger);
     let tasks = spawn_background_tasks(&BackgroundTaskParams {
         config: &config,
         stop_rx,

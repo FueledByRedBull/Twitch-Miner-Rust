@@ -3,7 +3,7 @@
 The project runs as a Cargo workspace with crate boundaries split by
 responsibility:
 
-- `tm-app` owns process bootstrap and task wiring.
+- `tm-app` owns process bootstrap, task wiring, and the local earnings ledger.
 - `tm-config` owns config/path resolution and write-back; typed streamer-setting
   composition is isolated from persistence and migration.
 - `tm-auth` owns cookie persistence and device auth helpers.
@@ -22,9 +22,15 @@ responsibility:
 - `tm-observability` owns logging, privacy helpers, and notification payloads.
 
 The built-in outbound notifiers are Discord and one generic JSON webhook, which
-reaches other services without per-provider code. Further notifier backends and
-analytics exporters are intentionally out of scope unless a concrete operator
-requirement justifies adding them.
+reaches other services without per-provider code. Further notifier backends are
+intentionally out of scope unless a concrete operator requirement justifies
+adding them.
+
+Accepted point rewards are also appended to a local ledger, `earnings/YYYY-MM.jsonl`
+in the data directory, which `--earnings`, the silent-loss alarms, and the daily
+report read. The ledger is a file on the operator's machine, not an integration:
+exporters that send earnings data to external analytics services remain out of
+scope, and nothing in the miner reads the ledger back into mining decisions.
 
 ## Event flow
 
@@ -40,6 +46,11 @@ For an ordinary WATCH credit, `tm-pubsub` parses the authenticated
 `points-earned` message into `MinerEvent::PointsEarned`; the runtime updates
 the tracked streamer and emits no network effect. Predictions use the same
 boundary but can return an evaluation effect for `tm-app` to execute once.
+
+The ledger is not a second state owner. `tm-app` appends one line per reward the
+runtime accepted, through a bounded queue to a dedicated writer task. A full
+queue or failed write only increments a counter shown in `--status`; it never
+delays or fails the miner.
 
 Source pointers: [runtime state](../crates/tm-runtime/src/state.rs),
 [runtime handle](../crates/tm-runtime/src/handle.rs),

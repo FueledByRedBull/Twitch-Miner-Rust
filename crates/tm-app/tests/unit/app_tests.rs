@@ -357,6 +357,50 @@ mod tests {
         assert!(!build_canary_logger_settings(&config).save);
     }
 
+    #[test]
+    fn earnings_cli_takes_window_grouping_and_json_but_only_alone() {
+        let defaults = Cli::try_parse_from(["tm-app", "--earnings"]).unwrap();
+        assert!(defaults.earnings && !defaults.json);
+        assert_eq!((defaults.days, defaults.by), (None, None));
+
+        let full = Cli::try_parse_from([
+            "tm-app",
+            "--earnings",
+            "--days",
+            "30",
+            "--by",
+            "channel",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(full.days, Some(30));
+        assert_eq!(full.by, Some(crate::earnings::EarningsGrouping::Channel));
+        assert!(full.json);
+
+        for rejected in [
+            vec!["--days", "3"],
+            vec!["--by", "day"],
+            vec!["--earnings", "--days", "0"],
+            vec!["--earnings", "--by", "week"],
+            vec!["--earnings", "--status"],
+            vec!["--earnings", "--check-config"],
+            vec!["--earnings", "--health"],
+            vec!["--earnings", "--canary"],
+        ] {
+            let args = std::iter::once("tm-app").chain(rejected.iter().copied());
+            assert!(Cli::try_parse_from(args).is_err(), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn json_log_format_reaches_the_logger_settings() {
+        let mut config = ConfigFile::default();
+        assert!(!crate::startup::build_logger_settings(&config).json);
+        config.log_format = tm_config::LogFormat::Json;
+        assert!(crate::startup::build_logger_settings(&config).json);
+        assert!(build_canary_logger_settings(&config).json);
+    }
+
     fn read_http_request(stream: &mut TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -817,6 +861,9 @@ mod tests {
             support_bundle: None,
             canary: false,
             import_token: false,
+            earnings: false,
+            days: None,
+            by: None,
         };
         assert!(!has_override(&cli));
 
@@ -830,6 +877,9 @@ mod tests {
             support_bundle: None,
             canary: false,
             import_token: false,
+            earnings: false,
+            days: None,
+            by: None,
         };
         assert!(has_override(&cli));
     }

@@ -290,7 +290,131 @@ fn every_event_name_round_trips() {
         Event::ChatMention,
         Event::WatchStatus,
         Event::SessionLost,
+        Event::EarningsStall,
+        Event::DropsStall,
+        Event::DailyReport,
     ] {
         assert_eq!(normalize_event_name(event_name(event)), Some(event));
     }
+}
+
+#[derive(Clone, Default)]
+struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLog {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedLog {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_log(include_fields: bool, json: bool, emit: impl FnOnce()) -> String {
+    let log = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .event_format(GoStyleEventFormat {
+            show_seconds: false,
+            timezone: Some(chrono_tz::UTC),
+            console_username: None,
+            include_fields,
+            json,
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, emit);
+    let bytes = log.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn json_log_line_carries_timestamp_level_operation_message_and_fields() {
+    let output = capture_log(true, true, || {
+        tracing::warn!(
+            operation = "on_message",
+            channel_id = "42",
+            attempts = 3,
+            "line one\nline \"two\""
+        );
+    });
+    assert_eq!(output.lines().count(), 1, "{output}");
+    let value: serde_json::Value = serde_json::from_str(output.trim_end()).unwrap();
+    assert_eq!(value["level"], "WARN");
+    assert_eq!(value["operation"], "on_message");
+    assert_eq!(value["message"], "line one\nline \"two\"");
+    assert_eq!(value["fields"]["channel_id"], "42");
+    assert_eq!(value["fields"]["attempts"], "3");
+    let timestamp = value["timestamp"].as_str().unwrap();
+    assert!(
+        timestamp.contains('T') && timestamp.ends_with("+00:00"),
+        "{timestamp}"
+    );
+}
+
+#[test]
+fn json_log_line_keeps_field_redaction_when_anonymized() {
+    let output = capture_log(false, true, || {
+        tracing::info!(
+            operation = "privacy-canary",
+            channel_id = "CANARY_CHANNEL_ID",
+            balance = "CANARY_BALANCE",
+            "privacy canary"
+        );
+    });
+    let value: serde_json::Value = serde_json::from_str(output.trim_end()).unwrap();
+    assert_eq!(value["message"], "privacy canary");
+    assert_eq!(value["operation"], "privacy-canary");
+    assert!(value.get("fields").is_none(), "{output}");
+    assert!(!output.contains("CANARY"), "{output}");
+}
+
+#[test]
+fn json_log_line_falls_back_to_the_target_without_an_operation() {
+    let output = capture_log(true, true, || tracing::info!("plain"));
+    let value: serde_json::Value = serde_json::from_str(output.trim_end()).unwrap();
+    assert_eq!(value["operation"], "tests");
+    assert!(value.get("fields").is_none());
+}
+
+#[test]
+fn text_log_layout_is_unchanged_by_the_json_option() {
+    let output = capture_log(true, false, || {
+        tracing::info!(operation = "on_message", channel_id = "42", "hello");
+    });
+    assert!(
+        output.contains(" - INFO - [on_message]: hello | channel_id=42"),
+        "{output}"
+    );
+    assert!(!output.contains('{'));
+}
+
+#[test]
+fn local_day_bounds_follow_the_zone_including_dst_days() {
+    let at = |unix: u64| UNIX_EPOCH + Duration::from_secs(unix);
+    // 2026-11-02T12:00:00Z
+    assert_eq!(
+        local_day_bounds(at(1_793_620_800), Some(chrono_tz::UTC)),
+        Some((1_793_577_600, 1_793_664_000))
+    );
+    let new_york: Tz = "America/New_York".parse().unwrap();
+    // Spring-forward day 2026-03-08 is 23 hours; fall-back day 2026-11-01 is 25.
+    let (start, end) = local_day_bounds(at(1_772_974_800), Some(new_york)).unwrap();
+    assert_eq!(end - start, 23 * 3_600);
+    let (start, end) = local_day_bounds(at(1_793_520_000), Some(new_york)).unwrap();
+    assert_eq!(end - start, 25 * 3_600);
+    // A day boundary belongs to the day it starts.
+    assert_eq!(
+        local_day_bounds(at(1_793_577_600), Some(chrono_tz::UTC)).map(|bounds| bounds.0),
+        Some(1_793_577_600)
+    );
 }

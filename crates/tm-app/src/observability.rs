@@ -12,6 +12,9 @@ use tm_observability::{
 };
 use tm_twitch::InventoryDrop;
 
+use crate::alarms::DailyReport;
+use crate::ledger::{LedgerHandle, LedgerRecord};
+
 const DISCORD_RATE_LIMIT_RETRIES: u32 = 2;
 const DISCORD_MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
@@ -27,6 +30,7 @@ pub(crate) struct AppObservability {
     pub(crate) show_claimed_bonus: bool,
     show_game: bool,
     timezone: Option<chrono_tz::Tz>,
+    ledger: Option<LedgerHandle>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -58,7 +62,14 @@ impl AppObservability {
             show_claimed_bonus: settings.show_claimed_bonus,
             show_game: settings.show_game,
             timezone: settings.timezone,
+            ledger: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_ledger(mut self, ledger: LedgerHandle) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 
     #[must_use]
@@ -200,6 +211,107 @@ impl AppObservability {
             }
         }
         self.decorate("🚀", message)
+    }
+
+    /// Appends an accepted reward to the earnings ledger, when one is running.
+    pub(crate) fn record_reward(
+        &self,
+        streamer: &Streamer,
+        earned: i64,
+        reason: &str,
+        balance: i64,
+    ) {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return;
+        };
+        let now = u64::try_from(crate::utilities::time_now().unix_timestamp()).unwrap_or_default();
+        ledger.record(LedgerRecord::new(
+            now,
+            &streamer.channel_id,
+            &streamer.username,
+            reason,
+            earned,
+            (balance > 0).then_some(balance),
+            streamer_game_name(streamer),
+        ));
+    }
+
+    pub(crate) fn earnings_stall_message(
+        &self,
+        window_points: i64,
+        rate: f64,
+        baseline: f64,
+        from_history: bool,
+    ) -> String {
+        let source = if from_history {
+            "your last 14 days"
+        } else {
+            "the default for the watched slots"
+        };
+        self.decorate(
+            "📉",
+            format!(
+                "Points earnings stalled: {window_points} points in the last 2 hours ({rate:.0}/hour), below 40% of the usual {baseline:.0}/hour ({source})"
+            ),
+        )
+    }
+
+    pub(crate) fn earnings_recovered_message(
+        &self,
+        window_points: i64,
+        rate: f64,
+        baseline: f64,
+    ) -> String {
+        self.decorate(
+            "📈",
+            format!(
+                "Points earnings recovered: {window_points} points in the last 2 hours ({rate:.0}/hour) against a usual {baseline:.0}/hour"
+            ),
+        )
+    }
+
+    pub(crate) fn drops_stall_message(&self) -> String {
+        self.decorate(
+            "📦",
+            String::from(
+                "Drops stalled: a Drop channel has been watched for 3 hours and no Drop minutes advanced",
+            ),
+        )
+    }
+
+    pub(crate) fn drops_recovered_message(&self) -> String {
+        self.decorate("📦", String::from("Drop minutes are advancing again"))
+    }
+
+    pub(crate) fn daily_report_message(
+        &self,
+        report: &DailyReport,
+        drop_minutes: Option<i64>,
+    ) -> String {
+        let reasons = report
+            .by_reason
+            .iter()
+            .map(|(reason, points)| format!("{reason} {points}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut message = format!(
+            "Daily report for {}: {} points from {} rewards ({reasons})",
+            report.label, report.total_points, report.rewards
+        );
+        if !report.top_channels.is_empty() {
+            let mut anonymizer = self.lock_anonymizer();
+            let channels = report
+                .top_channels
+                .iter()
+                .map(|(channel, points)| format!("{} {points}", anonymizer.name(channel)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(message, " | Top channels: {channels}");
+        }
+        if let Some(minutes) = drop_minutes {
+            let _ = write!(message, " | Unclaimed Drop minutes in inventory: {minutes}");
+        }
+        self.decorate("🗓", message)
     }
 
     pub(crate) fn join_raid_message(&self, from: &str, target_login: &str) -> String {

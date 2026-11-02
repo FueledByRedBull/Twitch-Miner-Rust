@@ -118,6 +118,17 @@ pub enum DropAccountLink {
     None,
 }
 
+/// Console and file log layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable lines.
+    #[default]
+    Text,
+    /// One JSON object per line.
+    Json,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DiscordConfig {
     pub webhook_api: String,
@@ -193,6 +204,8 @@ pub struct ConfigFile {
     pub drop_account_link: DropAccountLink,
     #[serde(default)]
     pub drop_discovery_games: Vec<String>,
+    #[serde(default)]
+    pub log_format: LogFormat,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
@@ -247,6 +260,7 @@ pub fn default_config_value() -> Value {
         "followers_order": "DESC",
         "drop_account_link": "linked",
         "drop_discovery_games": [],
+        "log_format": "text",
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
@@ -525,6 +539,13 @@ fn validate_enum_values(value: &Value) -> Result<(), ConfigError> {
         parse_chat_presence_value,
         false,
     )?;
+    if let Some(log_format) = root.get("log_format") {
+        if !matches!(log_format.as_str(), Some("text" | "json")) {
+            return Err(ConfigError::Validation(format!(
+                "config.log_format must be \"text\" or \"json\", not {log_format}"
+            )));
+        }
+    }
     if let Some(watch_priority) = root.get("watch_priority") {
         let Some(values) = watch_priority.as_array() else {
             return Err(unsupported_enum_value(
@@ -894,6 +915,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "followers_order",
     "drop_account_link",
     "drop_discovery_games",
+    "log_format",
     "bet",
     "timezone",
     "privacy",
@@ -920,7 +942,12 @@ const PRIVACY_CONFIG_KEYS: &[&str] = &["anonymize_logs"];
 const DISCORD_CONFIG_KEYS: &[&str] = &["webhook_api", "events"];
 // Older releases reject keys they do not know, so writing these defaults into an
 // existing file would stop a rollback from starting. They apply when absent.
-const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &["drop_account_link", "drop_discovery_games", "webhook"];
+const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &[
+    "drop_account_link",
+    "drop_discovery_games",
+    "log_format",
+    "webhook",
+];
 const WEBHOOK_CONFIG_KEYS: &[&str] = &["url", "events"];
 const STREAMER_OVERRIDE_KEYS: &[&str] = &[
     "make_predictions",

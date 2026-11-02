@@ -31,7 +31,8 @@ in an existing file are filled from the same defaults.
 
 The data directory also holds `cookies/<username>.json` (your Twitch session,
 which is secret), optional `log/` files, `streak-cache.json`,
-`prediction-placements.json`, and `runtime-status.json`.
+`prediction-placements.json`, `runtime-status.json`, and `earnings/`, the
+[earnings ledger](operations.md#earnings-ledger-and-alarms).
 
 ## Account and channels
 
@@ -89,8 +90,9 @@ pinning and fair rotation are separate rules, described in the
 | `show_username_in_console` | `false` | Show your username in console log lines. |
 | `show_claimed_bonus_msg` | `true` | Log each claimed bonus chest. |
 | `show_game` | `true` | Include the game name in point messages. |
-| `timezone` | `null` | IANA time zone for timestamps, such as `Europe/Athens`. `null` uses the host's local time. |
-| `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, points, and results in logs and Discord messages. The saved log is named `miner.log` instead of after the account. |
+| `log_format` | `text` | `text` for the human-readable lines, or `json` for one JSON object per line on the console and in saved logs, with `timestamp`, `level`, `operation`, `message`, and a `fields` object of extra values (omitted under `privacy.anonymize_logs`, like the text format). Any other value is rejected. Existing config files are not rewritten to add it, so a rollback to an older release can still read them. |
+| `timezone` | `null` | IANA time zone for timestamps and for the day boundary of the daily report and the status block's "today", such as `Europe/Athens`. `null` uses the host's local time. |
+| `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, per-channel points, and results in logs and Discord messages. Your own total points gained, in the session summary and the daily report, stays visible. The saved log is named `miner.log` instead of after the account. |
 | `webhook.url` | `""` | Any HTTP(S) endpoint that should receive events, such as ntfy, Gotify, or Home Assistant. Each event is a POST with the JSON body `{"event": "DROP_CLAIM", "message": "..."}`. Empty disables it. Treat it as a secret. |
 | `webhook.events` | `[]` | Which events to send, from the same names as `discord.events`. |
 | `discord.webhook_api` | `""` | Discord webhook URL. Empty disables Discord. Treat it as a secret. |
@@ -101,7 +103,10 @@ Discord event names: `STARTUP`, `SHUTDOWN`, `STREAMER_ONLINE`,
 `GAIN_FOR_CLAIM`, `GAIN_FOR_RAID`, `BONUS_CLAIM`, `MOMENT_CLAIM`, `JOIN_RAID`,
 `DROP_CLAIM`, `DROP_STATUS`, `BET_START`, `BET_GENERAL`, `BET_FILTERS`,
 `BET_WIN`, `BET_LOSE`, `BET_REFUND`, `BET_FAILED`, `CHAT_MENTION`,
-`WATCH_STATUS`, and `SESSION_LOST`.
+`WATCH_STATUS`, `SESSION_LOST`, `EARNINGS_STALL`, `DROPS_STALL`, and
+`DAILY_REPORT`. The last three are described under
+[earnings ledger and alarms](operations.md#earnings-ledger-and-alarms); like the
+others, an empty list sends them.
 
 ## Predictions (`bet`)
 

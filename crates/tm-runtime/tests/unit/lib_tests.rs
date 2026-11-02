@@ -243,7 +243,7 @@ fn session_summary_hides_points_in_privacy_mode() {
     );
 
     assert_eq!(summary.duration, "00:00:45.000000");
-    assert_eq!(summary.total_points_line, "Total Points gained: [hidden]");
+    assert_eq!(summary.total_points_line, "Total Points gained: +500");
     assert_eq!(summary.streamers[0].current_points, "[hidden]");
     assert_eq!(summary.streamers[0].username, "streamer-1");
     assert_eq!(summary.streamers[0].channel_id, "[hidden]");

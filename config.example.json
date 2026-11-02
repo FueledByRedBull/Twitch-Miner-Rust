@@ -28,6 +28,7 @@
   "followers_order": "DESC",
   "drop_account_link": "linked",
   "drop_discovery_games": [],
+  "log_format": "text",
   "timezone": null,
   "privacy": {
     "anonymize_logs": true

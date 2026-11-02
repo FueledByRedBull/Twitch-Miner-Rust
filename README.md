@@ -104,6 +104,7 @@ container. Pass `--data-dir` so it finds your configuration and session.
 | `--check-config` | Validate the configuration and preview migrations without contacting Twitch. Add `--json` for scripts. |
 | `--status` | Print the sanitized runtime status: tasks, transports, and earning state. |
 | `--health` | Exit successfully only while the running miner's tasks are healthy. Docker uses this as its health check. |
+| `--earnings` | Summarize recorded point rewards by day, channel, or reason without contacting Twitch. Takes `--days N`, `--by`, and `--json`. |
 | `--support-bundle <path>` | Write a privacy-safe support file without cookies, configuration values, or logs. |
 | `--canary` | Run read-only live checks on a dedicated account before a release. |
 
@@ -124,6 +125,7 @@ keeps everything under its data directory:
 | `config.json` | Your settings |
 | `cookies/<username>.json` | Your Twitch session. Treat it like a password. |
 | `log/` | Optional saved logs |
+| `earnings/` | Local record of every point reward, with channel names and balances |
 | `streak-cache.json`, `prediction-placements.json`, `runtime-status.json` | Runtime state; no credentials |
 
 Coming from the Go or Python miner? The [migration guide](docs/migration.md)

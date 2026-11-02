@@ -4,7 +4,7 @@
 //! every sink. Observability failures must not mutate mining state, and log
 //! rotation must retain private file permissions.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -45,6 +45,8 @@ pub struct LoggerSettings {
     pub debug: bool,
     pub debug_deep: bool,
     pub anonymize_logs: bool,
+    /// Write each log record as one JSON object instead of a text line.
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +82,9 @@ pub enum Event {
     ChatMention,
     WatchStatus,
     SessionLost,
+    EarningsStall,
+    DropsStall,
+    DailyReport,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +258,9 @@ pub fn normalize_event_name(raw: &str) -> Option<Event> {
         "CHAT_MENTION" => Some(Event::ChatMention),
         "WATCH_STATUS" => Some(Event::WatchStatus),
         "SESSION_LOST" => Some(Event::SessionLost),
+        "EARNINGS_STALL" => Some(Event::EarningsStall),
+        "DROPS_STALL" => Some(Event::DropsStall),
+        "DAILY_REPORT" => Some(Event::DailyReport),
         _ => None,
     }
 }
@@ -283,6 +291,9 @@ pub fn event_name(event: Event) -> &'static str {
         Event::ChatMention => "CHAT_MENTION",
         Event::WatchStatus => "WATCH_STATUS",
         Event::SessionLost => "SESSION_LOST",
+        Event::EarningsStall => "EARNINGS_STALL",
+        Event::DropsStall => "DROPS_STALL",
+        Event::DailyReport => "DAILY_REPORT",
     }
 }
 
@@ -481,6 +492,7 @@ pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityErr
             .then(|| options.username.trim().to_string())
             .filter(|value| !value.is_empty()),
         include_fields: !options.settings.anonymize_logs,
+        json: options.settings.json,
     };
     let console_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
@@ -528,6 +540,7 @@ struct GoStyleEventFormat {
     timezone: Option<Tz>,
     console_username: Option<String>,
     include_fields: bool,
+    json: bool,
 }
 
 impl<S, N> FormatEvent<S, N> for GoStyleEventFormat
@@ -556,6 +569,18 @@ where
             },
             str::to_string,
         );
+        if self.json {
+            let timestamp =
+                format_timestamp(SystemTime::now(), self.timezone, "%Y-%m-%dT%H:%M:%S%.3f%:z");
+            let line = format_json_line(
+                &timestamp,
+                format_level(*event.metadata().level()),
+                &operation,
+                &visitor,
+            )
+            .map_err(|_| fmt::Error)?;
+            return writeln!(writer, "{line}");
+        }
         let body = visitor.render();
         let username_prefix = self
             .console_username
@@ -581,7 +606,7 @@ struct MessageOnlyVisitor {
     message: Option<String>,
     operation: Option<String>,
     report_line: bool,
-    fields: Vec<String>,
+    fields: Vec<(String, String)>,
     include_fields: bool,
 }
 
@@ -606,7 +631,8 @@ impl MessageOnlyVisitor {
             return;
         }
         if self.include_fields {
-            self.fields.push(format!("{}={}", field.name(), value));
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
         }
     }
 
@@ -621,12 +647,49 @@ impl MessageOnlyVisitor {
     }
 
     fn render(self) -> String {
-        match (self.message, self.fields.is_empty()) {
+        let fields = self
+            .fields
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match (self.message, fields.is_empty()) {
             (Some(message), true) => message,
-            (Some(message), false) => format!("{message} | {}", self.fields.join(" ")),
-            (None, _) => self.fields.join(" "),
+            (Some(message), false) => format!("{message} | {fields}"),
+            (None, _) => fields,
         }
     }
+}
+
+#[derive(Serialize)]
+struct JsonLogLine<'a> {
+    timestamp: &'a str,
+    level: &'a str,
+    operation: &'a str,
+    message: &'a str,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    fields: BTreeMap<&'a str, &'a str>,
+}
+
+/// Renders one record as a JSON object. The visitor already drops fields in
+/// anonymized mode, so redaction is identical to the text layout.
+fn format_json_line(
+    timestamp: &str,
+    level: &str,
+    operation: &str,
+    visitor: &MessageOnlyVisitor,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&JsonLogLine {
+        timestamp,
+        level,
+        operation,
+        message: visitor.message.as_deref().unwrap_or_default(),
+        fields: visitor
+            .fields
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect(),
+    })
 }
 
 impl Visit for MessageOnlyVisitor {
@@ -905,6 +968,35 @@ pub fn format_timestamp(timestamp: SystemTime, timezone: Option<Tz>, format: &st
             .to_string(),
         None => timestamp.with_timezone(&Local).format(format).to_string(),
     }
+}
+
+/// Unix-second bounds `[start, end)` of the calendar day containing `timestamp`,
+/// using the same timezone policy as [`format_timestamp`]. Returns `None` when
+/// local midnight does not exist (a daylight-saving gap at midnight).
+#[must_use]
+pub fn local_day_bounds(timestamp: SystemTime, timezone: Option<Tz>) -> Option<(u64, u64)> {
+    let instant: chrono::DateTime<Utc> = timestamp.into();
+    match timezone {
+        Some(zone) => day_bounds_in(&zone, instant),
+        None => day_bounds_in(&Local, instant),
+    }
+}
+
+fn day_bounds_in<Z: chrono::TimeZone>(
+    zone: &Z,
+    instant: chrono::DateTime<Utc>,
+) -> Option<(u64, u64)> {
+    let day = instant.with_timezone(zone).date_naive();
+    let start = zone
+        .from_local_datetime(&day.and_hms_opt(0, 0, 0)?)
+        .earliest()?;
+    let end = zone
+        .from_local_datetime(&day.succ_opt()?.and_hms_opt(0, 0, 0)?)
+        .earliest()?;
+    Some((
+        u64::try_from(start.timestamp()).ok()?,
+        u64::try_from(end.timestamp()).ok()?,
+    ))
 }
 
 #[cfg(test)]

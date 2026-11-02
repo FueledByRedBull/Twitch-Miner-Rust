@@ -866,6 +866,7 @@ pub(crate) async fn log_pubsub_event(
             channel_id,
             earned,
             reason,
+            balance,
             ..
         } => {
             let snapshot = runtime.state_snapshot().await?;
@@ -876,6 +877,11 @@ pub(crate) async fn log_pubsub_event(
             else {
                 return Ok(());
             };
+            // Callers reach this only for events the runtime accepted, so this
+            // is the one place every accepted reward passes through.
+            if *earned > 0 {
+                observability.record_reward(streamer, *earned, reason, *balance);
+            }
             let message = observability.points_earned_message(streamer, *earned, reason);
             tracing::info!(operation = "on_message", "{message}");
             if let Some(event) = event_from_gain_reason(reason) {

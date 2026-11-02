@@ -32,6 +32,7 @@ Mount one directory at `/data` and keep `config.json` in it. The miner creates
 - `/data/config.json`
 - `/data/cookies/<username>.json`
 - `/data/log/*.log`
+- `/data/earnings/YYYY-MM.jsonl`
 
 The container sets `TCPM_CONFIG=/data/config.json` and `TCPM_DATA_DIR=/data`.
 
@@ -151,6 +152,7 @@ starts it again, and startup reauthorizes.
 | `--check-config` | Validate the configuration and preview migrations without contacting Twitch. Use it before migrating. Add `--json` for scripts. |
 | `--health` | Check that the running miner's tasks are fresh. Docker uses this as its health check; run it after starting or updating. |
 | `--status` | Print the sanitized runtime status described below. |
+| `--earnings` | Summarize the earnings ledger without contacting Twitch; see [earnings ledger and alarms](#earnings-ledger-and-alarms). Takes `--days N`, `--by day\|channel\|reason`, and `--json`. |
 | `--import-token` | Read a Twitch OAuth token from standard input, validate it, and save it as the session. |
 | `--support-bundle <path>` | Write version, status, and file-count metadata without cookies, configuration values, or log contents. |
 
@@ -215,11 +217,87 @@ protected; never delete recent records or restore an older journal to make
 room. The limits are described under
 [mutation safety](protocol-inventory.md#mutation-safety).
 
+**Earnings.** The `earnings` block reports `session_points` (rewards accepted
+since the process started), `today_points` (rewards accepted today, in the
+configured timezone, including earlier runs the same day), the ledger health
+counters `ledger_dropped_writes` and `ledger_write_failures`, and the current
+state of the two alarms, `earnings_stall` and `drops_stall`. A non-zero
+`ledger_dropped_writes` means rewards happened that the ledger could not record;
+the miner itself is unaffected. `--support-bundle` keeps the health counters and
+alarm state but leaves out the point totals. Status files from earlier releases
+have no `earnings` block, and earlier releases ignore it.
+
+## Earnings ledger and alarms
+
+Every reward the runtime accepts is appended to `earnings/YYYY-MM.jsonl` in the
+data directory, one file per UTC month, one compact JSON object per line:
+
+```json
+{"v":1,"ts":1793620800,"channel_id":"100","login":"alice","reason":"WATCH","points":10,"balance":12345,"game":"Chess"}
+```
+
+`ts` is Unix seconds, `reason` is Twitch's reason (`WATCH`, `CLAIM`,
+`WATCH_STREAK`, `RAID`, and so on), and `balance` and `game` are left out when
+unknown. Only gains are recorded: stakes and other spends are not, so
+`PREDICTION` shows payouts only. The ledger holds channel names and balances
+even when `privacy.anonymize_logs` is on, so treat it like the cookie
+directory: it is created readable only by the miner's user, and the support
+bundle never includes it. It grows by a few megabytes a month and is never
+pruned; delete old months yourself if you do not want them. A line torn by a
+crash is skipped by readers and the next record starts on a fresh line.
+
+Writes go through a bounded queue to a separate task, so a slow or failing disk
+never delays mining. When the queue is full or a write fails, the reward is
+counted in `ledger_dropped_writes` and the miner carries on.
+
+```sh
+docker compose exec -T twitch-miner /twitch-miner --earnings --data-dir /data
+docker compose exec -T twitch-miner /twitch-miner --earnings --days 30 --by channel --data-dir /data
+docker compose exec -T twitch-miner /twitch-miner --earnings --by reason --json --data-dir /data
+```
+
+`--earnings` works while the miner runs or not and needs no network. It prints
+the total, the number of rewards, the average points per hour since the first
+reward in the period, and a breakdown `--by day` (the default, UTC days), `channel`,
+or `reason`. `--days` defaults to 7 and accepts 1 to 3650. Only the monthly
+files that overlap the period are read, line by line. Channel names are printed
+as they are in the ledger, whatever `privacy.anonymize_logs` says.
+
+Two alarms report silent losses, each as one notification when it starts and one
+when it clears. Both run every five minutes, log a warning, and appear in
+`--status`. Add the event names to `discord.events` or `webhook.events` to
+filter them; an empty list sends all events.
+
+- `EARNINGS_STALL`: `WATCH` and `CLAIM` points over the last two hours fell below
+  40% of your normal and have not yet recovered above 60%. Your normal is the
+  median points per hour, over the last 14 days of ledger hours that earned
+  anything, leaving out the two hours being judged, and half that while only one
+  slot is selected. With fewer than 72 such hours it is 315 points per hour for
+  each watched slot (two slots earn about 630). The alarm only judges a window in which at least one slot was selected
+  at every check, so it stays quiet while channels are offline, after a restart
+  until two hours have been observed, and after the machine was suspended.
+- `DROPS_STALL`: a channel pinned for a Drop campaign has been selected for
+  three cumulative hours and the unclaimed Drop minutes in your inventory have
+  not changed at all. Any change, including a Drop being claimed, resets the
+  count and clears the alarm. The count lives in memory and restarts with the
+  process.
+
+`DAILY_REPORT` is sent once per local day, at the first check after midnight in
+the configured timezone: yesterday's points by reason, the three best channels,
+and the unclaimed Drop minutes in your inventory when it is known. Streamer
+names follow `privacy.anonymize_logs`; totals do not. The reported day is
+remembered in `earnings/last-daily-report`, so a restart does not send it again,
+and a day without rewards sends nothing.
+
 ## Logs and storage
 
 Console and saved logs use the format
 `HH:MM:SS DD/MM/YY - LEVEL - [operation]: message`, with seconds controlled by
-`show_seconds`. Important events use stable operation names such as `run`,
+`show_seconds`. With `"log_format": "json"` each record is instead one JSON
+object per line, for example
+`{"timestamp":"2026-11-02T12:00:00.000+02:00","level":"INFO","operation":"on_message","message":"..."}`;
+extra values appear in a `fields` object of strings, and are left out under
+`privacy.anonymize_logs` exactly as the text format leaves them out. Important events use stable operation names such as `run`,
 `set_online`, `set_offline`, `on_message`, `claim_bonus`, `update_raid`, and
 `make_predictions`, with emoji when `emojis` is enabled.
 
@@ -228,8 +306,9 @@ On normal shutdown the miner prints the session ID, saved log path, duration as
 points and history summary. Report lines use the shape
 `HH:MM:SS DD/MM/YY - emoji/content` without the level and operation. With
 `privacy.anonymize_logs`, streamer names become aliases; channel, event and
-outcome IDs, titles, points, decisions, and results are hidden; and the log
-file is named `miner.log`.
+outcome IDs, titles, per-channel points, decisions, and results are hidden; the
+session's total points gained is still shown; and the log file is named
+`miner.log`.
 
 Writes are bounded. `runtime-status.json` is replaced atomically on the
 30-second supervision heartbeat, `streak-cache.json` is flushed every 30

@@ -75,9 +75,8 @@ pub fn build_session_summary(
         })
         .sum();
 
-    let total_points_line = if anonymize {
-        "Total Points gained: [hidden]".to_string()
-    } else {
+    // The account's own total is never hidden; names and per-channel figures still are.
+    let total_points_line = {
         let sign = if total_points_change < 0 { "-" } else { "+" };
         format!("Total Points gained: {sign}{}", total_points_change.abs())
     };

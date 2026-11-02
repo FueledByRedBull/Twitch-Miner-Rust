@@ -477,6 +477,41 @@ fn existing_config_stays_readable_by_a_rollback_release() {
 }
 
 #[test]
+fn log_format_defaults_to_text_and_accepts_json() {
+    let dir = unique_temp_dir("log-format");
+    fs::create_dir_all(&dir).unwrap();
+
+    let default_path = dir.join("default.json");
+    fs::write(&default_path, br#"{"username":"Alice"}"#).unwrap();
+    assert_eq!(
+        load_or_create_config(&default_path).unwrap().log_format,
+        LogFormat::Text
+    );
+
+    let json_path = dir.join("json.json");
+    fs::write(&json_path, br#"{"username":"Alice","log_format":"json"}"#).unwrap();
+    assert_eq!(
+        load_or_create_config(&json_path).unwrap().log_format,
+        LogFormat::Json
+    );
+}
+
+#[test]
+fn unsupported_log_format_is_rejected_with_its_path_and_choices() {
+    let dir = unique_temp_dir("log-format-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    for (name, raw) in [("xml", r#""xml""#), ("upper", r#""JSON""#), ("number", "3")] {
+        let path = dir.join(format!("{name}.json"));
+        let original = format!(r#"{{"username":"Alice","log_format":{raw}}}"#);
+        fs::write(&path, &original).unwrap();
+        let error = load_or_create_config(&path).unwrap_err().to_string();
+        assert!(error.contains("config.log_format"), "{error}");
+        assert!(error.contains("\"text\" or \"json\""), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+}
+
+#[test]
 fn atomic_write_replaces_existing_file_and_cleans_failed_temporary_files() {
     let dir = unique_temp_dir("atomic-write");
     fs::create_dir_all(&dir).unwrap();

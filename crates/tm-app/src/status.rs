@@ -46,6 +46,16 @@ struct RuntimeStatus {
     pubsub: Option<tm_pubsub::PubSubSetupReport>,
     #[serde(default)]
     prediction_journal: Option<crate::prediction_journal::JournalCapacity>,
+    /// Absent from files written by earlier releases, and ignored by their readers, so the schema version stays.
+    #[serde(default)]
+    earnings: crate::earnings::EarningsStatus,
+}
+
+impl RuntimeStatus {
+    fn without_points(mut self) -> Self {
+        self.earnings = self.earnings.without_points();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -120,6 +130,7 @@ pub(crate) struct HealthTracker {
     pubsub: Arc<Mutex<Option<tm_pubsub::PubSubSetupReport>>>,
     watch_slots: Arc<Mutex<Vec<WatchSlotStatus>>>,
     prediction_journal: Arc<Mutex<Option<crate::prediction_journal::PredictionPlacementJournal>>>,
+    earnings: crate::earnings::EarningsTracker,
 }
 
 impl HealthTracker {
@@ -373,6 +384,40 @@ impl HealthTracker {
         } else {
             counters.drop_progress.push(snapshot);
         }
+    }
+
+    pub(crate) fn earnings(&self) -> crate::earnings::EarningsTracker {
+        self.earnings.clone()
+    }
+
+    pub(crate) fn selected_watch_slots(&self) -> u32 {
+        let selected = self
+            .watch_slots_snapshot()
+            .iter()
+            .filter(|slot| slot.selected)
+            .count();
+        u32::try_from(selected).unwrap_or(u32::MAX)
+    }
+
+    /// Whether a slot is currently held by the Drop campaign pin.
+    pub(crate) fn drop_target_selected(&self) -> bool {
+        self.watch_slots_snapshot().iter().any(|slot| {
+            slot.selected && slot.selection_reason.as_deref() == Some("campaign-priority")
+        })
+    }
+
+    /// Minutes watched across Drops that are not yet claimed, or `None` before
+    /// any inventory has been read.
+    pub(crate) fn unclaimed_drop_minutes(&self) -> Option<i64> {
+        let counters = self.counters_snapshot();
+        (!counters.drop_progress.is_empty()).then(|| {
+            counters
+                .drop_progress
+                .iter()
+                .filter(|drop| !drop.is_claimed)
+                .map(|drop| drop.current_minutes_watched)
+                .sum()
+        })
     }
 
     pub(crate) fn set_watch_selection(
@@ -630,6 +675,7 @@ impl StatusReporter {
                 .as_ref()
                 .map(crate::prediction_journal::PredictionPlacementJournal::capacity)
                 .transpose()?,
+            earnings: self.health.earnings.status(now),
         };
         atomic_json_write(&self.path, &status)?;
         Ok((status, now))
@@ -670,7 +716,9 @@ pub(crate) fn write_support_bundle(work_dir: &Path, destination: &Path) -> Resul
         version: build_info::VERSION,
         revision: build_info::GIT_REVISION,
         target: build_info::TARGET,
-        runtime_status: read_status(&work_dir.join(STATUS_FILE_NAME)).ok(),
+        runtime_status: read_status(&work_dir.join(STATUS_FILE_NAME))
+            .ok()
+            .map(RuntimeStatus::without_points),
         config_exists: config_path.is_file(),
         config_size_bytes: fs::metadata(config_path).ok().map(|value| value.len()),
         cookie_file_count: count_files(&work_dir.join("cookies")),
@@ -889,7 +937,7 @@ fn unix_now() -> Result<u64> {
         .map_err(|error| anyhow!("system clock predates Unix epoch: {error}"))
 }
 
-fn unix_now_infallible() -> u64 {
+pub(crate) fn unix_now_infallible() -> u64 {
     unix_now().unwrap_or_default()
 }
 
@@ -1009,6 +1057,7 @@ mod tests {
             eventsub: None,
             pubsub: None,
             prediction_journal: None,
+            earnings: crate::earnings::EarningsStatus::default(),
         };
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());

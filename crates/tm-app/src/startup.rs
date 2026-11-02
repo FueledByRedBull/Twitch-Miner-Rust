@@ -20,6 +20,7 @@ pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
         debug: config.debug,
         debug_deep: config.debug_deep,
         anonymize_logs: config.privacy.anonymize_logs,
+        json: config.log_format == tm_config::LogFormat::Json,
     }
 }
 
