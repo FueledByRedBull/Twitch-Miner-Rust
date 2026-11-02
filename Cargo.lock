@@ -1541,6 +1541,7 @@ name = "tm-auth"
 version = "0.3.7"
 dependencies = [
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

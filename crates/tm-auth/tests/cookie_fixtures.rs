@@ -15,7 +15,7 @@ fn current_cookie_fixture_decodes_and_builds_headers() {
     let store = decode_cookie_store(&bytes).unwrap();
     assert!(store.contains_key("auth-token"));
 
-    let session = AuthSession::from_bytes("fixture-user", &bytes).unwrap();
+    let session = AuthSession::from_bytes("fixture-user", &bytes, None).unwrap();
     assert_eq!(session.auth_token(), Some("token-123"));
     assert_eq!(session.user_id(), Some("user-123"));
     assert!(session
@@ -27,7 +27,7 @@ fn current_cookie_fixture_decodes_and_builds_headers() {
 #[test]
 fn legacy_cookie_fixture_decodes_and_roundtrips_to_session() {
     let bytes = fs::read(fixture_path("cookies.legacy.json")).unwrap();
-    let session = AuthSession::from_bytes("fixture-user", &bytes).unwrap();
+    let session = AuthSession::from_bytes("fixture-user", &bytes, None).unwrap();
     assert_eq!(session.auth_token(), Some("token-123"));
     assert_eq!(session.user_id(), Some("user-123"));
     assert!(session
@@ -39,7 +39,7 @@ fn legacy_cookie_fixture_decodes_and_roundtrips_to_session() {
 #[test]
 fn missing_auth_token_fixture_loads_without_session_token() {
     let bytes = fs::read(fixture_path("cookies.missing_auth_token.json")).unwrap();
-    let session = AuthSession::from_bytes("fixture-user", &bytes).unwrap();
+    let session = AuthSession::from_bytes("fixture-user", &bytes, None).unwrap();
     assert_eq!(session.auth_token(), None);
     assert_eq!(session.user_id(), Some("user-123"));
 }

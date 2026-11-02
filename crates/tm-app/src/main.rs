@@ -9,8 +9,8 @@
 //! in `tm-twitch`, `tm-pubsub`, and `tm-irc`.
 //!
 //! The normal path in [`run_cli`] resolves paths and handles immediate
-//! health/status/earnings/config/support-bundle commands, then loads and validates the
-//! config, prepares the work directory, and initializes tracing. It creates the
+//! health/status/earnings/config/support-bundle/auth-status/decrypt-session commands,
+//! then loads and validates the config, prepares the work directory, and initializes tracing. It creates the
 //! session/client, bootstraps streamer context, presence, and streak cache,
 //! starts the `tm-runtime` state handle, spawns the background tasks, publishes ready
 //! health, and waits for a signal or task failure. `--canary`
@@ -40,11 +40,13 @@ use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
+use tm_auth::SessionKey;
 use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
 use tm_twitch::TwitchClient;
 
 mod alarms;
+mod auth_commands;
 mod bootstrap;
 mod canary;
 mod channel_yield;
@@ -73,12 +75,15 @@ mod watching;
 
 use bootstrap::{
     build_http_client, has_override, import_session_token, load_config_with_fallback,
-    load_or_login_session, log_timezone_validation, prepare_work_dir, preview_config_with_fallback,
-    validate_app_config, validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
+    load_or_login_session, load_session_key, log_timezone_validation, prepare_work_dir,
+    preview_config_with_fallback, validate_app_config, validate_timezone_override, LoadedConfig,
+    DEFAULT_USER_AGENT,
 };
 use drops::claim_startup_drops_if_enabled;
 use identity_cache::IdentityCache;
-use observability::{build_observability, log_session_summary, log_startup};
+use observability::{
+    build_observability, device_login_delivery_warning, log_session_summary, log_startup,
+};
 use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
 use startup::{
     bootstrap_runtime_state_with_identity_cache, build_canary_logger_settings,
@@ -103,7 +108,7 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 #[allow(clippy::struct_excessive_bools)]
 #[command(
     version = build_info::VERSION,
-    group(clap::ArgGroup::new("json_target").args(["check_config", "earnings"]))
+    group(clap::ArgGroup::new("json_target").args(["check_config", "earnings", "auth_status"]))
 )]
 /// Unofficial Twitch channel-points miner.
 struct Cli {
@@ -122,7 +127,7 @@ struct Cli {
     /// Print the running miner's sanitized status
     #[arg(long, conflicts_with = "check_config")]
     status: bool,
-    /// Print the configuration check or earnings report as JSON (with --check-config or --earnings)
+    /// Print the configuration check, earnings report, or session state as JSON (with --check-config, --earnings or --auth-status)
     #[arg(long, requires = "json_target")]
     json: bool,
     /// Summarize recorded point rewards from the earnings ledger, without contacting Twitch
@@ -143,6 +148,12 @@ struct Cli {
     /// Read a Twitch OAuth token from standard input, validate it, and save it as the session
     #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary"])]
     import_token: bool,
+    /// Check the saved session once with Twitch and print its state, without changing it
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary", "import_token", "earnings", "decrypt_session"])]
+    auth_status: bool,
+    /// Rewrite the encrypted session file and its backup as plaintext for a rollback; needs the session key file
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary", "import_token", "earnings", "auth_status"])]
+    decrypt_session: bool,
 }
 
 fn main() -> Result<()> {
@@ -160,16 +171,18 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 async fn run_cli(cli: Cli) -> Result<()> {
     let has_override = has_override(&cli);
     let requested_paths = resolve_app_paths_from_env(cli.config.clone(), cli.data_dir.clone())?;
-    if let Some(result) = run_immediate_command(&cli, &requested_paths) {
+    if let Some(result) = run_immediate_command(&cli, &requested_paths).await {
         return result;
     }
     let loaded_config = load_active_config(&cli, &requested_paths, has_override)?;
+    let session_key = load_session_key(|message| tracing::warn!(operation = "auth", "{message}"))?;
     if cli.canary {
         let http_client = build_http_client()?;
         return canary::run_read_only_canary(
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
             http_client,
+            session_key.as_ref(),
         )
         .await;
     }
@@ -183,13 +196,18 @@ async fn run_cli(cli: Cli) -> Result<()> {
             &loaded_config.active_paths.work_dir,
             &tm_auth::TwitchAuthClient::with_client(build_http_client()?),
             &token,
+            session_key.as_ref(),
         )
         .await;
     }
-    run_prepared_miner(prepare_miner(loaded_config).await?, requested_paths).await
+    run_prepared_miner(
+        prepare_miner(loaded_config, session_key.as_ref()).await?,
+        requested_paths,
+    )
+    .await
 }
 
-fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
+async fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
     if cli.health {
         return Some(status::check_health(&paths.work_dir));
     }
@@ -203,6 +221,12 @@ fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
             cli.by.unwrap_or(earnings::EarningsGrouping::Day),
             cli.json,
         ));
+    }
+    if cli.auth_status {
+        return Some(auth_commands::print_auth_status(paths, cli.json).await);
+    }
+    if cli.decrypt_session {
+        return Some(auth_commands::decrypt_session(paths));
     }
     if cli.check_config {
         return Some(check_config(&paths.config_path, cli.json));
@@ -300,12 +324,18 @@ struct PreparedMiner {
 }
 
 #[allow(clippy::too_many_lines)] // Keep the ordered startup and state-loading steps together.
-async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
+async fn prepare_miner(
+    loaded_config: LoadedConfig,
+    session_key: Option<&SessionKey>,
+) -> Result<PreparedMiner> {
     let LoadedConfig {
         config,
         active_paths,
     } = loaded_config;
     let observability = build_observability(&config)?;
+    if let Some(warning) = device_login_delivery_warning(&config, &observability) {
+        tracing::warn!(operation = "auth", "{warning}");
+    }
     tracing::info!(
         operation = "run",
         "{} | {}",
@@ -322,8 +352,14 @@ async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
     );
     let started_at = time_now();
     let http_client = build_http_client()?;
-    let session =
-        load_or_login_session(&config, &active_paths.work_dir, http_client.clone()).await?;
+    let session = load_or_login_session(
+        &config,
+        &active_paths.work_dir,
+        http_client.clone(),
+        session_key,
+        &observability,
+    )
+    .await?;
     let auth_token = session
         .auth_token()
         .ok_or_else(|| anyhow!("missing auth token after login"))?

@@ -214,6 +214,9 @@ pub struct ConfigFile {
     pub streak_discovery_games: Vec<String>,
     #[serde(default)]
     pub log_format: LogFormat,
+    /// Also send the device-login URL and code through the notifiers.
+    #[serde(default)]
+    pub notify_device_login: bool,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
@@ -270,6 +273,7 @@ pub fn default_config_value() -> Value {
         "drop_discovery_games": [],
         "streak_discovery_games": [],
         "log_format": "text",
+        "notify_device_login": false,
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
@@ -952,6 +956,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "drop_discovery_games",
     "streak_discovery_games",
     "log_format",
+    "notify_device_login",
     "bet",
     "timezone",
     "privacy",
@@ -983,6 +988,7 @@ const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &[
     "drop_discovery_games",
     "streak_discovery_games",
     "log_format",
+    "notify_device_login",
     "webhook",
 ];
 const WEBHOOK_CONFIG_KEYS: &[&str] = &["url", "events"];

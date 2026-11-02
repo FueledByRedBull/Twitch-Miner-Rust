@@ -166,6 +166,15 @@ diagnosis. Backup paths are restricted to the deployment operator on the host.
 This is a local persistent-state guarantee; it cannot reverse remote Twitch
 mutations, and a rollback binary still needs a compatible data-format check.
 
+**Encrypted sessions.** Releases before 0.3.8 cannot read a session file that
+was encrypted with `TCPM_COOKIE_KEY_FILE`; they treat it as damaged and replace
+it with a new device login. Before pointing `TWITCH_MINER_IMAGE` at such a
+release, stop the service and run `--decrypt-session` with the current image and
+the key file still mounted, as described in
+[encrypting the saved session](operations.md#encrypting-the-saved-session), or
+plan to log in again after the rollback. Restoring a data snapshot taken before
+encryption was enabled also brings back a plaintext session file.
+
 Prediction journals can retain more than 128 resolved replay records, while
 limiting unresolved placements to 128 and the file to 256 KiB. Older binaries
 that count all records against 128 will reject such a journal. Before rollback,

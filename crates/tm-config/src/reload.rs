@@ -87,6 +87,7 @@ pub(crate) const SETTING_RULES: &[Rule] = &[
     // Live because the config-watch task reads the running value at each check.
     live("streak_discovery_games", true),
     restart("log_format", true),
+    restart("notify_device_login", true),
     live("bet", true),
     restart("timezone", true),
     restart("privacy", true),

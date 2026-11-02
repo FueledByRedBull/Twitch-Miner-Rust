@@ -3,11 +3,13 @@
 The project runs as a Cargo workspace with crate boundaries split by
 responsibility:
 
-- `tm-app` owns process bootstrap, task wiring, the local earnings ledger, and
-  the config reload task.
+- `tm-app` owns process bootstrap, task wiring, the local earnings ledger,
+  the config reload task, and the immediate `--auth-status` and
+  `--decrypt-session` commands.
 - `tm-config` owns config/path resolution and write-back; typed streamer-setting
   composition is isolated from persistence and migration.
-- `tm-auth` owns cookie persistence and device auth helpers.
+- `tm-auth` owns cookie persistence, including the opt-in AES-256-GCM encryption
+  of the session file (the only direct use of `ring`), and device auth helpers.
 - `tm-domain` owns pure logic, shared types, and the transport-neutral
   `MinerEvent` contract.
 - `tm-twitch` owns Twitch HTTP, GQL, and scraping contracts. HTTP execution and

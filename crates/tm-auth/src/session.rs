@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -13,6 +14,7 @@ use crate::cookies::{
     loaded_cookie_store, normalize_username, normalized_cookie_domain, CookieStore,
     CookieStoreError,
 };
+use crate::encryption::{is_encrypted_session, SessionKey};
 
 const SPECIAL_COOKIE_DOMAINS: [&str; 2] = ["twitch.tv", "id.twitch.tv"];
 const REFRESH_TOKEN_COOKIE_DOMAIN: &str = "refresh-token.invalid";
@@ -25,6 +27,21 @@ pub enum AuthSessionError {
     CookieStore(#[from] CookieStoreError),
     #[error("cookie encode error: {0}")]
     CookieEncode(#[from] serde_json::Error),
+    #[error(
+        "the saved session is encrypted; set TCPM_COOKIE_KEY_FILE to the file holding its key"
+    )]
+    EncryptedWithoutKey,
+    #[error(
+        "the saved session could not be decrypted: the key in TCPM_COOKIE_KEY_FILE is wrong, \
+         the file belongs to another account, or it was modified; the file was left unchanged"
+    )]
+    Decrypt,
+    #[error("the saved session uses encrypted format version {0}, which this release cannot read")]
+    UnsupportedEncryptionVersion(u8),
+    #[error("the session could not be encrypted")]
+    Encrypt,
+    #[error("the saved session is not encrypted")]
+    NotEncrypted,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -58,32 +75,45 @@ impl AuthSession {
         }
     }
 
-    pub fn from_bytes(username: impl Into<String>, bytes: &[u8]) -> Result<Self, AuthSessionError> {
-        Ok(Self::new(username, decode_cookie_store(bytes)?))
+    /// Decodes session file contents. Plaintext is always accepted; encrypted
+    /// contents need `key` and the login they were written for.
+    pub fn from_bytes(
+        username: impl Into<String>,
+        bytes: &[u8],
+        key: Option<&SessionKey>,
+    ) -> Result<Self, AuthSessionError> {
+        let username = username.into().trim().to_ascii_lowercase();
+        let plaintext = open_session_bytes(&username, bytes, key)?;
+        Ok(Self::new(username, decode_cookie_store(&plaintext)?))
     }
 
     pub fn load_from_dir(
         base_dir: impl AsRef<Path>,
         username: impl Into<String>,
+        key: Option<&SessionKey>,
     ) -> Result<Self, AuthSessionError> {
         let username = normalize_username(&username.into())?;
         let bytes = fs::read(cookie_file_path(base_dir, &username)?)?;
-        Self::from_bytes(username, &bytes)
+        Self::from_bytes(username, &bytes, key)
     }
 
+    /// Loads the session, falling back to the backup only when the file is
+    /// missing or is not a valid session. An encrypted file that cannot be
+    /// decrypted is never treated as invalid, so it is never replaced.
     pub fn load_from_dir_with_backup(
         base_dir: impl AsRef<Path>,
         username: impl Into<String>,
+        key: Option<&SessionKey>,
     ) -> Result<(Self, bool), AuthSessionError> {
         let base_dir = base_dir.as_ref();
         let username = normalize_username(&username.into())?;
-        match Self::load_from_dir(base_dir, &username) {
+        match Self::load_from_dir(base_dir, &username, key) {
             Ok(session) => Ok((session, false)),
             Err(primary_error) if session_file_is_missing_or_invalid(&primary_error) => {
-                let backup = cookie_file_path(base_dir, &username)?.with_extension("json.bak");
+                let backup = backup_file_path(&cookie_file_path(base_dir, &username)?);
                 match fs::read(backup)
                     .map_err(AuthSessionError::Io)
-                    .and_then(|bytes| Self::from_bytes(&username, &bytes))
+                    .and_then(|bytes| Self::from_bytes(&username, &bytes, key))
                 {
                     Ok(session) => Ok((session, true)),
                     Err(backup_error) if session_file_is_missing_or_invalid(&backup_error) => {
@@ -96,32 +126,106 @@ impl AuthSession {
         }
     }
 
-    pub fn restore_to_dir(&self, base_dir: impl AsRef<Path>) -> Result<(), AuthSessionError> {
+    /// Rewrites the session file without touching the backup, which is the
+    /// source of a session recovered from it. With a key, the file is written
+    /// encrypted and a plaintext backup is encrypted in place.
+    pub fn restore_to_dir(
+        &self,
+        base_dir: impl AsRef<Path>,
+        key: Option<&SessionKey>,
+    ) -> Result<(), AuthSessionError> {
         let path = cookie_file_path(base_dir, &self.username)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        if let Some(current) = read_if_exists(&path)? {
+            open_session_bytes(&self.username, &current, key)?;
+        }
         let payload = encode_cookie_store(&self.store)?;
-        atomic_write_cookie_file(&path, payload.as_bytes())?;
-        Ok(())
+        atomic_write_cookie_file(
+            &path,
+            &seal_for_disk(&self.username, payload.as_bytes(), key)?,
+        )?;
+        encrypt_plaintext_backup(&path, &self.username, key)
     }
 
-    pub fn save_to_dir(&self, base_dir: impl AsRef<Path>) -> Result<(), AuthSessionError> {
+    /// Saves the session, keeping the previous version as the backup. A file
+    /// this process cannot read (encrypted without a key, or under a different
+    /// key) is never overwritten. With a key, a plaintext session file and its
+    /// plaintext backup are both replaced by encrypted ones.
+    pub fn save_to_dir(
+        &self,
+        base_dir: impl AsRef<Path>,
+        key: Option<&SessionKey>,
+    ) -> Result<(), AuthSessionError> {
         let path = cookie_file_path(base_dir, &self.username)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let payload = encode_cookie_store(&self.store)?;
-        if fs::read(&path).is_ok_and(|current| current == payload.as_bytes()) {
-            set_private_cookie_permissions(&path)?;
-            return Ok(());
+        let current = read_if_exists(&path)?;
+        if let Some(current) = &current {
+            if open_session_bytes(&self.username, current, key)?.as_ref() == payload.as_bytes() {
+                if key.is_some() && !is_encrypted_session(current) {
+                    // Only the format changes, so the backup stays the previous version.
+                    atomic_write_cookie_file(
+                        &path,
+                        &seal_for_disk(&self.username, payload.as_bytes(), key)?,
+                    )?;
+                } else {
+                    set_private_cookie_permissions(&path)?;
+                }
+                return encrypt_plaintext_backup(&path, &self.username, key);
+            }
         }
         if path.is_file() {
-            let backup = path.with_extension("json.bak");
-            fs::copy(&path, &backup)?;
-            set_private_cookie_permissions(&backup)?;
+            let backup = backup_file_path(&path);
+            match (&current, key) {
+                (Some(current), Some(key)) if !is_encrypted_session(current) => {
+                    let sealed = key.seal(&self.username, current)?;
+                    atomic_write_cookie_file(&backup, &sealed)?;
+                }
+                _ => {
+                    fs::copy(&path, &backup)?;
+                    set_private_cookie_permissions(&backup)?;
+                }
+            }
         }
-        atomic_write_cookie_file(&path, payload.as_bytes())?;
+        atomic_write_cookie_file(
+            &path,
+            &seal_for_disk(&self.username, payload.as_bytes(), key)?,
+        )?;
+        encrypt_plaintext_backup(&path, &self.username, key)
+    }
+
+    /// Rewrites the encrypted session file and its backup as plaintext, for a
+    /// rollback to a release that cannot read encrypted files. Nothing is
+    /// written unless every existing file decrypts.
+    pub fn decrypt_session_files(
+        base_dir: impl AsRef<Path>,
+        username: impl Into<String>,
+        key: &SessionKey,
+    ) -> Result<(), AuthSessionError> {
+        let username = normalize_username(&username.into())?;
+        let path = cookie_file_path(base_dir, &username)?;
+        let current = fs::read(&path)?;
+        if !is_encrypted_session(&current) {
+            return Err(AuthSessionError::NotEncrypted);
+        }
+        let plaintext = key.open(&username, &current)?;
+        let backup_path = backup_file_path(&path);
+        let backup_plaintext = match fs::read(&backup_path) {
+            Ok(bytes) if is_encrypted_session(&bytes) => Some(key.open(&username, &bytes)?),
+            Ok(_) => None,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        // The backup goes first: a failure between the two writes leaves the
+        // session file encrypted, so the command can simply be run again.
+        if let Some(backup_plaintext) = backup_plaintext {
+            atomic_write_cookie_file(&backup_path, &backup_plaintext)?;
+        }
+        atomic_write_cookie_file(&path, &plaintext)?;
         Ok(())
     }
 
@@ -259,6 +363,65 @@ fn session_file_is_missing_or_invalid(error: &AuthSessionError) -> bool {
         error,
         AuthSessionError::Io(error) if error.kind() == io::ErrorKind::NotFound
     ) || matches!(error, AuthSessionError::CookieStore(_))
+}
+
+/// The file's contents, or `None` when it does not exist. Any other failure is an
+/// error, so an unreadable file is never mistaken for a missing one.
+fn read_if_exists(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn backup_file_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+/// Plaintext passes through; encrypted contents need the key.
+fn open_session_bytes<'a>(
+    username: &str,
+    bytes: &'a [u8],
+    key: Option<&SessionKey>,
+) -> Result<Cow<'a, [u8]>, AuthSessionError> {
+    if !is_encrypted_session(bytes) {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let key = key.ok_or(AuthSessionError::EncryptedWithoutKey)?;
+    key.open(username, bytes).map(Cow::Owned)
+}
+
+fn seal_for_disk(
+    username: &str,
+    plaintext: &[u8],
+    key: Option<&SessionKey>,
+) -> Result<Vec<u8>, AuthSessionError> {
+    match key {
+        Some(key) => key.seal(username, plaintext),
+        None => Ok(plaintext.to_vec()),
+    }
+}
+
+/// With a key, no plaintext copy of the session may stay behind in the backup.
+fn encrypt_plaintext_backup(
+    path: &Path,
+    username: &str,
+    key: Option<&SessionKey>,
+) -> Result<(), AuthSessionError> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    let backup = backup_file_path(path);
+    match fs::read(&backup) {
+        Ok(bytes) if !is_encrypted_session(&bytes) => {
+            atomic_write_cookie_file(&backup, &key.seal(username, &bytes)?)?;
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn atomic_write_cookie_file(path: &Path, payload: &[u8]) -> io::Result<()> {
@@ -423,9 +586,9 @@ mod tests {
     fn session_roundtrips_through_cookie_file() {
         let dir = tempfile::tempdir().unwrap();
         let session = sample_session();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
-        let loaded = AuthSession::load_from_dir(dir.path(), "ALICE").unwrap();
+        let loaded = AuthSession::load_from_dir(dir.path(), "ALICE", None).unwrap();
         assert_eq!(loaded.username(), "alice");
         assert_eq!(loaded.auth_token(), Some("token"));
         assert_eq!(loaded.user_id(), Some("user-1"));
@@ -456,14 +619,14 @@ mod tests {
         let session = AuthSession::new("../escape", CookieStore::new());
 
         assert!(matches!(
-            session.save_to_dir(dir.path()),
+            session.save_to_dir(dir.path(), None),
             Err(AuthSessionError::CookieStore(
                 CookieStoreError::InvalidUsername
             ))
         ));
         assert!(!dir.path().join("cookies").exists());
         assert!(matches!(
-            AuthSession::load_from_dir(dir.path(), "C:\\escape"),
+            AuthSession::load_from_dir(dir.path(), "C:\\escape", None),
             Err(AuthSessionError::CookieStore(
                 CookieStoreError::InvalidUsername
             ))
@@ -472,7 +635,7 @@ mod tests {
         let kelvin_sign = char::from_u32(0x212a).unwrap().to_string();
         let unicode_session = AuthSession::new(kelvin_sign, CookieStore::new());
         assert!(matches!(
-            unicode_session.save_to_dir(dir.path()),
+            unicode_session.save_to_dir(dir.path(), None),
             Err(AuthSessionError::CookieStore(
                 CookieStoreError::InvalidUsername
             ))
@@ -488,9 +651,9 @@ mod tests {
 
         assert!(session.has_scope("chat:read"));
         assert!(session.has_any_scope(&["channel:manage:predictions", "channel:read:predictions",]));
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
-        let loaded = AuthSession::load_from_dir(dir.path(), "alice").unwrap();
+        let loaded = AuthSession::load_from_dir(dir.path(), "alice", None).unwrap();
         assert!(!loaded.has_scope("channel:read:predictions"));
     }
 
@@ -513,17 +676,20 @@ mod tests {
     fn changed_cookie_file_keeps_previous_version_as_backup() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = sample_session();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
         session.set_auth_token("replacement-token");
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
         let path = cookie_file_path(dir.path(), session.username()).unwrap();
-        let backup =
-            AuthSession::from_bytes("alice", &fs::read(path.with_extension("json.bak")).unwrap())
-                .unwrap();
+        let backup = AuthSession::from_bytes(
+            "alice",
+            &fs::read(path.with_extension("json.bak")).unwrap(),
+            None,
+        )
+        .unwrap();
         assert_eq!(backup.auth_token(), Some("token"));
         assert_eq!(
-            AuthSession::load_from_dir(dir.path(), "alice")
+            AuthSession::load_from_dir(dir.path(), "alice", None)
                 .unwrap()
                 .auth_token(),
             Some("replacement-token")
@@ -534,21 +700,21 @@ mod tests {
     fn backup_load_is_limited_to_missing_or_invalid_primary_files() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = sample_session();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
         session.set_auth_token("replacement-token");
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
         let primary = cookie_file_path(dir.path(), "alice").unwrap();
 
         fs::write(&primary, b"{not-json").unwrap();
         let (backup, recovered) =
-            AuthSession::load_from_dir_with_backup(dir.path(), "alice").unwrap();
+            AuthSession::load_from_dir_with_backup(dir.path(), "alice", None).unwrap();
         assert!(recovered);
         assert_eq!(backup.auth_token(), Some("token"));
 
         fs::remove_file(&primary).unwrap();
         fs::create_dir(&primary).unwrap();
         assert!(matches!(
-            AuthSession::load_from_dir_with_backup(dir.path(), "alice"),
+            AuthSession::load_from_dir_with_backup(dir.path(), "alice", None),
             Err(AuthSessionError::Io(_))
         ));
     }
@@ -562,7 +728,7 @@ mod tests {
         fs::write(primary.with_extension("json.bak"), b"{invalid-backup").unwrap();
 
         assert!(matches!(
-            AuthSession::load_from_dir_with_backup(dir.path(), "tester"),
+            AuthSession::load_from_dir_with_backup(dir.path(), "tester", None),
             Err(AuthSessionError::CookieStore(_))
         ));
     }
@@ -574,7 +740,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = sample_session();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
         let path = cookie_file_path(dir.path(), session.username()).unwrap();
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
@@ -588,11 +754,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let session = sample_session();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
         let path = cookie_file_path(dir.path(), session.username()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -605,9 +771,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut session = sample_session();
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
         session.set_auth_token("replacement-token");
-        session.save_to_dir(dir.path()).unwrap();
+        session.save_to_dir(dir.path(), None).unwrap();
 
         let path = cookie_file_path(dir.path(), session.username())
             .unwrap()
@@ -630,6 +796,7 @@ mod tests {
         let session = AuthSession::from_bytes(
             "tester",
             br#"[{"name":"auth-token","value":"token"},{"name":"session","value":"abc","domain":".twitch.tv","path":"/"}]"#,
+            None,
         )
         .unwrap();
         assert_eq!(session.auth_token(), Some("token"));
@@ -646,7 +813,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"{\"auth-token\":").unwrap();
         assert!(matches!(
-            AuthSession::load_from_dir(dir.path(), "tester"),
+            AuthSession::load_from_dir(dir.path(), "tester", None),
             Err(AuthSessionError::CookieStore(_))
         ));
     }

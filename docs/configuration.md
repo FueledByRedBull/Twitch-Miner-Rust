@@ -30,7 +30,8 @@ in an existing file are filled from the same defaults.
   configuration directory.
 
 The data directory also holds `cookies/<username>.json` (your Twitch session,
-which is secret), optional `log/` files, `streak-cache.json`,
+which is secret; it can be [encrypted](operations.md#encrypting-the-saved-session)),
+optional `log/` files, `streak-cache.json`,
 `prediction-placements.json`, `runtime-status.json`, and `earnings/`, the
 [earnings ledger](operations.md#earnings-ledger-and-alarms).
 
@@ -62,8 +63,8 @@ tell whether a reload applied is described in the
 **Needs a restart:** `config_schema_version`, `username`, `debug`,
 `debug_deep`, `show_seconds`, `claim_drops_startup`, `save_logs`,
 `show_username_in_console`, `disable_at_in_nickname`, `followers_order`,
-`drop_account_link`, `drop_discovery_games`, `log_format`, `timezone`, and
-`privacy.anonymize_logs`. These are read once at startup. A file that changes
+`drop_account_link`, `drop_discovery_games`, `log_format`,
+`notify_device_login`, `timezone`, and `privacy.anonymize_logs`. These are read once at startup. A file that changes
 only these is not applied, and the status block lists their names. A file that
 changes both applies the live settings and reports the rest.
 
@@ -158,6 +159,7 @@ pinning and fair rotation are separate rules, described in the
 | `show_claimed_bonus_msg` | `true` | Log each claimed bonus chest. |
 | `show_game` | `true` | Include the game name in point messages. |
 | `log_format` | `text` | `text` for the human-readable lines, or `json` for one JSON object per line on the console and in saved logs, with `timestamp`, `level`, `operation`, `message`, and a `fields` object of extra values (omitted under `privacy.anonymize_logs`, like the text format). Any other value is rejected. Existing config files are not rewritten to add it, so a rollback to an older release can still read them. |
+| `notify_device_login` | `false` | Opt-in. When the miner must start a device login, also send the verification URL and the code through the `DEVICE_LOGIN` event to Discord and the generic webhook, so you can finish the login away from the machine. The message contains the URL, the code, and how long the code lasts, and nothing else about the account; it is not anonymized, because the login cannot be completed without them. The usual event filters apply, and the miner logs one warning at startup if no configured target would deliver the event. Read once at startup. Existing config files are not rewritten to add it, so a rollback to an older release can still read them. See [device login notifications](operations.md#device-login-notifications). |
 | `timezone` | `null` | IANA time zone for timestamps and for the day boundary of the daily report and the status block's "today", such as `Europe/Athens`. `null` uses the host's local time. |
 | `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, channel balances, and results in logs and Discord messages. The points of each reward and your own total points gained, in the session summary and the daily report, stay visible. The saved log is named `miner.log` instead of after the account. |
 | `webhook.url` | `""` | Any HTTP(S) endpoint that should receive events, such as ntfy, Gotify, or Home Assistant. Each event is a POST with the JSON body `{"event": "DROP_CLAIM", "message": "..."}`. Empty disables it. Treat it as a secret. |
@@ -171,9 +173,12 @@ Discord event names: `STARTUP`, `SHUTDOWN`, `STREAMER_ONLINE`,
 `DROP_CLAIM`, `DROP_STATUS`, `BET_START`, `BET_GENERAL`, `BET_FILTERS`,
 `BET_WIN`, `BET_LOSE`, `BET_REFUND`, `BET_FAILED`, `CHAT_MENTION`,
 `WATCH_STATUS`, `SESSION_LOST`, `EARNINGS_STALL`, `DROPS_STALL`,
-`DAILY_REPORT`, and `CONFIG_RELOAD`. The three before the last are described under
-[earnings ledger and alarms](operations.md#earnings-ledger-and-alarms) and
-`CONFIG_RELOAD` under [config reload](operations.md#config-reload); like the
+`DAILY_REPORT`, `CONFIG_RELOAD`, and `DEVICE_LOGIN`. `EARNINGS_STALL`,
+`DROPS_STALL`, and `DAILY_REPORT` are described under
+[earnings ledger and alarms](operations.md#earnings-ledger-and-alarms),
+`CONFIG_RELOAD` under [config reload](operations.md#config-reload), and
+`DEVICE_LOGIN` under
+[device login notifications](operations.md#device-login-notifications); like the
 others, an empty list sends them.
 
 ## Predictions (`bet`)

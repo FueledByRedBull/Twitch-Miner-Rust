@@ -7,8 +7,8 @@ use tm_config::{AppPaths, ConfigFile};
 use tm_domain::{format_channel_points, format_drop_progress, progress_percent, Streamer};
 use tm_irc::{ChatEventKind, ChatLogger};
 use tm_observability::{
-    discord_message, new_discord_webhook, Anonymizer, DiscordClient, DiscordSettings,
-    Event as DiscordEvent,
+    discord_message, new_discord_webhook, should_send_discord_event, Anonymizer, DiscordClient,
+    DiscordSettings, Event as DiscordEvent,
 };
 use tm_twitch::InventoryDrop;
 
@@ -302,6 +302,24 @@ impl AppObservability {
         self.decorate("🔄", line.to_string())
     }
 
+    /// The one message that skips anonymization, for the URL and the code only:
+    /// the login cannot be finished without them, and nothing else in it
+    /// identifies the account.
+    pub(crate) fn device_login_message(
+        &self,
+        verification_uri: &str,
+        user_code: &str,
+        expires_in: Duration,
+    ) -> String {
+        self.decorate(
+            "🔑",
+            format!(
+                "Twitch device login needed: open {verification_uri} and enter code {user_code}. The code expires in {} minutes.",
+                expires_in.as_secs() / 60
+            ),
+        )
+    }
+
     pub(crate) fn drops_stall_message(&self) -> String {
         self.decorate(
             "📦",
@@ -539,6 +557,16 @@ impl AppObservability {
         )
     }
 
+    /// Whether a configured notifier would send `event`, given its event filter.
+    pub(crate) fn delivers(&self, event: DiscordEvent) -> bool {
+        let live = self.live();
+        let delivered = [live.discord.as_ref(), live.webhook.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|target| should_send_discord_event(target, Some(event)));
+        delivered
+    }
+
     pub(crate) async fn send_event(&self, event: DiscordEvent, message: &str) {
         let (discord, webhook) = {
             let live = self.live();
@@ -625,6 +653,16 @@ fn live_settings(config: &ConfigFile) -> LiveSettings {
         show_claimed_bonus: config.show_claimed_bonus_msg,
         show_game: config.show_game,
     }
+}
+
+/// The startup warning for `notify_device_login` when no notifier would send it.
+pub(crate) fn device_login_delivery_warning(
+    config: &ConfigFile,
+    observability: &AppObservability,
+) -> Option<&'static str> {
+    (config.notify_device_login && !observability.delivers(DiscordEvent::DeviceLogin)).then_some(
+        "notify_device_login is enabled but no configured notifier delivers DEVICE_LOGIN; configure discord or webhook and allow DEVICE_LOGIN in its events",
+    )
 }
 
 pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservability> {

@@ -30,6 +30,7 @@
   "drop_discovery_games": [],
   "streak_discovery_games": [],
   "log_format": "text",
+  "notify_device_login": false,
   "timezone": null,
   "privacy": {
     "anonymize_logs": true

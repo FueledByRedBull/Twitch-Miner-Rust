@@ -39,6 +39,8 @@ pub struct LoginValidation {
     pub user_id: String,
     pub client_id: Option<String>,
     pub scopes: Vec<String>,
+    /// Remaining validity of the token, when Twitch reports one.
+    pub expires_in: Option<Duration>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -333,10 +335,17 @@ fn login_validation_from_payload(
         .get("client_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    // Twitch reports 0 for tokens it does not expire.
+    let expires_in = payload
+        .get("expires_in")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs);
     Ok(LoginValidation {
         user_id,
         client_id,
         scopes,
+        expires_in,
     })
 }
 
@@ -464,5 +473,31 @@ mod tests {
         )
         .unwrap();
         assert!(validation.scopes.is_empty());
+    }
+
+    #[test]
+    fn validation_reports_remaining_validity_only_when_twitch_gives_one() {
+        let expires_in = |payload: serde_json::Value| {
+            login_validation_from_payload(&payload, "tester")
+                .unwrap()
+                .expires_in
+        };
+        let base = |extra: serde_json::Value| {
+            let mut payload = serde_json::json!({ "login": "tester", "user_id": "user-123" });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            payload
+        };
+        assert_eq!(
+            expires_in(base(serde_json::json!({ "expires_in": 5_400 }))),
+            Some(Duration::from_secs(5_400))
+        );
+        assert_eq!(
+            expires_in(base(serde_json::json!({ "expires_in": 0 }))),
+            None
+        );
+        assert_eq!(expires_in(base(serde_json::json!({}))), None);
     }
 }

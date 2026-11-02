@@ -526,6 +526,70 @@ fn the_ranking_settings_are_never_written_into_an_existing_file() {
 }
 
 #[test]
+fn notify_device_login_is_off_by_default_and_never_written_into_an_existing_file() {
+    let dir = unique_temp_dir("notify-device-login");
+    fs::create_dir_all(&dir).unwrap();
+
+    // A file that needs a migration is rewritten; the rewrite must not add the
+    // key, so a rollback release still accepts it.
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    assert!(!load_or_create_config(&path).unwrap().notify_device_login);
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(rewritten.get("notify_device_login").is_none());
+    assert!(rewritten["streamer_overrides"]["bob"]
+        .get("make_predictions")
+        .is_some());
+
+    // A file that sets it keeps it through a rewrite.
+    let chosen = dir.join("chosen.json");
+    fs::write(
+        &chosen,
+        br#"{"username":"Alice","notify_device_login":true,"streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    assert!(load_or_create_config(&chosen).unwrap().notify_device_login);
+    let rewritten: Value = serde_json::from_slice(&fs::read(&chosen).unwrap()).unwrap();
+    assert_eq!(rewritten["notify_device_login"], true);
+
+    // A new file lists it, switched off.
+    let fresh = dir.join("fresh.json");
+    load_or_create_config(&fresh).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh).unwrap()).unwrap();
+    assert_eq!(fresh["notify_device_login"], false);
+    assert!(OPT_IN_TOP_LEVEL_KEYS.contains(&"notify_device_login"));
+}
+
+#[test]
+fn notify_device_login_must_be_a_boolean() {
+    let dir = unique_temp_dir("notify-device-login-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    fs::write(&path, r#"{"username":"Alice","notify_device_login":"yes"}"#).unwrap();
+
+    assert!(load_or_create_config(&path).is_err());
+}
+
+#[test]
+fn notify_device_login_is_read_once_at_startup() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.notify_device_login = true;
+
+    assert_eq!(
+        changed_names(&old, &new),
+        [(
+            String::from("notify_device_login"),
+            ReloadClass::NeedsRestart
+        )]
+    );
+}
+
+#[test]
 fn points_limit_must_be_a_positive_whole_number() {
     let dir = unique_temp_dir("points-limit-invalid");
     fs::create_dir_all(&dir).unwrap();

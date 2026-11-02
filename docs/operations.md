@@ -35,6 +35,8 @@ Mount one directory at `/data` and keep `config.json` in it. The miner creates
 - `/data/earnings/YYYY-MM.jsonl`
 
 The container sets `TCPM_CONFIG=/data/config.json` and `TCPM_DATA_DIR=/data`.
+`TCPM_COOKIE_KEY_FILE` is optional and is never set by the image; see
+[encrypting the saved session](#encrypting-the-saved-session).
 
 Images contain a static Rust binary in a `scratch` runtime, with no shell,
 package manager, or OS certificate bundle; TLS trust comes from the Rust TLS
@@ -145,6 +147,156 @@ definitively rejects it, the miner logs an error, sends a `SESSION_LOST` Discord
 event, and exits with a failure status. The container's restart policy then
 starts it again, and startup reauthorizes.
 
+To see the state of the saved session without starting the miner, use
+[`--auth-status`](#checking-the-saved-session).
+
+### Device login notifications
+
+A device login starts when there is no saved session, or Twitch rejected it and
+the refresh token did not work, for instance after the restart described above.
+The code is always printed to the log. Someone who is away from the machine cannot see the
+log, so with `"notify_device_login": true` the miner also sends one `DEVICE_LOGIN`
+message to Discord and the generic webhook:
+
+```text
+Twitch device login needed: open https://www.twitch.tv/activate and enter code ABCD-EFGH. The code expires in 15 minutes.
+```
+
+- The message holds the URL, the code, and how long the code lasts, and nothing
+  else about the account. It is not anonymized under `privacy.anonymize_logs`,
+  because the login cannot be completed without the URL and code.
+- The event filters still apply: `discord.events` and `webhook.events` list
+  which events each target receives, and an empty list receives all of them. If
+  the key is on but no configured target would deliver `DEVICE_LOGIN`, the miner
+  logs one warning at startup saying so.
+- Sending never blocks or fails the login. The prompt is logged first, the
+  message is sent in the background, and a failed send logs a warning while the
+  login carries on.
+- Each device code is announced once. If nobody enters it before it expires, the
+  miner exits with a failure status, as before, and the restart policy starts it
+  again with a new code and a new message. An early failure after the code was
+  issued, such as an error response while polling, also exits, and the next start
+  announces a new code. Without a restart delay in your restart policy, a
+  persistent failure of that kind sends one message per restart.
+- It is sent only when a device login really starts. A successful refresh, an
+  imported token, and a valid saved session send nothing.
+
+**What the code allows.** The code in the message cannot be exchanged for a
+token. Collecting the token needs the separate device code, which the miner holds
+in memory, sends only to Twitch while polling, and never logs or sends to a
+notifier. Someone who sees the message could at most open the activation page,
+sign in to their own Twitch account, and enter the code, which authorizes the
+miner as that account. The miner then compares the login of the token it
+receives with `username`. If they differ, it fails with an error naming both
+logins and leaves the saved session unchanged, so the other account's token is
+discarded and never replaces yours. The worst outcome is a failed login and a new
+code after the restart. The webhook URL is a secret for the same reason as
+before: anyone who can read the channel it posts to can race you to the code.
+
+### Checking the saved session
+
+`--auth-status` loads the saved session, asks Twitch once whether the token is
+still valid, and prints the result. It reads `config.json` for `username` without
+writing it, never starts a login, never writes the session file, and never prints
+a token. Add `--json` for scripts.
+
+```text
+session file: present, plaintext
+login: alice
+token: valid
+scopes: channel_read, chat:read
+expires in: 3h 36m 40s
+session file age: 26h 3m 1s
+refresh token: present
+```
+
+```json
+{"session_file":true,"encrypted":false,"login":"alice","validation":"valid","detail":null,"scopes":["channel_read","chat:read"],"expires_in_seconds":13000,"file_age_seconds":93781,"refresh_token":true}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `session_file`, `encrypted` | Whether `cookies/<username>.json` exists and whether it is [encrypted](#encrypting-the-saved-session). |
+| `login` | The configured login the token is checked against. |
+| `validation` | `valid`; `rejected` (Twitch refused the token, or it belongs to another login); `unreachable` (timeout, rate limit, or a Twitch error, with the class in `detail`); or `not_checked` when there was nothing to check: the file is missing, damaged, encrypted without the right key, or holds no token. |
+| `scopes`, `expires_in_seconds` | From Twitch's answer. The remaining validity is present only when Twitch reports one. |
+| `file_age_seconds` | Time since the session file was last written. |
+| `refresh_token` | Whether a refresh token is saved, not its value. |
+
+The exit status is 0 for `valid` and `unreachable`, and non-zero for `rejected`
+and for a missing or unusable session.
+
+### Encrypting the saved session
+
+By default `cookies/<username>.json` and its backup `<username>.json.bak` are
+plaintext JSON protected by file permissions. Setting `TCPM_COOKIE_KEY_FILE` to
+the path of a key file encrypts both with AES-256-GCM. The file must hold exactly
+64 hexadecimal characters, a 256-bit key, optionally surrounded by whitespace,
+saved as plain ASCII or UTF-8; anything else is an error that names the variable
+and never shows the content. An unset or blank variable means no encryption, so
+make sure a templated value is really set. Generate a key with
+`(umask 077; openssl rand -hex 32 > session.key)` and keep it private: on Unix
+the miner warns once if the file is readable by group or others.
+
+```yaml
+services:
+  twitch-miner:
+    environment:
+      TCPM_COOKIE_KEY_FILE: /run/secrets/session_key
+    secrets:
+      - session_key
+secrets:
+  session_key:
+    file: ./session.key
+```
+
+| Key file | Session file | Result |
+| --- | --- | --- |
+| not set | plaintext | As before. |
+| set | plaintext | Read as is. Once the session is validated at that start, the file and its backup are rewritten encrypted, so the miner leaves no plaintext copy behind. |
+| set | encrypted, right key | Works. |
+| set | encrypted, wrong key or modified | The miner exits with an error that says the file could not be decrypted. It does not fall back to the backup, does not start a device login, and does not change either file. |
+| not set | encrypted | The miner exits with an error that says the file is encrypted and names `TCPM_COOKIE_KEY_FILE`. Nothing is changed. |
+
+The same rules apply to `--import-token`, `--canary`, and `--auth-status`, and
+`--support-bundle` only counts the files. Each write uses a new random nonce and
+is atomic, and the files keep `0600` permissions on Unix.
+
+**File format.** `TMR-SESS`, a version byte (`1`), a random 96-bit nonce, then
+the ciphertext and its 16-byte tag. The version byte and the login are
+authenticated, so a file copied to another account's path no longer decrypts.
+
+**What this protects.** Someone who gets a copy of the data disk, volume, or
+backup but not the key file gets only ciphertext: they cannot read the tokens
+or forge an encrypted file, though they can delete one. The miner still accepts
+a plaintext session file when a key is set, so that an existing session can be
+migrated, which means an attacker who can write to the data directory could
+substitute one; its token would still have to belong to your login. The
+encryption does not protect against anyone who can read the key file, the miner's memory, or its
+environment, such as another process of the same user or `root`, and the miner
+cannot erase plaintext that earlier writes left in disk blocks, snapshots, or
+backups made before you turned encryption on. Keep the key file somewhere the
+data does not go: a Docker secret, or a separate host directory that your data
+backups skip. If the key file sits on the same disk or in the same backup as
+`cookies/`, one copy yields both and the encryption means nothing.
+
+**Turning it off or rolling back.** Releases before 0.3.8 cannot read an encrypted
+file. They treat it as damaged, start a device login, and replace it. Before you
+roll back, stop the miner and run the following with the key file still
+configured, then roll back as described in the
+[release process](release-process.md#rollback); or skip this and log in again
+after the rollback.
+
+```sh
+docker compose run --rm -T twitch-miner --decrypt-session --data-dir /data
+```
+
+`--decrypt-session` needs `TCPM_COOKIE_KEY_FILE`, writes the session file and its
+backup back as plaintext, each atomically and with the same private permissions,
+and refuses when the file is already plaintext. If any existing file does not
+decrypt it writes nothing. If you keep running this release afterwards, unset
+the variable, or the next start encrypts the files again.
+
 ## Diagnostics
 
 | Command | Use |
@@ -154,6 +306,8 @@ starts it again, and startup reauthorizes.
 | `--status` | Print the sanitized runtime status described below. |
 | `--earnings` | Summarize the earnings ledger without contacting Twitch; see [earnings ledger and alarms](#earnings-ledger-and-alarms). Takes `--days N`, `--by day\|channel\|reason`, and `--json`. |
 | `--import-token` | Read a Twitch OAuth token from standard input, validate it, and save it as the session. |
+| `--auth-status` | Check the saved session once with Twitch and print its state without changing anything; see [checking the saved session](#checking-the-saved-session). Add `--json` for scripts. |
+| `--decrypt-session` | Rewrite the [encrypted session](#encrypting-the-saved-session) as plaintext before a rollback. Needs `TCPM_COOKIE_KEY_FILE`. |
 | `--support-bundle <path>` | Write version, status, and file-count metadata without cookies, configuration values, or log contents. |
 
 ```sh

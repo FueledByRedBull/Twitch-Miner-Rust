@@ -86,6 +86,7 @@ pub enum Event {
     DropsStall,
     DailyReport,
     ConfigReload,
+    DeviceLogin,
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +264,7 @@ pub fn normalize_event_name(raw: &str) -> Option<Event> {
         "DROPS_STALL" => Some(Event::DropsStall),
         "DAILY_REPORT" => Some(Event::DailyReport),
         "CONFIG_RELOAD" => Some(Event::ConfigReload),
+        "DEVICE_LOGIN" => Some(Event::DeviceLogin),
         _ => None,
     }
 }
@@ -297,6 +299,7 @@ pub fn event_name(event: Event) -> &'static str {
         Event::DropsStall => "DROPS_STALL",
         Event::DailyReport => "DAILY_REPORT",
         Event::ConfigReload => "CONFIG_RELOAD",
+        Event::DeviceLogin => "DEVICE_LOGIN",
     }
 }
 

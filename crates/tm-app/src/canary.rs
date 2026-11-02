@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
+use tm_auth::SessionKey;
 use tm_config::ConfigFile;
 use tm_domain::Streamer;
 use tm_pubsub::{
@@ -40,10 +41,11 @@ pub(crate) async fn run_read_only_canary(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
+    session_key: Option<&SessionKey>,
 ) -> Result<()> {
     match tokio::time::timeout(
         std::time::Duration::from_secs(90),
-        run_read_only_canary_inner(config, work_dir, http_client),
+        run_read_only_canary_inner(config, work_dir, http_client, session_key),
     )
     .await
     {
@@ -57,8 +59,9 @@ async fn run_read_only_canary_inner(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
+    session_key: Option<&SessionKey>,
 ) -> std::result::Result<(), CanaryCheckError> {
-    let context = prepare_canary(config, work_dir, http_client).await?;
+    let context = prepare_canary(config, work_dir, http_client, session_key).await?;
     let read_checks = run_canary_read_checks(config, &context).await?;
     run_canary_transport_checks(&context).await?;
 
@@ -94,10 +97,12 @@ async fn prepare_canary(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
+    session_key: Option<&SessionKey>,
 ) -> std::result::Result<CanaryContext, CanaryCheckError> {
     let session = canary_step(
         "session",
-        load_and_validate_existing_session(config, work_dir, http_client.clone()).await,
+        load_and_validate_existing_session(config, work_dir, http_client.clone(), session_key)
+            .await,
     )?;
     let auth_token = session.auth_token().ok_or_else(|| {
         CanaryCheckError::new(

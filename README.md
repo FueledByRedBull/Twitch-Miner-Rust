@@ -105,6 +105,8 @@ container. Pass `--data-dir` so it finds your configuration and session.
 | `--status` | Print the sanitized runtime status: tasks, transports, and earning state. |
 | `--health` | Exit successfully only while the running miner's tasks are healthy. Docker uses this as its health check. |
 | `--earnings` | Summarize recorded point rewards by day, channel, or reason without contacting Twitch. Takes `--days N`, `--by`, and `--json`. |
+| `--auth-status` | Check the saved session once with Twitch and print its state, never a token. Add `--json` for scripts. Exits non-zero when the session is rejected or missing. |
+| `--decrypt-session` | Rewrite an [encrypted session](docs/operations.md#encrypting-the-saved-session) as plaintext before a rollback. |
 | `--support-bundle <path>` | Write a privacy-safe support file without cookies, configuration values, or logs. |
 | `--canary` | Run read-only live checks on a dedicated account before a release. |
 

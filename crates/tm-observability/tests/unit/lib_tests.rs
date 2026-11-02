@@ -294,9 +294,39 @@ fn every_event_name_round_trips() {
         Event::DropsStall,
         Event::DailyReport,
         Event::ConfigReload,
+        Event::DeviceLogin,
     ] {
         assert_eq!(normalize_event_name(event_name(event)), Some(event));
     }
+}
+
+#[test]
+fn the_device_login_event_follows_the_event_filter() {
+    assert_eq!(event_name(Event::DeviceLogin), "DEVICE_LOGIN");
+    assert_eq!(
+        normalize_event_name(" device_login "),
+        Some(Event::DeviceLogin)
+    );
+
+    let webhook = |events: &[&str]| {
+        new_discord_webhook(&DiscordSettings {
+            webhook_api: String::from("https://discord.example/webhook"),
+            events: events.iter().map(|event| (*event).to_string()).collect(),
+        })
+        .unwrap()
+    };
+    assert!(should_send_discord_event(
+        &webhook(&[]),
+        Some(Event::DeviceLogin)
+    ));
+    assert!(should_send_discord_event(
+        &webhook(&["DEVICE_LOGIN"]),
+        Some(Event::DeviceLogin)
+    ));
+    assert!(!should_send_discord_event(
+        &webhook(&["STARTUP", "SESSION_LOST"]),
+        Some(Event::DeviceLogin)
+    ));
 }
 
 #[derive(Clone, Default)]
