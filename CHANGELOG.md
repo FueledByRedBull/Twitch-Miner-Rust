@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.8 - Unreleased
+
+- The miner rereads its configuration file every 30 seconds and applies what it
+  can without a restart, including adding and removing channels. A file that fails
+  validation is ignored and the running settings stay. `--status` and a new
+  `CONFIG_RELOAD` event report what applied and what still needs a restart.
+- Every point reward is recorded in `earnings/` in the data directory, and
+  `--earnings` summarizes it by day, channel, or reason without contacting Twitch.
+  The folder holds channel names and balances even with `privacy.anonymize_logs` on.
+- New `EARNINGS_STALL`, `DROPS_STALL`, and `DAILY_REPORT` events. An empty
+  `discord.events` or `webhook.events` list sends all events as before, so these
+  three and `CONFIG_RELOAD` start arriving unless you filter them.
+- New `log_format` setting. `json` writes one JSON object per line to the console
+  and saved logs.
+- A channel with a stronger reason to be watched (an uncollected streak, Drops, a
+  point multiplier, or a higher past yield) can now move ahead in the watch rotation.
+  Every fourth rotation stays first-in, first-out.
+- New `streak_discovery_games` setting looks for live channels in the games you list
+  where a watch streak may be waiting. Discovered channels get a slot only for that
+  streak, for at most ten minutes per broadcast, and wait their turn behind your own
+  channels rather than jumping ahead of them.
+- New per-channel `points_limit` setting in `streamer_overrides` stops watching a
+  channel for points once your balance there reaches the limit.
+- New `notify_device_login` setting sends the device login URL and code through a
+  `DEVICE_LOGIN` event, so you can finish a login away from the machine.
+- `--auth-status` checks the saved session once with Twitch and prints its state,
+  never a token.
+- Setting `TCPM_COOKIE_KEY_FILE` encrypts the saved session with AES-256-GCM. Older
+  releases cannot read an encrypted file, so run `--decrypt-session` before rolling
+  back.
+- New `proxy` setting (`socks5h://` or `http://`) carries every connection the miner
+  makes, with no direct fallback.
+- `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` are no longer read. If you relied on
+  them, move the address into `proxy` before upgrading, or the miner connects
+  directly. It logs a warning at startup when one is set and `proxy` is empty.
+- `privacy.anonymize_logs` no longer hides your own total points in the session
+  summary. Channel names and per-channel figures stay hidden.
+- A new workflow builds static binaries for Linux (x86_64, ARM64, ARMv7) and macOS
+  (x86_64, ARM64) with checksums and build provenance. A systemd unit, an OpenRC
+  script, and a Windows scheduled task installer are in `deploy/`.
+- The new settings are not written into an existing configuration file, so 0.3.7 can
+  still read it after a rollback unless you set one of them.
+
 ## 0.3.7 - Unreleased
 
 - Channels with an active Drop campaign now request every segment their media

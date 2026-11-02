@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tm-net = { path = "../tm-net", version = "0.3.7" }
+tm-net = { path = "../tm-net", version = "0.3.8" }
 tokio.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true

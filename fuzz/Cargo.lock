@@ -1105,7 +1105,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tm-auth"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "reqwest",
  "ring",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "tm-config"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "dirs",
  "serde",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "tm-domain"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "tm-net"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "base64 0.23.1",
  "reqwest",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "tm-pubsub"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "tm-twitch"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "reqwest",
  "serde",
