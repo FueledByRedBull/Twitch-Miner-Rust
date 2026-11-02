@@ -12,8 +12,8 @@ use crate::effect::RuntimeEffect;
 use crate::prediction::{build_prediction_settlement_effect, prediction_status_is_resolved};
 use crate::summary::{apply_pubsub_gain, build_session_summary};
 use crate::types::{
-    ContextRequestToken, ContextUpdate, EventApplication, RuntimeState, SessionSummary,
-    StreamUpdate,
+    ConfigReload, ConfigReloadOutcome, ContextRequestToken, ContextUpdate, EventApplication,
+    RuntimeState, SessionSummary, StreamUpdate,
 };
 
 const MAX_ACTIVE_PREDICTIONS_PER_CHANNEL: usize = 8;
@@ -71,9 +71,80 @@ impl RuntimeState {
             initial_points: HashMap::new(),
             predictions: HashMap::new(),
             pending_prediction_winners: HashMap::new(),
+            retired_streamers: Vec::new(),
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Applies a validated configuration reload in one step.
+    ///
+    /// Retained channels keep their position, watch progress and prediction
+    /// state; a removal shifts the channels after it, so anything holding an
+    /// index into `streamers` must re-read it. A channel with a placed,
+    /// reserved or unknown-outcome prediction is not removed: its stake is not
+    /// settled, so it stays tracked and is reported as deferred.
+    pub fn apply_config_reload(&mut self, reload: ConfigReload) -> ConfigReloadOutcome {
+        self.watch_priorities = reload.watch_priorities;
+        self.game_priority = reload.game_priority;
+        self.game_exclusions = reload.game_exclusions;
+        self.follower_mode = reload.follower_mode;
+        for streamer in &mut self.streamers {
+            if let Some(settings) = reload.settings.get(&streamer.channel_id) {
+                streamer.settings.clone_from(settings);
+            }
+        }
+
+        let mut outcome = ConfigReloadOutcome::default();
+        for streamer in reload.add {
+            if streamer.channel_id.is_empty()
+                || self
+                    .streamers
+                    .iter()
+                    .any(|tracked| tracked.channel_id == streamer.channel_id)
+            {
+                continue;
+            }
+            self.retired_streamers
+                .retain(|retired| retired.channel_id != streamer.channel_id);
+            self.initial_points
+                .entry(streamer.username.clone())
+                .or_insert(streamer.channel_points);
+            outcome.added.push(streamer.channel_id.clone());
+            self.streamers.push(streamer);
+        }
+        for channel_id in reload.remove {
+            let Some(index) = self
+                .streamers
+                .iter()
+                .position(|streamer| streamer.channel_id == channel_id)
+            else {
+                continue;
+            };
+            if self.predictions.values().any(|event| {
+                event.streamer.channel_id == channel_id
+                    && event.bet_placed
+                    && event.result_type.is_empty()
+            }) {
+                outcome.deferred.push(channel_id);
+                continue;
+            }
+            let unplaced = self
+                .predictions
+                .iter()
+                .filter(|(_, event)| event.streamer.channel_id == channel_id)
+                .map(|(event_id, _)| event_id.clone())
+                .collect::<Vec<_>>();
+            for event_id in unplaced {
+                self.release_prediction(&event_id);
+            }
+            let retired = self.streamers.remove(index);
+            self.retired_streamers
+                .retain(|existing| existing.channel_id != retired.channel_id);
+            self.retired_streamers.push(retired);
+            outcome.removed.push(channel_id);
+        }
+        outcome
     }
 
     pub fn capture_initial_points(&mut self) {
@@ -146,8 +217,14 @@ impl RuntimeState {
             .iter()
             .map(|(username, points)| (username.as_str(), *points))
             .collect::<Vec<_>>();
+        let streamers = self
+            .streamers
+            .iter()
+            .chain(&self.retired_streamers)
+            .cloned()
+            .collect::<Vec<_>>();
         build_session_summary(
-            &self.streamers,
+            &streamers,
             &initial_points,
             &self.completed_predictions,
             anonymize,
@@ -334,14 +411,20 @@ impl RuntimeState {
                 winning_outcome_id,
             } => match kind {
                 PredictionChannelKind::EventCreated => {
-                    let can_earn = self
+                    let tracked = self
                         .streamers
                         .iter()
-                        .find(|streamer| streamer.channel_id == event.streamer.channel_id)
-                        .is_some_and(Streamer::can_earn_channel_points);
+                        .find(|streamer| streamer.channel_id == event.streamer.channel_id);
+                    let can_earn = tracked.is_some_and(Streamer::can_earn_channel_points);
+                    // The transport copy of the streamer predates any config reload.
+                    let tracked_settings = tracked.map(|streamer| streamer.settings.clone());
+                    let make_predictions = tracked_settings
+                        .as_ref()
+                        .unwrap_or(&event.streamer.settings)
+                        .make_predictions;
                     if event.event_id.is_empty()
                         || event.status != "ACTIVE"
-                        || !event.streamer.settings.make_predictions
+                        || !make_predictions
                         || !can_earn
                         || self
                             .processed_prediction_ids
@@ -368,8 +451,11 @@ impl RuntimeState {
                     {
                         return EventApplication::unchanged();
                     }
-                    self.predictions
-                        .insert(event.event_id.clone(), event.as_ref().clone());
+                    let mut created = event.as_ref().clone();
+                    if let Some(settings) = tracked_settings {
+                        created.streamer.settings = settings;
+                    }
+                    self.predictions.insert(created.event_id.clone(), created);
                     EventApplication::changed(vec![RuntimeEffect::EvaluatePrediction {
                         event_id: event.event_id.clone(),
                     }])

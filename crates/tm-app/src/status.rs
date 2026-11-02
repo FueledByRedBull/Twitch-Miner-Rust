@@ -49,11 +49,15 @@ struct RuntimeStatus {
     /// Absent from files written by earlier releases, and ignored by their readers, so the schema version stays.
     #[serde(default)]
     earnings: crate::earnings::EarningsStatus,
+    /// Absent from files written by earlier releases, like `earnings`.
+    #[serde(default)]
+    config_reload: crate::reload::ConfigReloadStatus,
 }
 
 impl RuntimeStatus {
-    fn without_points(mut self) -> Self {
+    fn for_support_bundle(mut self) -> Self {
         self.earnings = self.earnings.without_points();
+        self.config_reload = self.config_reload.without_channels();
         self
     }
 }
@@ -131,6 +135,7 @@ pub(crate) struct HealthTracker {
     watch_slots: Arc<Mutex<Vec<WatchSlotStatus>>>,
     prediction_journal: Arc<Mutex<Option<crate::prediction_journal::PredictionPlacementJournal>>>,
     earnings: crate::earnings::EarningsTracker,
+    reload: crate::reload::ReloadStatusTracker,
 }
 
 impl HealthTracker {
@@ -388,6 +393,10 @@ impl HealthTracker {
 
     pub(crate) fn earnings(&self) -> crate::earnings::EarningsTracker {
         self.earnings.clone()
+    }
+
+    pub(crate) fn reload(&self) -> crate::reload::ReloadStatusTracker {
+        self.reload.clone()
     }
 
     pub(crate) fn selected_watch_slots(&self) -> u32 {
@@ -676,6 +685,7 @@ impl StatusReporter {
                 .map(crate::prediction_journal::PredictionPlacementJournal::capacity)
                 .transpose()?,
             earnings: self.health.earnings.status(now),
+            config_reload: self.health.reload.status(),
         };
         atomic_json_write(&self.path, &status)?;
         Ok((status, now))
@@ -718,7 +728,7 @@ pub(crate) fn write_support_bundle(work_dir: &Path, destination: &Path) -> Resul
         target: build_info::TARGET,
         runtime_status: read_status(&work_dir.join(STATUS_FILE_NAME))
             .ok()
-            .map(RuntimeStatus::without_points),
+            .map(RuntimeStatus::for_support_bundle),
         config_exists: config_path.is_file(),
         config_size_bytes: fs::metadata(config_path).ok().map(|value| value.len()),
         cookie_file_count: count_files(&work_dir.join("cookies")),
@@ -1058,6 +1068,7 @@ mod tests {
             pubsub: None,
             prediction_journal: None,
             earnings: crate::earnings::EarningsStatus::default(),
+            config_reload: crate::reload::ConfigReloadStatus::default(),
         };
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());

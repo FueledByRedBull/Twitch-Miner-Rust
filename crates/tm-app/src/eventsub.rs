@@ -203,18 +203,41 @@ async fn wait_to_reconnect(
     }
 }
 
+// The poll takes the channel list and its transport signals as separate values.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_eventsub_presence_poll_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
     twitch: Arc<TwitchClient>,
     tracked_streamers: Vec<tm_domain::Streamer>,
     fallback_rx: tokio::sync::watch::Receiver<Vec<usize>>,
+    resync_on_start: bool,
     observability: AppObservability,
     health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stop = stop;
         let mut fallback_rx = fallback_rx;
+        if resync_on_start {
+            // The previous transports stopped while a channel may have gone online
+            // or offline, and nothing replays a missed transition.
+            let every_channel = (0..tracked_streamers.len()).collect::<Vec<_>>();
+            tokio::select! {
+                () = poll_presence_fallback(
+                    &runtime,
+                    &twitch,
+                    &tracked_streamers,
+                    &every_channel,
+                    &observability,
+                    &health,
+                ) => {}
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        return;
+                    }
+                }
+            }
+        }
         let mut ticker = tokio::time::interval_at(
             tokio::time::Instant::now() + PRESENCE_POLL_INTERVAL,
             PRESENCE_POLL_INTERVAL,

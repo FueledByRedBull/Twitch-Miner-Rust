@@ -98,6 +98,16 @@ impl IdentityCache {
             .cloned()
     }
 
+    /// Logins that were configured for this channel, which differ from its
+    /// current login once the channel has been renamed.
+    pub(crate) fn configured_logins(&self, channel_id: &str, now: OffsetDateTime) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.channel_id == channel_id && entry_is_fresh(entry, now))
+            .map(|entry| entry.configured_login.clone())
+            .collect()
+    }
+
     pub(crate) fn record(
         &mut self,
         configured_login: &str,

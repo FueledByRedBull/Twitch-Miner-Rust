@@ -158,9 +158,10 @@ pub(crate) async fn load_targets(
     } else {
         config.streamers.clone()
     };
-    // shortcut: channels are found once per start, because tracked channels are
-    // fixed at startup; a long run keeps them even after they go offline. Finding
-    // them while running needs runtime and presence support for adding channels.
+    // Drop discovery runs only here, once per start, and a long run keeps what it
+    // found even after those channels go offline. A config reload calls this
+    // without discovery to refresh the configured list; discovered channels stay
+    // tracked until the next restart.
     for game in &config.drop_discovery_games {
         match twitch
             .fetch_drops_enabled_channels_typed(game, DROP_DISCOVERY_CHANNELS_PER_GAME)
@@ -280,7 +281,7 @@ async fn bootstrap_channel_context(
                 }
                 Err(error) => return Err(error),
                 Ok(_) => {
-                    if observability.show_claimed_bonus {
+                    if observability.show_claimed_bonus() {
                         let message = observability.bonus_claim_message(streamer, true);
                         tracing::info!(operation = "claim_bonus", "{message}");
                         observability.spawn_event(DiscordEvent::BonusClaim, message);

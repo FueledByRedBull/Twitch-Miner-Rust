@@ -25,9 +25,9 @@
 //!
 //! [`tasks::spawn_background_tasks`] registers and supervises `EventSub`, `PubSub`,
 //! presence fallback, context refresh, minute watching, drops,
-//! chat, streak-cache, earnings-alarm, and optional streak-recovery loops. [`shutdown`] watches
-//! signals and task liveness, broadcasts stop, joins with a grace period, then
-//! closes the runtime state handle and records the session summary.
+//! chat, streak-cache, earnings-alarm, config-reload, and optional streak-recovery loops.
+//! [`shutdown`] watches signals and task liveness, broadcasts stop, joins with a
+//! grace period, then closes the runtime state handle and records the session summary.
 //!
 //! For the next layer, read [`startup`] for state construction, [`tasks`] for
 //! task wiring, [`eventsub`] and [`pubsub`] for transport adapters,
@@ -58,6 +58,7 @@ mod minute_watcher;
 mod observability;
 mod prediction_journal;
 mod pubsub;
+mod reload;
 mod runtime_effects;
 mod session_watch;
 mod shutdown;
@@ -433,6 +434,7 @@ async fn run_prepared_miner(prepared: PreparedMiner, requested_paths: AppPaths) 
     let observability = observability.with_ledger(ledger);
     let tasks = spawn_background_tasks(&BackgroundTaskParams {
         config: &config,
+        config_path: &active_paths.config_path,
         stop_rx,
         runtime: &runtime,
         twitch: &twitch,

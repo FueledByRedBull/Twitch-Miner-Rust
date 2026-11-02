@@ -419,7 +419,7 @@ pub(crate) async fn handle_claim_bonus_effect(
     }
     health.record_claim();
     reconcile_claimed_bonus_streak(runtime, twitch, channel_id).await;
-    if observability.show_claimed_bonus {
+    if observability.show_claimed_bonus() {
         let message = observability.bonus_claim_message(&streamer, false);
         tracing::info!(operation = "claim_bonus", "{message}");
         observability.spawn_event(DiscordEvent::BonusClaim, message);

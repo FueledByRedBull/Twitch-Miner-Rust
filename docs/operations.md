@@ -227,6 +227,9 @@ the miner itself is unaffected. `--support-bundle` keeps the health counters and
 alarm state but leaves out the point totals. Status files from earlier releases
 have no `earnings` block, and earlier releases ignore it.
 
+**Config reload.** The `config_reload` block is described under
+[config reload](#config-reload).
+
 ## Earnings ledger and alarms
 
 Every reward the runtime accepts is appended to `earnings/YYYY-MM.jsonl` in the
@@ -289,6 +292,71 @@ names follow `privacy.anonymize_logs`; totals do not. The reported day is
 remembered in `earnings/last-daily-report`, so a restart does not send it again,
 and a day without rewards sends nothing.
 
+## Config reload
+
+The miner rereads the active configuration file every 30 seconds and acts only
+when its contents changed. It never writes the file. Which settings apply
+without a restart is listed in the
+[configuration reference](configuration.md#changing-settings-while-the-miner-runs).
+
+A reload that changes anything logs one line with the setting names, and the old
+and new values only for settings that cannot hold a secret. Webhook and Discord
+URLs, your username, and channel lists are never printed. Channel names that
+were added, removed, or kept follow `privacy.anonymize_logs`. The same line is
+sent as the `CONFIG_RELOAD` event. Add the name to `discord.events` or
+`webhook.events` to filter it; an empty list sends all events.
+
+```text
+Config reload applied: chat_presence ("ONLINE" -> "NEVER"), streamers | needs restart: save_logs (false -> true) | channels added: Streamer3
+```
+
+**Telling whether it applied.** `--status` prints a `config_reload` block, and
+the log line above appears once per applied file:
+
+| Field | Meaning |
+| --- | --- |
+| `last_result` | `applied` (live changes took effect), `needs_restart` (nothing in the file could be applied), `rejected` (the file or a new channel could not be used), or absent before the first reload. |
+| `last_applied_unix` | When the last `applied` reload finished. |
+| `last_error_class` | Why the last attempt was rejected: `unreadable`, `invalid-config`, `channel-resolution`, `followers`, `no-channels`, or `runtime`. Empty after a reload that applied or needs a restart. |
+| `rejected_attempts` | Attempts since the process started that left the running configuration unchanged. A retry counts again. |
+| `needs_restart` | Names of settings that differ from the file but only take effect after a restart. Cleared when the file matches the running configuration again. |
+| `deferred_removals`, `deferred_removal_count` | Channels removed from the file that are still tracked because a prediction placement on them is not settled. |
+
+`--support-bundle` keeps the setting names and the deferred count and leaves
+out the deferred channel names. Status files from earlier releases have no such
+block, and earlier releases ignore it.
+
+**Failure modes.** In every case the running configuration stays in force and
+nothing is partly applied.
+
+- The file is missing or unreadable: one warning, until it reads again.
+- The file is not valid JSON or fails validation: one warning per distinct
+  file content, quoting the validation message and never the file. Fix the file
+  and the next check picks it up.
+- A new channel cannot be resolved, or the follower list cannot be loaded: the
+  whole change is rejected, and the attempt is repeated every five minutes while
+  the file stays the same, with a warning only for the first.
+- The change would leave no channel to mine: rejected.
+- A removed channel has a prediction that is not settled: the rest applies, the
+  channel stays tracked, and it is removed in a later check after the
+  prediction resolves. It is listed under `deferred_removals` meanwhile.
+
+A failed reload does not fail `--health`; the `config-watch` task reports
+healthy as long as it keeps checking.
+
+**What a reconnect restarts.** When the set of tracked channels changes, or a
+setting changes which PubSub topics are needed, EventSub, PubSub, and the
+presence poll are stopped, waiting up to ten seconds, and started again for the
+new set, so two sets of subscriptions never deliver
+events at the same time. Presence is then checked once for every channel, so a
+stream that started or ended meanwhile is picked up. Events delivered twice
+around the gap are ignored. Chat follows the tracked channels without a
+restart. Minute watching, context refresh, Drop handling, the streak cache, the
+earnings ledger, and the watch progress of channels that stay are not touched,
+and a removed channel simply gives up its watch slot while the other keeps its
+progress. Because the old subscriptions stop first, an event that arrives in
+that short gap and is not redelivered by Twitch is missed.
+
 ## Logs and storage
 
 Console and saved logs use the format
@@ -306,8 +374,9 @@ On normal shutdown the miner prints the session ID, saved log path, duration as
 points and history summary. Report lines use the shape
 `HH:MM:SS DD/MM/YY - emoji/content` without the level and operation. With
 `privacy.anonymize_logs`, streamer names become aliases; channel, event and
-outcome IDs, titles, per-channel points, decisions, and results are hidden; the
-session's total points gained is still shown; and the log file is named
+outcome IDs, titles, channel balances, decisions, and results are hidden; each
+reward's points and the session's total points gained are still shown; and the
+log file is named
 `miner.log`.
 
 Writes are bounded. `runtime-status.json` is replaced atomically on the

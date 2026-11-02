@@ -949,3 +949,182 @@ fn notification_urls_are_validated() {
     assert!(!check("", "ftp://example.com"));
     assert!(!check("", "https://"));
 }
+
+fn changed_names(old: &ConfigFile, new: &ConfigFile) -> Vec<(String, ReloadClass)> {
+    diff_configs(old, new)
+        .unwrap()
+        .into_iter()
+        .map(|change| (change.name, change.class))
+        .collect()
+}
+
+#[test]
+fn every_top_level_key_has_a_reload_label() {
+    let labelled = reload::SETTING_RULES
+        .iter()
+        .map(|rule| rule.key)
+        .collect::<Vec<_>>();
+    for key in TOP_LEVEL_CONFIG_KEYS {
+        assert!(
+            labelled.contains(key),
+            "{key} is not classified in reload::SETTING_RULES"
+        );
+    }
+    for key in &labelled {
+        assert!(
+            TOP_LEVEL_CONFIG_KEYS.contains(key),
+            "{key} is classified but is not a config key"
+        );
+    }
+    assert_eq!(labelled.len(), TOP_LEVEL_CONFIG_KEYS.len());
+    let serialized = serde_json::to_value(ConfigFile::default()).unwrap();
+    for key in serialized.as_object().unwrap().keys() {
+        assert!(
+            labelled.contains(&key.as_str()),
+            "{key} is serialized but not classified"
+        );
+    }
+}
+
+#[test]
+fn reload_diff_is_empty_for_identical_configs() {
+    let config = ConfigFile::default();
+    assert!(diff_configs(&config, &config.clone()).unwrap().is_empty());
+}
+
+#[test]
+fn reload_diff_labels_live_and_restart_settings() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.betting_make_predictions = !old.betting_make_predictions;
+    new.chat_presence = String::from("NEVER");
+    new.emojis = !old.emojis;
+    new.game_priority = vec![String::from("Chess")];
+    new.watch_priority = vec![String::from("STREAK")];
+    new.streamers = vec![String::from("alice")];
+    new.streamers_exclude = vec![String::from("bob")];
+    new.show_game = !old.show_game;
+    new.discord.events = vec![String::from("STARTUP")];
+    new.bet.max_points = Some(7);
+    new.streamer_overrides
+        .insert(String::from("alice"), StreamerSettingsOverride::default());
+    new.save_logs = !old.save_logs;
+    new.debug = !old.debug;
+    new.log_format = LogFormat::Json;
+    new.privacy.anonymize_logs = !old.privacy.anonymize_logs;
+    new.timezone = Some(String::from("Europe/Athens"));
+    new.followers_order = FollowersOrder::Asc;
+    new.drop_discovery_games = vec![String::from("Chess")];
+    new.disable_at_in_nickname = !old.disable_at_in_nickname;
+
+    let changes = changed_names(&old, &new);
+    let class_of = |name: &str| {
+        changes
+            .iter()
+            .find(|(changed, _)| changed == name)
+            .unwrap_or_else(|| panic!("{name} was not reported"))
+            .1
+    };
+    for live in [
+        "betting(make_predictions)",
+        "chat_presence",
+        "emojis",
+        "game_priority",
+        "watch_priority",
+        "streamers",
+        "streamers_exclude",
+        "show_game",
+        "discord.events",
+        "bet.max_points",
+        "streamer_overrides",
+    ] {
+        assert_eq!(class_of(live), ReloadClass::Live, "{live}");
+    }
+    for restart in [
+        "save_logs",
+        "debug",
+        "log_format",
+        "privacy.anonymize_logs",
+        "timezone",
+        "followers_order",
+        "drop_discovery_games",
+        "disable_at_in_nickname",
+    ] {
+        assert_eq!(class_of(restart), ReloadClass::NeedsRestart, "{restart}");
+    }
+    assert_eq!(changes.len(), 11 + 8);
+}
+
+#[test]
+fn reload_diff_keeps_secrets_and_names_out_of_values() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.discord.webhook_api = String::from("https://discord.com/api/webhooks/1/secret-token");
+    new.webhook.url = String::from("https://ntfy.example/secret-topic");
+    new.username = String::from("secret-account");
+    new.streamers = vec![String::from("secret-channel")];
+    new.streamers_exclude = vec![String::from("secret-excluded")];
+    new.streamer_overrides.insert(
+        String::from("secret-override"),
+        StreamerSettingsOverride::default(),
+    );
+    new.chat_presence = String::from("NEVER");
+
+    let changes = diff_configs(&old, &new).unwrap();
+    let rendered = format!("{changes:?}");
+    for secret in [
+        "secret-token",
+        "secret-topic",
+        "secret-account",
+        "secret-channel",
+        "secret-excluded",
+        "secret-override",
+    ] {
+        assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+    }
+    let names = changes
+        .iter()
+        .map(|change| change.name.as_str())
+        .collect::<Vec<_>>();
+    for name in ["discord.webhook_api", "webhook.url", "username"] {
+        assert!(names.contains(&name), "{name} missing");
+    }
+    let chat = changes
+        .iter()
+        .find(|change| change.name == "chat_presence")
+        .unwrap();
+    assert_eq!(
+        chat.values,
+        Some((String::from("\"ONLINE\""), String::from("\"NEVER\"")))
+    );
+}
+
+#[test]
+fn merging_live_settings_keeps_restart_settings_at_their_running_value() {
+    let running = ConfigFile::default();
+    let mut next = running.clone();
+    next.emojis = !running.emojis;
+    next.streamers = vec![String::from("alice")];
+    next.save_logs = !running.save_logs;
+    next.privacy.anonymize_logs = !running.privacy.anonymize_logs;
+    next.discord.events = vec![String::from("STARTUP")];
+
+    let merged = merge_live_settings(&running, &next).unwrap();
+
+    assert_eq!(merged.emojis, next.emojis);
+    assert_eq!(merged.streamers, next.streamers);
+    assert_eq!(merged.discord, next.discord);
+    assert_eq!(merged.save_logs, running.save_logs);
+    assert_eq!(merged.privacy, running.privacy);
+    let remaining = changed_names(&merged, &next);
+    assert_eq!(
+        remaining,
+        vec![
+            (String::from("save_logs"), ReloadClass::NeedsRestart),
+            (
+                String::from("privacy.anonymize_logs"),
+                ReloadClass::NeedsRestart
+            ),
+        ]
+    );
+}

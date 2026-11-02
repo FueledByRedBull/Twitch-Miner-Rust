@@ -293,6 +293,7 @@ fn every_event_name_round_trips() {
         Event::EarningsStall,
         Event::DropsStall,
         Event::DailyReport,
+        Event::ConfigReload,
     ] {
         assert_eq!(normalize_event_name(event_name(event)), Some(event));
     }

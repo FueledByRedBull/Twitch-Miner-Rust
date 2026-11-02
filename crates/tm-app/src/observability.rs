@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -18,17 +18,24 @@ use crate::ledger::{LedgerHandle, LedgerRecord};
 const DISCORD_RATE_LIMIT_RETRIES: u32 = 2;
 const DISCORD_MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
+/// The settings a config reload replaces. Every clone of [`AppObservability`] shares one
+/// copy, so a reload is visible to all of them at once.
+#[derive(Clone, Default)]
+struct LiveSettings {
+    discord: Option<tm_observability::DiscordWebhook>,
+    webhook: Option<tm_observability::DiscordWebhook>,
+    emoji: bool,
+    show_claimed_bonus: bool,
+    show_game: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct AppObservability {
-    pub(crate) discord: Option<tm_observability::DiscordWebhook>,
-    webhook: Option<tm_observability::DiscordWebhook>,
+    live: Arc<RwLock<LiveSettings>>,
     pub(crate) discord_client: DiscordClient,
     anonymizer: Arc<Mutex<Anonymizer>>,
     pending_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     notification_slots: Arc<tokio::sync::Semaphore>,
-    pub(crate) emoji: bool,
-    pub(crate) show_claimed_bonus: bool,
-    show_game: bool,
     timezone: Option<chrono_tz::Tz>,
     ledger: Option<LedgerHandle>,
 }
@@ -52,15 +59,17 @@ impl AppObservability {
         settings: AppObservabilitySettings,
     ) -> Self {
         Self {
-            discord,
-            webhook: None,
+            live: Arc::new(RwLock::new(LiveSettings {
+                discord,
+                webhook: None,
+                emoji: settings.emoji,
+                show_claimed_bonus: settings.show_claimed_bonus,
+                show_game: settings.show_game,
+            })),
             discord_client,
             anonymizer: Arc::new(Mutex::new(Anonymizer::new(settings.anonymize_logs))),
             pending_tasks: Arc::new(Mutex::new(Vec::new())),
             notification_slots: Arc::new(tokio::sync::Semaphore::new(128)),
-            emoji: settings.emoji,
-            show_claimed_bonus: settings.show_claimed_bonus,
-            show_game: settings.show_game,
             timezone: settings.timezone,
             ledger: None,
         }
@@ -73,12 +82,31 @@ impl AppObservability {
     }
 
     #[must_use]
-    pub(crate) fn with_webhook(
-        mut self,
-        webhook: Option<tm_observability::DiscordWebhook>,
-    ) -> Self {
-        self.webhook = webhook;
+    pub(crate) fn with_webhook(self, webhook: Option<tm_observability::DiscordWebhook>) -> Self {
+        self.write_live().webhook = webhook;
         self
+    }
+
+    /// Replaces the notifier targets and filters and the presentation flags that a
+    /// config reload may change, for this handle and every clone of it.
+    pub(crate) fn apply_live_config(&self, config: &ConfigFile) {
+        *self.write_live() = live_settings(config);
+    }
+
+    pub(crate) fn show_claimed_bonus(&self) -> bool {
+        self.live().show_claimed_bonus
+    }
+
+    fn live(&self) -> RwLockReadGuard<'_, LiveSettings> {
+        self.live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write_live(&self) -> std::sync::RwLockWriteGuard<'_, LiveSettings> {
+        self.live
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn streamer_name(&self, streamer: &Streamer) -> String {
@@ -105,7 +133,7 @@ impl AppObservability {
     }
 
     fn decorate(&self, emoji: &str, message: String) -> String {
-        if self.emoji {
+        if self.live().emoji {
             format!("{emoji} {message}")
         } else {
             message
@@ -124,7 +152,7 @@ impl AppObservability {
 
     pub(crate) fn online_message(&self, streamer: &Streamer) -> String {
         let mut message = format!("{} is Online!", self.streamer_label(streamer));
-        if self.show_game {
+        if self.live().show_game {
             if let Some(game_name) = streamer_game_name(streamer) {
                 message.push_str(" | Playing: ");
                 message.push_str(&game_name);
@@ -177,7 +205,7 @@ impl AppObservability {
         previous: &str,
         current: &str,
     ) -> Option<String> {
-        if !self.show_game {
+        if !self.live().show_game {
             return None;
         }
         let previous = previous.trim();
@@ -204,7 +232,7 @@ impl AppObservability {
             self.streamer_label(streamer),
             reason
         );
-        if self.show_game && reason == "WATCH" {
+        if self.live().show_game && reason == "WATCH" {
             if let Some(game_name) = streamer_game_name(streamer) {
                 message.push_str(" | Game: ");
                 message.push_str(&game_name);
@@ -268,6 +296,10 @@ impl AppObservability {
                 "Points earnings recovered: {window_points} points in the last 2 hours ({rate:.0}/hour) against a usual {baseline:.0}/hour"
             ),
         )
+    }
+
+    pub(crate) fn config_reload_message(&self, line: &str) -> String {
+        self.decorate("🔄", line.to_string())
     }
 
     pub(crate) fn drops_stall_message(&self) -> String {
@@ -508,8 +540,12 @@ impl AppObservability {
     }
 
     pub(crate) async fn send_event(&self, event: DiscordEvent, message: &str) {
-        send_discord_event(self.discord.as_ref(), &self.discord_client, event, message).await;
-        send_webhook_event(self.webhook.as_ref(), &self.discord_client, event, message).await;
+        let (discord, webhook) = {
+            let live = self.live();
+            (live.discord.clone(), live.webhook.clone())
+        };
+        send_discord_event(discord.as_ref(), &self.discord_client, event, message).await;
+        send_webhook_event(webhook.as_ref(), &self.discord_client, event, message).await;
     }
 
     pub(crate) fn spawn_event(&self, event: DiscordEvent, message: String) {
@@ -575,18 +611,27 @@ async fn await_observability_task(mut task: tokio::task::JoinHandle<()>, grace: 
     }
 }
 
+fn live_settings(config: &ConfigFile) -> LiveSettings {
+    LiveSettings {
+        discord: new_discord_webhook(&DiscordSettings {
+            webhook_api: config.discord.webhook_api.clone(),
+            events: config.discord.events.clone(),
+        }),
+        webhook: new_discord_webhook(&DiscordSettings {
+            webhook_api: config.webhook.url.clone(),
+            events: config.webhook.events.clone(),
+        }),
+        emoji: config.emojis,
+        show_claimed_bonus: config.show_claimed_bonus_msg,
+        show_game: config.show_game,
+    }
+}
+
 pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservability> {
-    let discord = new_discord_webhook(&DiscordSettings {
-        webhook_api: config.discord.webhook_api.clone(),
-        events: config.discord.events.clone(),
-    });
-    let webhook = new_discord_webhook(&DiscordSettings {
-        webhook_api: config.webhook.url.clone(),
-        events: config.webhook.events.clone(),
-    });
+    let live = live_settings(config);
     let discord_client = DiscordClient::new(Duration::from_secs(15))?;
     Ok(AppObservability::new(
-        discord,
+        live.discord,
         discord_client,
         AppObservabilitySettings {
             anonymize_logs: config.privacy.anonymize_logs,
@@ -599,7 +644,7 @@ pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservabilit
                 .and_then(|value| value.parse().ok()),
         },
     )
-    .with_webhook(webhook))
+    .with_webhook(live.webhook))
 }
 
 pub(crate) async fn log_startup(
@@ -877,11 +922,13 @@ fn privacy_safe_log_path(anonymized: bool, path: &std::path::Path) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::{
-        await_observability_task, privacy_safe_chat_message, privacy_safe_log_path,
-        AppObservability, AppObservabilitySettings, TracingChatLogger,
+        await_observability_task, build_observability, privacy_safe_chat_message,
+        privacy_safe_log_path, AppObservability, AppObservabilitySettings, ConfigFile,
+        DiscordEvent, TracingChatLogger,
     };
     use tm_irc::{ChatEventKind, ChatLogger};
     use tm_observability::DiscordClient;
@@ -991,5 +1038,75 @@ mod tests {
         );
         observability.shutdown_pending_tasks().await;
         Ok(())
+    }
+
+    #[test]
+    fn a_config_reload_swaps_live_settings_for_every_clone() {
+        let first = build_observability(&ConfigFile::default()).unwrap();
+        let second = first.clone();
+        assert!(second.show_claimed_bonus());
+        assert!(second.live().discord.is_none());
+        let config = ConfigFile {
+            emojis: false,
+            show_claimed_bonus_msg: false,
+            show_game: false,
+            discord: tm_config::DiscordConfig {
+                webhook_api: String::from("https://discord.com/api/webhooks/1/token"),
+                events: vec![String::from("STARTUP")],
+            },
+            webhook: tm_config::WebhookConfig {
+                url: String::from("https://ntfy.example/topic"),
+                events: Vec::new(),
+            },
+            ..ConfigFile::default()
+        };
+
+        first.apply_live_config(&config);
+
+        for observability in [&first, &second] {
+            assert_eq!(observability.config_reload_message("x"), "x");
+            assert!(!observability.show_claimed_bonus());
+            let live = observability.live();
+            assert!(!live.show_game);
+            assert_eq!(
+                live.discord.as_ref().map(|webhook| webhook.events.clone()),
+                Some(vec![DiscordEvent::Startup])
+            );
+            assert!(live.webhook.is_some());
+        }
+    }
+
+    #[test]
+    fn readers_never_see_a_half_applied_reload() {
+        let observability = build_observability(&ConfigFile::default()).unwrap();
+        let writer = observability.clone();
+        let on = ConfigFile {
+            emojis: true,
+            show_game: true,
+            ..ConfigFile::default()
+        };
+        let off = ConfigFile {
+            emojis: false,
+            show_game: false,
+            ..on.clone()
+        };
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flip = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    writer.apply_live_config(&off);
+                    writer.apply_live_config(&on);
+                }
+            })
+        };
+
+        for _ in 0..20_000 {
+            let live = observability.live();
+            assert_eq!(live.emoji, live.show_game);
+        }
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        flip.join().unwrap();
     }
 }

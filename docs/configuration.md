@@ -34,6 +34,66 @@ which is secret), optional `log/` files, `streak-cache.json`,
 `prediction-placements.json`, `runtime-status.json`, and `earnings/`, the
 [earnings ledger](operations.md#earnings-ledger-and-alarms).
 
+## Changing settings while the miner runs
+
+The miner rereads the configuration file every 30 seconds and applies what it
+can without a restart. It only ever reads the file: a reload never writes or
+migrates it. An unchanged file does nothing. A file that is missing, cannot be
+read, is not valid JSON, or fails the same validation as `--check-config` is
+ignored with one warning, and the running configuration stays in force. How to
+tell whether a reload applied is described in the
+[operations guide](operations.md#config-reload).
+
+**Applied live:**
+
+| Setting | Notes |
+| --- | --- |
+| `streamers`, `streamers_exclude` | Channels are added and removed while the miner runs; see below. |
+| `game_priority`, `game_exclude`, `watch_priority` | Used by the next watch selection. |
+| `farm_drops`, `watch_one_stream_when_drops_active`, `claim_moments` | |
+| `betting(make_predictions)`, `follow_raid`, `community_goals`, `chat_presence` | `make_predictions` applies to predictions created after the reload. |
+| `claim_drops`, `watch_streak_vod_recovery` | Live while they keep the same background tasks running; see below. |
+| `bet` (every field) | Used by the next prediction. |
+| `streamer_overrides` | Replaces the per-channel overrides. |
+| `emojis`, `show_claimed_bonus_msg`, `show_game` | |
+| `discord.webhook_api`, `discord.events`, `webhook.url`, `webhook.events` | Notifications use the new target and filter from the reload on. |
+
+**Needs a restart:** `config_schema_version`, `username`, `debug`,
+`debug_deep`, `show_seconds`, `claim_drops_startup`, `save_logs`,
+`show_username_in_console`, `disable_at_in_nickname`, `followers_order`,
+`drop_account_link`, `drop_discovery_games`, `log_format`, `timezone`, and
+`privacy.anonymize_logs`. These are read once at startup. A file that changes
+only these is not applied, and the status block lists their names. A file that
+changes both applies the live settings and reports the rest.
+
+The Drop claim loop and the watch-streak recovery loop exist only when some
+channel needs them at startup. If a reload would leave no channel needing one
+that is running, or give a channel the need when none is running, `claim_drops`
+or `watch_streak_vod_recovery` (including the same keys in
+`streamer_overrides`) is held back and reported as needing a restart, while the
+other settings of that reload still apply.
+
+**Channel changes.** Adding a channel resolves it the way startup does, so a
+name that does not exist rejects the whole reload: nothing is applied, the
+running configuration stays, and the attempt is retried every five minutes
+while the file is unchanged. Removing a channel stops tracking it. A channel
+with a prediction whose placement is not settled stays tracked, even though it
+is no longer listed, until that prediction resolves, and is then removed.
+Only channels this change drops are removed; channels found by
+`drop_discovery_games` stay until a restart. In follower mode the follower list
+is fetched again only when `streamers` or `streamers_exclude` changed, never on
+a timer. A change that would leave no channel is rejected.
+
+**PubSub subscriptions.** `follow_raid`, `betting(make_predictions)`,
+`farm_drops`, `claim_drops`, `claim_moments`, and `community_goals` decide which
+PubSub topics are subscribed. A reload that changes the topics reconnects the
+transports, as a channel change does.
+
+**Missing keys.** A file that lacks keys, such as the fields a partial
+`streamer_overrides` entry omits, is read with the same defaults a restart would
+use and applies normally. The file itself stays as you wrote it until the next
+start fills the keys in.
+
 ## Account and channels
 
 | Setting | Default | Meaning |
@@ -92,7 +152,7 @@ pinning and fair rotation are separate rules, described in the
 | `show_game` | `true` | Include the game name in point messages. |
 | `log_format` | `text` | `text` for the human-readable lines, or `json` for one JSON object per line on the console and in saved logs, with `timestamp`, `level`, `operation`, `message`, and a `fields` object of extra values (omitted under `privacy.anonymize_logs`, like the text format). Any other value is rejected. Existing config files are not rewritten to add it, so a rollback to an older release can still read them. |
 | `timezone` | `null` | IANA time zone for timestamps and for the day boundary of the daily report and the status block's "today", such as `Europe/Athens`. `null` uses the host's local time. |
-| `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, per-channel points, and results in logs and Discord messages. Your own total points gained, in the session summary and the daily report, stays visible. The saved log is named `miner.log` instead of after the account. |
+| `privacy.anonymize_logs` | `true` | Replace streamer names with aliases and hide channel, event and outcome IDs, titles, channel balances, and results in logs and Discord messages. The points of each reward and your own total points gained, in the session summary and the daily report, stay visible. The saved log is named `miner.log` instead of after the account. |
 | `webhook.url` | `""` | Any HTTP(S) endpoint that should receive events, such as ntfy, Gotify, or Home Assistant. Each event is a POST with the JSON body `{"event": "DROP_CLAIM", "message": "..."}`. Empty disables it. Treat it as a secret. |
 | `webhook.events` | `[]` | Which events to send, from the same names as `discord.events`. |
 | `discord.webhook_api` | `""` | Discord webhook URL. Empty disables Discord. Treat it as a secret. |
@@ -103,9 +163,10 @@ Discord event names: `STARTUP`, `SHUTDOWN`, `STREAMER_ONLINE`,
 `GAIN_FOR_CLAIM`, `GAIN_FOR_RAID`, `BONUS_CLAIM`, `MOMENT_CLAIM`, `JOIN_RAID`,
 `DROP_CLAIM`, `DROP_STATUS`, `BET_START`, `BET_GENERAL`, `BET_FILTERS`,
 `BET_WIN`, `BET_LOSE`, `BET_REFUND`, `BET_FAILED`, `CHAT_MENTION`,
-`WATCH_STATUS`, `SESSION_LOST`, `EARNINGS_STALL`, `DROPS_STALL`, and
-`DAILY_REPORT`. The last three are described under
-[earnings ledger and alarms](operations.md#earnings-ledger-and-alarms); like the
+`WATCH_STATUS`, `SESSION_LOST`, `EARNINGS_STALL`, `DROPS_STALL`,
+`DAILY_REPORT`, and `CONFIG_RELOAD`. The three before the last are described under
+[earnings ledger and alarms](operations.md#earnings-ledger-and-alarms) and
+`CONFIG_RELOAD` under [config reload](operations.md#config-reload); like the
 others, an empty list sends them.
 
 ## Predictions (`bet`)

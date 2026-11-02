@@ -20,12 +20,14 @@ use thiserror::Error;
 use tm_domain::IrcMode;
 use tm_domain::{parse_watch_priority, FollowersOrder, MAX_PREDICTION_POINTS};
 
+mod reload;
 mod settings;
 
 use settings::{
     parse_chat_presence_value, parse_condition, parse_delay_mode, parse_outcome_key, parse_strategy,
 };
 
+pub use reload::{diff_configs, merge_live_settings, ReloadClass, SettingChange};
 pub use settings::{build_base_streamer_settings, build_override_settings, parse_chat_presence};
 
 #[derive(Debug, Error)]

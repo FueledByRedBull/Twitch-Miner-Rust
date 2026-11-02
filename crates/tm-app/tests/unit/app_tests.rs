@@ -2529,6 +2529,7 @@ mod tests {
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
             pending_prediction_winners: std::collections::HashMap::new(),
+            retired_streamers: Vec::new(),
         };
         let runtime = tm_runtime::spawn_runtime_state(state);
         let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
@@ -2603,6 +2604,7 @@ mod tests {
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
             pending_prediction_winners: std::collections::HashMap::new(),
+            retired_streamers: Vec::new(),
         };
         let runtime = tm_runtime::spawn_runtime_state(state);
         let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();

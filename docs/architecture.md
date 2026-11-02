@@ -3,7 +3,8 @@
 The project runs as a Cargo workspace with crate boundaries split by
 responsibility:
 
-- `tm-app` owns process bootstrap, task wiring, and the local earnings ledger.
+- `tm-app` owns process bootstrap, task wiring, the local earnings ledger, and
+  the config reload task.
 - `tm-config` owns config/path resolution and write-back; typed streamer-setting
   composition is isolated from persistence and migration.
 - `tm-auth` owns cookie persistence and device auth helpers.
@@ -65,9 +66,10 @@ The largest crates are decomposed behind stable crate facades:
 - `tm-app` keeps `main.rs` as the executable entrypoint and splits orchestration
   into startup, shutdown, drops, independently supervised EventSub/PubSub tasks,
   presence fallback polling, runtime effects, context refresh, minute watching,
-  chat, and shared utilities.
+  chat, config reload, and shared utilities.
 - `tm-config` keeps the stable flat schema and atomic persistence in `lib.rs`;
-  `settings.rs` owns typed base/override composition.
+  `settings.rs` owns typed base/override composition and `reload.rs` owns the
+  live-or-restart classification of changed settings.
 - `tm-twitch` exposes the same public API from `lib.rs`; `client.rs` owns HTTP
   execution and bounded retry policy, while `responses.rs` owns strict typed
   response validation and normalization.
@@ -104,6 +106,40 @@ execute runtime-approved network effects. This removes duplicated runtime/client
 identity/observability/health wiring while leaving transport credentials and
 subscription state in their narrower transport contexts.
 
+## Config reload
+
+A supervised `config-watch` task in `tm-app` rereads the active config file
+every 30 seconds. `tm-config` previews and validates the contents without
+writing and classifies each changed setting as live or needing a restart; its
+rule table names every top-level key, and a test fails when a key is missing.
+The reload is then applied in a fixed order:
+
+1. Everything that can fail runs first: the follower list when the channel
+   inputs changed, and each new channel through the startup identity and
+   context path. A failure applies nothing and is retried at most every five
+   minutes while the file is unchanged.
+2. `tm-app` sends one `ConfigReload` command. The `tm-runtime` reducer replaces
+   priorities and per-channel settings, appends new channels, and removes old
+   ones, all under the same lock and without I/O. A channel with a placed,
+   reserved, or unknown-outcome prediction is not removed, so the stake keeps
+   its accounting; the task asks again until the prediction resolves. Removed
+   channels are kept aside so the session summary still counts their points.
+3. After the commit, the shared `AppObservability` state (notifier targets and
+   filters, `emojis`, `show_claimed_bonus_msg`, `show_game`) is swapped in one
+   write, so every clone sees the same values.
+4. If the set of channels changed, a `TransportController` stops the current
+   generation of EventSub, PubSub, and presence polling, waits for it, and
+   starts the next one from a fresh runtime snapshot, since those tasks hold
+   indices into the channel list. Each generation has its own stop signal that
+   also fires on process shutdown, and the supervisor and the shutdown path read
+   the current tasks through the controller's slots, so a restart is not a task
+   exit. The chat manager already follows the runtime's channel list, and minute
+   watching, context refresh, Drop handling, the streak cache, and the ledger
+   read the runtime snapshot on every pass, so none of them restart.
+
+Settings read once at startup, and changes that would start or stop a task that
+exists only for some channels, are reported in the status block and left alone.
+
 ## Enforced invariants
 
 | Boundary | Invariant |
@@ -115,6 +151,7 @@ subscription state in their narrower transport contexts.
 | Watching | At most two Twitch-creditable slots run; an eligible campaign can pin one while the remaining slot fair-rotates. |
 | Privacy | Credentials, identifiers, balances, and raw responses do not cross privacy-safe diagnostic interfaces. |
 | Lifecycle | Health belongs to the current process session, and shutdown uses normal signal-driven task termination. |
+| Reload | A config reload never writes the file, applies as one runtime command after every fallible step, and never removes a channel whose prediction placement is unsettled. |
 
 `scripts/verify-architecture.ps1` rejects network/application dependencies in
 `tm-domain` and prevents substantial `*_tests.rs` files from returning to
