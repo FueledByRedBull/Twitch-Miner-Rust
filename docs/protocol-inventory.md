@@ -290,9 +290,10 @@ sent with an empty `systemFilters` instead of `DROPS_ENABLED`; the response has
 the same shape and the same parser. This request has never been exercised
 against live Twitch. At most five channels per game and 20 in total are tracked,
 refreshed about every six hours by the `config-watch` task. A discovered channel
-is eligible for a watch slot only while `should_prioritize_streak` holds for it,
-and it sorts after every configured channel in the selection order, so it never
-takes a plain rotation turn from one.
+is eligible for a watch slot only while `should_prioritize_streak` holds for it.
+It enters the queue after every configured channel and then takes plain
+first-in, first-out turns: it is never a streak promotion candidate, and it
+scores nothing, so it never jumps a configured channel.
 
 ## Offline streak recovery
 

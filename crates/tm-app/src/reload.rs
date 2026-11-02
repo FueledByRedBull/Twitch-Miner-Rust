@@ -34,7 +34,7 @@ use crate::bootstrap::validate_app_config;
 use crate::discovery;
 use crate::identity_cache::IdentityCache;
 use crate::observability::AppObservability;
-use crate::startup::{bootstrap_streamer, load_targets};
+use crate::startup::{bootstrap_streamer, is_permanent_streamer_failure, load_targets};
 use crate::status::{unix_now_infallible, HealthTracker};
 use crate::streak_cache::StreakCache;
 use crate::tasks::TransportController;
@@ -127,6 +127,7 @@ pub(crate) async fn resolve_channels(
     candidates: Vec<Streamer>,
     tracked: &[Streamer],
     identity_cache: &mut IdentityCache,
+    skip_permanent_failures: bool,
 ) -> anyhow::Result<Vec<Streamer>> {
     let mut resolved: Vec<Streamer> = Vec::new();
     if candidates.is_empty() {
@@ -135,7 +136,7 @@ pub(crate) async fn resolve_channels(
     let mut streak_cache = StreakCache::load(&context.work_dir, time_now()).unwrap_or_default();
     for mut streamer in candidates {
         context.health.activity(TASK_NAME);
-        bootstrap_streamer(
+        if let Err(error) = bootstrap_streamer(
             &mut streamer,
             &context.twitch,
             context.user_id.as_deref(),
@@ -144,7 +145,20 @@ pub(crate) async fn resolve_channels(
             &mut streak_cache,
             identity_cache,
         )
-        .await?;
+        .await
+        {
+            if !(skip_permanent_failures && is_permanent_streamer_failure(&error)) {
+                return Err(error);
+            }
+            // Fields are dropped from anonymized logs; the message names no channel.
+            tracing::warn!(
+                task = TASK_NAME,
+                error_class = "streamer-skipped",
+                %error,
+                "skipping a followed channel that could not be loaded"
+            );
+            continue;
+        }
         if !tracked
             .iter()
             .chain(resolved.iter())
@@ -594,6 +608,7 @@ impl ConfigWatcher {
                 vec![candidate],
                 &snapshot.streamers,
                 &mut identity_cache,
+                false,
             )
             .await
             {
@@ -636,7 +651,6 @@ impl ConfigWatcher {
             return;
         }
 
-        self.keep_identity_cache(identity_cache);
         let reload = tm_runtime::ConfigReload {
             watch_priorities: snapshot.watch_priorities.clone(),
             game_priority: snapshot.game_priority.clone(),
@@ -685,19 +699,20 @@ impl ConfigWatcher {
     }
 
     async fn evaluate(&mut self) -> Evaluation {
+        let anonymize = self.context.running.privacy.anonymize_logs;
         let preview = match preview_config(&self.context.config_path) {
             Ok(preview) => preview,
             Err(error) => {
                 return Evaluation::Rejected {
                     class: "invalid-config",
-                    detail: describe_config_error(&error),
+                    detail: describe_config_error(&error, anonymize),
                 }
             }
         };
         if let Err(error) = validate_app_config(&preview.config) {
             return Evaluation::Rejected {
                 class: "invalid-config",
-                detail: describe_config_error(&error),
+                detail: describe_config_error(&error, anonymize),
             };
         }
         let changes = match diff_configs(&self.context.running, &preview.config) {
@@ -705,7 +720,7 @@ impl ConfigWatcher {
             Err(error) => {
                 return Evaluation::Rejected {
                     class: "invalid-config",
-                    detail: describe_config_error(&error),
+                    detail: describe_config_error(&error, anonymize),
                 }
             }
         };
@@ -816,15 +831,25 @@ impl ConfigWatcher {
             .filter(|streamer| !streamer.discovered)
             .cloned()
             .collect::<Vec<_>>();
-        let resolved =
-            match resolve_channels(&self.context, added, &configured, &mut identity_cache).await {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    // Fields are dropped from anonymized logs; the message names no channel.
-                    tracing::warn!(task = TASK_NAME, %error, "a new channel could not be loaded");
-                    return failed("channel-resolution", "a new channel could not be loaded");
-                }
-            };
+        // As at startup, one dead follower must not block the rest of the list; a
+        // name the user typed still rejects the reload.
+        let followers = next.streamers.is_empty();
+        let resolved = match resolve_channels(
+            &self.context,
+            added,
+            &configured,
+            &mut identity_cache,
+            followers,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                // Fields are dropped from anonymized logs; the message names no channel.
+                tracing::warn!(task = TASK_NAME, %error, "a new channel could not be loaded");
+                return failed("channel-resolution", "a new channel could not be loaded");
+            }
+        };
 
         let reload = tm_runtime::ConfigReload {
             watch_priorities: parse_watch_priorities(&next.watch_priority),
@@ -1082,8 +1107,9 @@ impl ConfigWatcher {
     }
 }
 
-fn describe_config_error(error: &tm_config::ConfigError) -> String {
+fn describe_config_error(error: &tm_config::ConfigError, anonymize: bool) -> String {
     match error {
+        tm_config::ConfigError::Validation(message) if anonymize => hide_override_logins(message),
         tm_config::ConfigError::Validation(message) => message.clone(),
         // The parser's own text can quote a value from the file.
         tm_config::ConfigError::InvalidConfig(error) => format!(
@@ -1094,6 +1120,24 @@ fn describe_config_error(error: &tm_config::ConfigError) -> String {
         ),
         tm_config::ConfigError::Io(_) => String::from("the file could not be read"),
     }
+}
+
+/// A validation message names a channel only as a `streamer_overrides` key.
+fn hide_override_logins(message: &str) -> String {
+    const PREFIX: &str = "streamer_overrides.";
+    let mut hidden = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(start) = rest.find(PREFIX) {
+        let (head, tail) = rest.split_at(start + PREFIX.len());
+        hidden.push_str(head);
+        hidden.push_str("[hidden]");
+        let end = tail
+            .find(|character: char| character == '.' || character.is_whitespace())
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    hidden.push_str(rest);
+    hidden
 }
 
 fn render_changes(changes: &[SettingChange]) -> String {

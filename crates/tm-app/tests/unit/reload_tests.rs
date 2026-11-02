@@ -427,10 +427,84 @@ fn rejection_text_never_quotes_the_file() {
     std::fs::write(&path, secret).unwrap();
 
     let error = preview_config(&path).unwrap_err();
-    let detail = describe_config_error(&error);
+    let detail = describe_config_error(&error, false);
 
     assert!(!detail.contains("secret.example"), "{detail}");
     assert!(detail.contains("line 1"), "{detail}");
+}
+
+#[test]
+fn anonymized_rejection_text_hides_channel_names() {
+    let error = tm_config::ConfigError::Validation(String::from(
+        "config.streamer_overrides.secretchannel.points_limit must be a positive whole number, not 0",
+    ));
+
+    let detail = describe_config_error(&error, true);
+    assert_eq!(
+        detail,
+        "config.streamer_overrides.[hidden].points_limit must be a positive whole number, not 0"
+    );
+    assert!(describe_config_error(&error, false).contains("secretchannel"));
+
+    let error = tm_config::ConfigError::Validation(String::from(
+        "config.streamer_overrides.secretchannel must be a JSON object",
+    ));
+    assert_eq!(
+        describe_config_error(&error, true),
+        "config.streamer_overrides.[hidden] must be a JSON object"
+    );
+}
+
+#[tokio::test]
+async fn a_followed_channel_that_cannot_load_is_skipped_but_a_named_one_fails() {
+    let harness = harness(|_| {}).await;
+    let candidates = || {
+        ["ghost", "charlie"]
+            .map(|login| Streamer {
+                username: login.to_string(),
+                ..Streamer::default()
+            })
+            .to_vec()
+    };
+    let mut identity_cache = IdentityCache::default();
+
+    let followers = resolve_channels(
+        &harness.watcher.context,
+        candidates(),
+        &[],
+        &mut identity_cache,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(followers.len(), 1);
+    assert_eq!(followers[0].username, "charlie");
+
+    assert!(resolve_channels(
+        &harness.watcher.context,
+        candidates(),
+        &[],
+        &mut identity_cache,
+        false,
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn streak_discovery_never_writes_the_identity_cache() {
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    let cache_file = harness
+        .directory
+        .path()
+        .join(crate::identity_cache::IDENTITY_CACHE_FILE_NAME);
+    harness.list("chess", &["found1"]);
+    let before = std::fs::read(&cache_file).ok();
+
+    harness.tick(Duration::ZERO).await;
+
+    assert!(harness.logins().await.contains(&String::from("found1")));
+    assert_eq!(std::fs::read(&cache_file).ok(), before);
 }
 
 // ---------------------------------------------------------------- status

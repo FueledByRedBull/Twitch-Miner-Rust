@@ -2684,6 +2684,59 @@ fn reload_adds_channels_once_and_removes_them_in_order() {
     assert_eq!(state.initial_points["bravo"], 1_000);
 }
 
+fn retire_discovered(state: &mut RuntimeState, username: &str, channel_id: &str, earned: i64) {
+    let mut reload = unchanged_reload(state);
+    reload.add = vec![Streamer {
+        username: username.to_string(),
+        channel_id: channel_id.to_string(),
+        discovered: true,
+        ..Streamer::default()
+    }];
+    state.apply_config_reload(reload);
+    state
+        .streamers
+        .iter_mut()
+        .find(|streamer| streamer.channel_id == channel_id)
+        .unwrap()
+        .channel_points = earned;
+    let mut reload = unchanged_reload(state);
+    reload.remove = vec![channel_id.to_string()];
+    state.apply_config_reload(reload);
+}
+
+#[test]
+fn the_retired_channel_list_stays_bounded_by_dropping_the_oldest() {
+    let mut state = reload_state(&["alpha"]);
+    for index in 0..300 {
+        retire_discovered(
+            &mut state,
+            &format!("found{index}"),
+            &format!("9{index}"),
+            10,
+        );
+    }
+
+    assert_eq!(state.retired_streamers.len(), 256);
+    assert_eq!(state.retired_streamers[0].username, "found44");
+    assert!(!state.initial_points.contains_key("found0"));
+    assert!(state.initial_points.contains_key("found299"));
+}
+
+#[test]
+fn a_retired_channel_that_earned_nothing_leaves_before_one_that_earned() {
+    let mut state = reload_state(&["alpha"]);
+    retire_discovered(&mut state, "earner", "8000", 450);
+    for index in 0..256 {
+        retire_discovered(&mut state, &format!("idle{index}"), &format!("9{index}"), 0);
+    }
+
+    assert_eq!(state.retired_streamers.len(), 256);
+    assert_eq!(state.retired_streamers[0].username, "earner");
+    assert_eq!(state.retired_streamers[1].username, "idle1");
+    assert!(state.initial_points.contains_key("earner"));
+    assert!(!state.initial_points.contains_key("idle0"));
+}
+
 #[test]
 fn a_configured_channel_takes_over_a_discovered_one_in_place_and_never_the_reverse() {
     let mut state = reload_state(&["alpha", "bravo"]);

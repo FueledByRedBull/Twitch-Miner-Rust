@@ -94,6 +94,8 @@ jobs:
       # and the key carries the nightly through its rustc version.
       # Placed before the install so the cargo-installed binary is cached too.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-07-01
         with:
           shared-key: deep-quality-fuzz
           workspaces: fuzz -> target

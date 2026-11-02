@@ -126,7 +126,7 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
 /// so it is skipped. Network, rate-limit, server, auth, and integrity failures
 /// are not specific to one streamer and still abort startup for a clean retry.
 /// So does a connection dropped mid-response or a truncated body.
-fn is_permanent_streamer_failure(error: &anyhow::Error) -> bool {
+pub(crate) fn is_permanent_streamer_failure(error: &anyhow::Error) -> bool {
     use tm_twitch::TwitchClientError;
     match error.downcast_ref::<TwitchClientError>() {
         Some(TwitchClientError::Http(_) | TwitchClientError::Json(_)) => false,

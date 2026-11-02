@@ -424,8 +424,12 @@ pub struct ChannelScore {
 }
 
 impl ChannelScore {
+    /// A discovered channel scores nothing, so it never jumps a configured one.
     #[must_use]
     pub fn of(streamer: &Streamer, yield_tier: u8, now: OffsetDateTime) -> Self {
+        if streamer.discovered {
+            return Self::default();
+        }
         Self {
             uncollected_streak: should_prioritize_streak(streamer, now),
             drops: streamer.can_watch_drop_campaign(),
@@ -1246,6 +1250,16 @@ mod tests {
         );
         assert_eq!(
             ChannelScore::of(&Streamer::default(), 0, now),
+            ChannelScore::default()
+        );
+    }
+
+    #[test]
+    fn a_discovered_channel_with_an_open_streak_scores_nothing() {
+        let now = OffsetDateTime::UNIX_EPOCH;
+        assert!(ChannelScore::of(&open_streak("configured", false), 1, now).uncollected_streak);
+        assert_eq!(
+            ChannelScore::of(&open_streak("found", true), 1, now),
             ChannelScore::default()
         );
     }

@@ -486,22 +486,7 @@ async fn select_watch_logins(
         &mut state.watch_failures,
         now,
     );
-    let streak_candidates = eligible
-        .iter()
-        .filter_map(|login| {
-            let streamer = snapshot
-                .streamers
-                .iter()
-                .find(|streamer| &streamer.username == login)?;
-            let stream = streamer.stream.as_ref()?;
-            (tm_domain::should_prioritize_streak(streamer, now)
-                && !stream.broadcast_id.trim().is_empty())
-            .then(|| StreakCandidate {
-                login: login.clone(),
-                broadcast_id: stream.broadcast_id.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
+    let streak_candidates = promotable_streaks(&snapshot.streamers, &eligible, now);
     if let Some((login, channel_id)) = state
         .watchdog
         .stalled_logins(
@@ -656,6 +641,31 @@ async fn select_watch_logins(
     }
     state.selected_channel_ids = selected_channel_ids;
     Some(watch_logins)
+}
+
+/// The eligible channels streak promotion may move to the front of the queue.
+/// A discovered channel only ever takes a plain turn, so it is not one of them.
+fn promotable_streaks(
+    streamers: &[Streamer],
+    eligible: &[String],
+    now: OffsetDateTime,
+) -> Vec<StreakCandidate> {
+    eligible
+        .iter()
+        .filter_map(|login| {
+            let streamer = streamers
+                .iter()
+                .find(|streamer| &streamer.username == login)?;
+            let stream = streamer.stream.as_ref()?;
+            (!streamer.discovered
+                && tm_domain::should_prioritize_streak(streamer, now)
+                && !stream.broadcast_id.trim().is_empty())
+            .then(|| StreakCandidate {
+                login: login.clone(),
+                broadcast_id: stream.broadcast_id.clone(),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn released_watch_channel_ids(
@@ -1592,6 +1602,36 @@ mod tests {
 
     fn timestamp(seconds: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(seconds).expect("valid fixture timestamp")
+    }
+
+    #[test]
+    fn only_configured_channels_are_promoted_for_a_streak() {
+        let open_streak = |login: &str, discovered| Streamer {
+            username: login.to_string(),
+            discovered,
+            settings: tm_domain::StreamerSettings {
+                watch_streak: true,
+                ..tm_domain::StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                broadcast_id: format!("{login}-broadcast"),
+                watch_streak_missing: true,
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        };
+        let streamers = [open_streak("configured", false), open_streak("found", true)];
+        let eligible = [String::from("found"), String::from("configured")];
+
+        let candidates = promotable_streaks(&streamers, &eligible, timestamp(0));
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.login.as_str())
+                .collect::<Vec<_>>(),
+            ["configured"]
+        );
     }
 
     #[tokio::test]

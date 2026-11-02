@@ -87,7 +87,8 @@ Only channels this change drops are removed; channels found by
 and a login you add to `streamers` that discovery already tracks becomes a
 normal configured channel. In follower mode the follower list
 is fetched again only when `streamers` or `streamers_exclude` changed, never on
-a timer. A change that would leave no channel is rejected.
+a timer, and a followed channel that cannot be loaded is skipped as it is at
+startup. A change that would leave no channel is rejected.
 
 **PubSub subscriptions.** `follow_raid`, `betting(make_predictions)`,
 `farm_drops`, `claim_drops`, `claim_moments`, and `community_goals` decide which
@@ -111,7 +112,7 @@ start fills the keys in.
 | `followers_order` | `DESC` | Order of followed channels when `streamers` is empty: `ASC` or `DESC`. |
 | `drop_account_link` | `linked` | Which Drop campaigns to farm by game-account link: `linked` skips campaigns you have not linked, `all` farms everything, `none` skips any campaign that involves a game account. |
 | `drop_discovery_games` | `[]` | Game slugs (the last part of the game's Twitch directory URL, such as `rocket-league`) to find channels for. At each start the miner adds up to five live channels with Drops enabled per game. They use your global settings and `streamers_exclude` still applies, but the list is only refreshed when the miner restarts. |
-| `streak_discovery_games` | `[]` | Opt-in. Game slugs, as for `drop_discovery_games`, to look for channels where a watch streak may be waiting. About every six hours the miner adds up to five live channels per game, at most 20 in all, most viewed first, and drops the ones that went offline or are no longer listed. A discovered channel gets a watch slot only while its streak is not yet collected in the current broadcast, for at most ten minutes of watching per broadcast, never ahead of a configured channel, and runs with predictions, raids, community goals, Drops, moments, streak recovery, and chat off. `streamers_exclude`, `game_exclude`, and your own `streamers` apply: a channel you also list stays a normal configured channel. Discovered channels are never written to the file. A failed lookup changes nothing and logs one warning. Existing files are not rewritten to add the key, so a rollback to an older release can still read them. |
+| `streak_discovery_games` | `[]` | Opt-in. Game slugs, as for `drop_discovery_games`, to look for channels where a watch streak may be waiting. About every six hours the miner adds up to five live channels per game, at most 20 in all, most viewed first, and drops the ones that went offline or are no longer listed. A discovered channel gets a watch slot only while its streak is not yet collected in the current broadcast, for at most ten minutes of watching per broadcast. It takes plain first-in, first-out turns, so streak promotion and scoring never move it ahead of a configured channel, and it runs with predictions, raids, community goals, Drops, moments, streak recovery, and chat off. `streamers_exclude`, `game_exclude`, and your own `streamers` apply: a channel you also list stays a normal configured channel. Discovered channels are never written to the file. A failed lookup changes nothing and logs one warning. Existing files are not rewritten to add the key, so a rollback to an older release can still read them. |
 | `game_priority` | `[]` | Games to prefer, in order. |
 | `game_exclude` | `[]` | Games whose streams are not watched. |
 | `watch_priority` | `["STREAK", "DROPS", "ORDER"]` | How the two watched channels are chosen. Priorities are tried in order; see the next table. |

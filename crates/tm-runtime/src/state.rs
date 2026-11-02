@@ -19,6 +19,7 @@ use crate::types::{
 const MAX_ACTIVE_PREDICTIONS_PER_CHANNEL: usize = 8;
 const MAX_ACTIVE_PREDICTIONS: usize = 256;
 const MAX_COMPLETED_PREDICTIONS: usize = 256;
+const MAX_RETIRED_STREAMERS: usize = 256;
 
 const MAX_PROCESSED_MUTATION_IDS: usize = 128;
 // Prediction point deductions must remain recognizable for as long as the
@@ -149,10 +150,26 @@ impl RuntimeState {
             let retired = self.streamers.remove(index);
             self.retired_streamers
                 .retain(|existing| existing.channel_id != retired.channel_id);
-            self.retired_streamers.push(retired);
+            self.retire_streamer(retired);
             outcome.removed.push(channel_id);
         }
         outcome
+    }
+
+    /// Keeps a removed channel for the session summary. Streak discovery can
+    /// churn through channels for as long as the miner runs, so past the cap one
+    /// leaves: the oldest that earned nothing, or failing that the oldest.
+    fn retire_streamer(&mut self, retired: Streamer) {
+        self.retired_streamers.push(retired);
+        if self.retired_streamers.len() <= MAX_RETIRED_STREAMERS {
+            return;
+        }
+        let earned_nothing = self.retired_streamers.iter().position(|streamer| {
+            streamer.history.is_empty()
+                && self.initial_points.get(&streamer.username) == Some(&streamer.channel_points)
+        });
+        let evicted = self.retired_streamers.remove(earned_nothing.unwrap_or(0));
+        self.initial_points.remove(&evicted.username);
     }
 
     pub fn capture_initial_points(&mut self) {
