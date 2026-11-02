@@ -179,6 +179,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
             params.observability.clone(),
             params.health.clone(),
             drop_coordinator.clone(),
+            params.work_dir.to_path_buf(),
         )
     });
     let drop = params

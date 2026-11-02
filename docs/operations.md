@@ -266,6 +266,25 @@ or `reason`. `--days` defaults to 7 and accepts 1 to 3650. Only the monthly
 files that overlap the period are read, line by line. Channel names are printed
 as they are in the ledger, whatever `privacy.anonymize_logs` says.
 
+**Measuring channel ranking.** Two watched slots earn `WATCH` and `CLAIM` points
+at a fixed rate, about the same whichever channels are watched. Channel scoring,
+the ledger yield tier, and streak discovery can only change the rewards that
+vary: `WATCH_STREAK`, `RAID`, and the effect of multipliers. Expect a gain of a
+few percent, not more. To see whether it shows up, compare the same length of
+time before and after enabling it, with enough days to average out which
+channels were live:
+
+```sh
+docker compose exec -T twitch-miner /twitch-miner --earnings --days 14 --by reason --data-dir /data
+```
+
+Look at the `WATCH_STREAK` and `RAID` rows, not at the total, and compare points
+per hour rather than the sum when the miner ran for different lengths of time.
+A channel that took a slot because of its score shows `score-jump` as its
+selection reason in `--status`. The yield tier reads the ledger in the
+background at most once an hour; without a ledger every channel ties and
+rotation is plain first-in, first-out.
+
 Two alarms report silent losses, each as one notification when it starts and one
 when it clears. Both run every five minutes, log a warning, and appear in
 `--status`. Add the event names to `discord.events` or `webhook.events` to
@@ -343,6 +362,15 @@ nothing is partly applied.
 
 A failed reload does not fail `--health`; the `config-watch` task reports
 healthy as long as it keeps checking.
+
+**Streak discovery.** With `streak_discovery_games` set, the same task lists live
+channels about every six hours and logs one line, `Streak discovery: added ... |
+removed ...`, when the set changed. A changed set reconnects the transports as
+described below, so expect that about once per refresh; a refresh that finds the
+same set does nothing and restarts nothing. If the listing fails, nothing changes, one warning
+is logged, and the next try is five minutes later. A found channel that cannot
+be loaded is skipped and retried then too. Discovered channels are never
+written to the config file.
 
 **What a reconnect restarts.** When the set of tracked channels changes, or a
 setting changes which PubSub topics are needed, EventSub, PubSub, and the

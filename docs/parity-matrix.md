@@ -98,6 +98,7 @@ remove those two documented Rust-only exceptions rather than add new ones. Broke
 upstream tests are never made an enforced gate here.
 
 Two more Rust-only operations back features the Go baseline does not have:
-`DirectoryPage_Game` for Drop channel discovery and `DropCurrentSessionContext` for
+`DirectoryPage_Game` for Drop channel discovery (and, with an empty
+`systemFilters`, for streak discovery) and `DropCurrentSessionContext` for
 Drop credit checks. The
 gate lists them by name, so any other new operation still fails it.

@@ -31,6 +31,7 @@ use tm_observability::Event as DiscordEvent;
 use tm_twitch::TwitchClient;
 
 use crate::bootstrap::validate_app_config;
+use crate::discovery;
 use crate::identity_cache::IdentityCache;
 use crate::observability::AppObservability;
 use crate::startup::{bootstrap_streamer, load_targets};
@@ -277,6 +278,28 @@ impl FileObserver {
 pub(crate) struct TrackedChannel {
     pub(crate) channel_id: String,
     pub(crate) names: Vec<String>,
+    /// Found by streak discovery. Only discovery adds or removes such a channel,
+    /// besides an exclusion, and a configured name takes it over.
+    pub(crate) discovered: bool,
+}
+
+fn tracked_channels(
+    streamers: &[Streamer],
+    identity_cache: &IdentityCache,
+    now: tm_runtime::RuntimeTime,
+) -> Vec<TrackedChannel> {
+    streamers
+        .iter()
+        .map(|streamer| {
+            let mut names = vec![streamer.username.clone()];
+            names.extend(identity_cache.configured_logins(&streamer.channel_id, now));
+            TrackedChannel {
+                channel_id: streamer.channel_id.clone(),
+                names,
+                discovered: streamer.discovered,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -308,6 +331,9 @@ fn named_channels(config: &ConfigFile) -> Vec<String> {
 /// every later reload. A tracked channel leaves only when this change drops it:
 /// when the running config named it, when a named list replaces follower mode,
 /// or when it is newly excluded. Channels found by Drop discovery stay put.
+/// Channels found by streak discovery are never the config's to drop, except
+/// for an exclusion, and a login the config names is resolved even when
+/// discovery already tracks it, so the configured channel takes over.
 pub(crate) fn plan_channels(
     running: &ConfigFile,
     next: &ConfigFile,
@@ -317,7 +343,9 @@ pub(crate) fn plan_channels(
     let previously_named = named_channels(running);
     let excluded = normalize_streamer_list(&next.streamers_exclude);
     let owned_by_config = |channel: &TrackedChannel| {
-        if running.streamers.is_empty() {
+        if channel.discovered {
+            false
+        } else if running.streamers.is_empty() {
             !next.streamers.is_empty() && running.drop_discovery_games.is_empty()
         } else {
             channel
@@ -332,7 +360,9 @@ pub(crate) fn plan_channels(
             .iter()
             .filter(|login| {
                 !previously_named.contains(login)
-                    && !tracked.iter().any(|channel| channel.names.contains(login))
+                    && !tracked
+                        .iter()
+                        .any(|channel| !channel.discovered && channel.names.contains(login))
             })
             .cloned()
             .collect(),
@@ -411,6 +441,10 @@ struct ConfigWatcher {
     deferred: Vec<String>,
     /// Whether the failed attempt for the current contents has been warned about.
     failure_logged: bool,
+    /// When streak discovery next refreshes; `None` means at the next check.
+    discovery_due: Option<Instant>,
+    /// Whether the current run of failed discovery refreshes has been warned about.
+    discovery_failure_logged: bool,
 }
 
 pub(crate) fn spawn_config_watch_loop(
@@ -450,6 +484,8 @@ impl ConfigWatcher {
             identity_cache,
             deferred: Vec::new(),
             failure_logged: false,
+            discovery_due: None,
+            discovery_failure_logged: false,
         }
     }
 
@@ -479,7 +515,173 @@ impl ConfigWatcher {
                 self.report(evaluation, now);
             }
         }
+        self.refresh_discovery(now).await;
         self.retry_deferred_removals().await;
+    }
+
+    /// Adds and drops the channels of `streak_discovery_games` as one change,
+    /// through the same runtime command and transport restart as a config
+    /// reload. A listing failure changes nothing; a channel that cannot be
+    /// loaded is skipped and tried again at the retry interval.
+    #[allow(clippy::too_many_lines)] // Keep list, plan, resolve and commit in order.
+    async fn refresh_discovery(&mut self, now: Instant) {
+        if self.discovery_due.is_some_and(|due| now < due) {
+            return;
+        }
+        let running = &self.context.running;
+        let games = normalize_game_list(&running.streak_discovery_games);
+        // Configured channels, including ones that failed to load, stay configured.
+        let mut excluded = normalize_streamer_list(&running.streamers_exclude);
+        excluded.extend(normalize_streamer_list(&running.streamers));
+        excluded.extend(normalize_streamer_list(std::slice::from_ref(
+            &running.username,
+        )));
+        let found = if games.is_empty() {
+            Vec::new()
+        } else {
+            match discovery::list_channels(&self.context.twitch, &games, &excluded).await {
+                Ok(found) => found,
+                Err(error) => {
+                    if !std::mem::replace(&mut self.discovery_failure_logged, true) {
+                        tracing::warn!(
+                            task = TASK_NAME,
+                            error_class = "streak-discovery",
+                            %error,
+                            "could not list live channels for streak discovery; keeping the current ones"
+                        );
+                    }
+                    self.discovery_due = Some(now + RETRY_INTERVAL);
+                    return;
+                }
+            }
+        };
+        let Ok(snapshot) = self.context.runtime.state_snapshot().await else {
+            return;
+        };
+        let tracked = tracked_channels(&snapshot.streamers, &self.identity_cache, time_now());
+        let discovered = snapshot
+            .streamers
+            .iter()
+            .filter(|streamer| streamer.discovered)
+            .map(|streamer| discovery::DiscoveredChannel {
+                channel_id: streamer.channel_id.clone(),
+                login: streamer.username.clone(),
+                usable: streamer.is_online
+                    && !discovery::plays_excluded_game(streamer, &snapshot.game_exclusions),
+            })
+            .collect::<Vec<_>>();
+        let plan = discovery::plan_discovery(&found, &tracked, &discovered);
+        // A channel listed again is wanted again, even if its removal was waiting.
+        self.deferred.retain(|channel_id| {
+            discovered.iter().all(|channel| {
+                &channel.channel_id != channel_id || plan.remove.contains(channel_id)
+            })
+        });
+
+        let settings = build_base_streamer_settings(&self.context.running).for_discovered();
+        let mut identity_cache = self.identity_cache.clone();
+        let mut resolved: Vec<Streamer> = Vec::new();
+        let mut skipped = 0_usize;
+        for login in &plan.resolve {
+            let candidate = Streamer {
+                username: login.clone(),
+                discovered: true,
+                settings: settings.clone(),
+                ..Streamer::default()
+            };
+            match resolve_channels(
+                &self.context,
+                vec![candidate],
+                &snapshot.streamers,
+                &mut identity_cache,
+            )
+            .await
+            {
+                Ok(channels) => {
+                    for streamer in channels {
+                        if streamer.is_online
+                            && !discovery::plays_excluded_game(&streamer, &snapshot.game_exclusions)
+                            && !resolved
+                                .iter()
+                                .any(|added| added.channel_id == streamer.channel_id)
+                        {
+                            resolved.push(streamer);
+                        }
+                    }
+                }
+                Err(error) => {
+                    skipped += 1;
+                    tracing::debug!(task = TASK_NAME, %error, "a discovered channel could not be loaded");
+                }
+            }
+        }
+        if skipped > 0 && !std::mem::replace(&mut self.discovery_failure_logged, true) {
+            tracing::warn!(
+                task = TASK_NAME,
+                error_class = "streak-discovery",
+                "{skipped} discovered channel(s) could not be loaded and were skipped"
+            );
+        }
+        self.discovery_due = Some(
+            now + if skipped > 0 {
+                RETRY_INTERVAL
+            } else {
+                discovery::REFRESH_INTERVAL
+            },
+        );
+        if skipped == 0 {
+            self.discovery_failure_logged = false;
+        }
+        if resolved.is_empty() && plan.remove.is_empty() {
+            return;
+        }
+
+        self.keep_identity_cache(identity_cache);
+        let reload = tm_runtime::ConfigReload {
+            watch_priorities: snapshot.watch_priorities.clone(),
+            game_priority: snapshot.game_priority.clone(),
+            game_exclusions: snapshot.game_exclusions.clone(),
+            follower_mode: snapshot.follower_mode,
+            settings: HashMap::new(),
+            add: resolved.clone(),
+            remove: plan.remove,
+        };
+        let Ok(outcome) = self.context.runtime.apply_config_reload(reload).await else {
+            return;
+        };
+        for channel_id in outcome.deferred {
+            if !self.deferred.contains(&channel_id) {
+                self.deferred.push(channel_id);
+            }
+        }
+        if outcome.added.is_empty() && outcome.removed.is_empty() {
+            return;
+        }
+        let label = |channel_ids: &[String]| {
+            channel_ids
+                .iter()
+                .filter_map(|channel_id| {
+                    snapshot
+                        .streamers
+                        .iter()
+                        .chain(&resolved)
+                        .find(|streamer| &streamer.channel_id == channel_id)
+                })
+                .map(|streamer| self.context.observability.streamer_name(streamer))
+                .collect::<Vec<_>>()
+        };
+        let line = [("added", &outcome.added), ("removed", &outcome.removed)]
+            .into_iter()
+            .filter(|(_, channel_ids)| !channel_ids.is_empty())
+            .map(|(verb, channel_ids)| format!("{verb} {}", label(channel_ids).join(", ")))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        tracing::info!(
+            task = TASK_NAME,
+            operation = "streak_discovery",
+            "Streak discovery: {line}"
+        );
+        self.restart_transports().await;
     }
 
     async fn evaluate(&mut self) -> Evaluation {
@@ -528,22 +730,10 @@ impl ConfigWatcher {
         let Ok(snapshot) = self.context.runtime.state_snapshot().await else {
             return failed("runtime", "the runtime state is closed");
         };
-        let now = time_now();
-        let tracked = snapshot
-            .streamers
+        let tracked = tracked_channels(&snapshot.streamers, &self.identity_cache, time_now());
+        let discovery_changed = changes
             .iter()
-            .map(|streamer| {
-                let mut names = vec![streamer.username.clone()];
-                names.extend(
-                    self.identity_cache
-                        .configured_logins(&streamer.channel_id, now),
-                );
-                TrackedChannel {
-                    channel_id: streamer.channel_id.clone(),
-                    names,
-                }
-            })
-            .collect::<Vec<_>>();
+            .any(|change| change.name == "streak_discovery_games");
 
         let mut plan = ChannelPlan::default();
         let mut deferred = self.deferred.clone();
@@ -569,7 +759,14 @@ impl ConfigWatcher {
                 remove.push(channel_id);
             }
         }
-        if snapshot.streamers.len() + plan.resolve.len() <= remove.len() {
+        // Discovered channels only collect streaks, so they never count as a channel to mine.
+        let remaining = snapshot
+            .streamers
+            .iter()
+            .filter(|streamer| !streamer.discovered && !remove.contains(&streamer.channel_id))
+            .count()
+            + plan.resolve.len();
+        if remaining == 0 {
             return Evaluation::Rejected {
                 class: "no-channels",
                 detail: String::from("the change would leave no channel to mine"),
@@ -578,6 +775,7 @@ impl ConfigWatcher {
 
         let base = build_base_streamer_settings(&next);
         let overrides = build_override_settings(&base, &next.streamer_overrides);
+        let discovered_settings = base.for_discovered();
         let running_settings = snapshot
             .streamers
             .iter()
@@ -587,10 +785,12 @@ impl ConfigWatcher {
             .iter()
             .filter(|channel| !remove.contains(&channel.channel_id))
             .map(|channel| {
-                (
-                    channel.channel_id.clone(),
-                    settings_for(&channel.names, &base, &overrides),
-                )
+                let settings = if channel.discovered {
+                    discovered_settings.clone()
+                } else {
+                    settings_for(&channel.names, &base, &overrides)
+                };
+                (channel.channel_id.clone(), settings)
             })
             .collect::<HashMap<_, _>>();
         let mut added = plan
@@ -608,21 +808,23 @@ impl ConfigWatcher {
             .hold(&running_settings, &mut retained, &mut added);
 
         let mut identity_cache = self.identity_cache.clone();
-        let resolved = match resolve_channels(
-            &self.context,
-            added,
-            &snapshot.streamers,
-            &mut identity_cache,
-        )
-        .await
-        {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                // Fields are dropped from anonymized logs; the message names no channel.
-                tracing::warn!(task = TASK_NAME, %error, "a new channel could not be loaded");
-                return failed("channel-resolution", "a new channel could not be loaded");
-            }
-        };
+        // A discovered channel does not count as tracked here: a configured name
+        // for the same channel must be resolved so it can take that channel over.
+        let configured = snapshot
+            .streamers
+            .iter()
+            .filter(|streamer| !streamer.discovered)
+            .cloned()
+            .collect::<Vec<_>>();
+        let resolved =
+            match resolve_channels(&self.context, added, &configured, &mut identity_cache).await {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    // Fields are dropped from anonymized logs; the message names no channel.
+                    tracing::warn!(task = TASK_NAME, %error, "a new channel could not be loaded");
+                    return failed("channel-resolution", "a new channel could not be loaded");
+                }
+            };
 
         let reload = tm_runtime::ConfigReload {
             watch_priorities: parse_watch_priorities(&next.watch_priority),
@@ -654,18 +856,11 @@ impl ConfigWatcher {
                 tracing::warn!(task = TASK_NAME, %error, "the running config view could not be updated");
             }
         }
-        if identity_cache
-            .save(&self.context.work_dir, time_now())
-            .is_err()
-        {
-            tracing::warn!(
-                task = "identity-cache",
-                error_class = "write",
-                "startup identity cache write failed"
-            );
-        }
-        self.identity_cache = identity_cache;
+        self.keep_identity_cache(identity_cache);
         self.deferred.clone_from(&outcome.deferred);
+        if discovery_changed {
+            self.discovery_due = None;
+        }
         let label = |channel_id: &String| {
             snapshot
                 .streamers
@@ -697,6 +892,20 @@ impl ConfigWatcher {
             self.restart_transports().await;
         }
         Evaluation::Applied(summary)
+    }
+
+    fn keep_identity_cache(&mut self, mut identity_cache: IdentityCache) {
+        if identity_cache
+            .save(&self.context.work_dir, time_now())
+            .is_err()
+        {
+            tracing::warn!(
+                task = "identity-cache",
+                error_class = "write",
+                "startup identity cache write failed"
+            );
+        }
+        self.identity_cache = identity_cache;
     }
 
     /// Channel settings decide some `PubSub` topics, so a change that keeps the

@@ -26,6 +26,14 @@ fn tracked(channel_id: &str, names: &[&str]) -> TrackedChannel {
     TrackedChannel {
         channel_id: channel_id.to_string(),
         names: names.iter().map(ToString::to_string).collect(),
+        discovered: false,
+    }
+}
+
+fn discovered(channel_id: &str, names: &[&str]) -> TrackedChannel {
+    TrackedChannel {
+        discovered: true,
+        ..tracked(channel_id, names)
     }
 }
 
@@ -205,6 +213,22 @@ fn startup_gates_hold_a_change_that_would_stop_the_only_claiming_channel() {
 
     assert_eq!(held, ["claim_drops", "watch_streak_vod_recovery"]);
     assert!(retained["1"].claim_drops);
+}
+
+#[test]
+fn discovered_channels_never_change_a_startup_gate() {
+    let discovered_settings = settings(true, true, true).for_discovered();
+    for started in [settings(false, true, false), settings(true, true, true)] {
+        let gates = StartupGates::from_streamers(&[gate_streamer("alpha", started.clone())]);
+        let running = HashMap::from([
+            (String::from("1"), started.clone()),
+            (String::from("9"), discovered_settings.clone()),
+        ]);
+        let mut retained = running.clone();
+        let held = gates.hold(&running, &mut retained, &mut []);
+        assert!(held.is_empty(), "{started:?}");
+        assert_eq!(retained, running);
+    }
 }
 
 // ---------------------------------------------------------------- observer
@@ -540,11 +564,32 @@ fn capture_logs() -> (CapturedLog, tracing::subscriber::DefaultGuard) {
     (log, tracing::subscriber::set_default(subscriber))
 }
 
-/// A Twitch stand-in that answers the three reads a new channel needs. Names
-/// containing "ghost" do not exist.
+/// What the fake game directory answers, and how often it was asked.
+#[derive(Default)]
+struct Directory {
+    games: HashMap<String, Vec<String>>,
+    fail: bool,
+    requests: usize,
+}
+
+/// A Twitch stand-in that answers the reads a new channel needs. Names
+/// containing "ghost" do not exist. A name starting with "found" is a live
+/// channel with an id of its own, except "foundoff", which exists but is
+/// offline; one containing "slots" plays Slots. The game directory lists what
+/// the test puts in [`Directory`].
 struct FakeTwitch {
     endpoints: TwitchEndpoints,
     id_lookups: Arc<AtomicUsize>,
+    directory: Arc<Mutex<Directory>>,
+}
+
+/// The text between `prefix` and the next quote in a request body.
+fn quoted_after<'a>(request: &'a str, prefix: &str) -> &'a str {
+    request
+        .split(prefix)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default()
 }
 
 fn http_json(body: &str) -> Vec<u8> {
@@ -589,6 +634,8 @@ fn spawn_fake_twitch() -> FakeTwitch {
     let address = listener.local_addr().unwrap();
     let id_lookups = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&id_lookups);
+    let directory = Arc::new(Mutex::new(Directory::default()));
+    let shared_directory = Arc::clone(&directory);
     thread::spawn(move || loop {
         let Ok((mut stream, _)) = listener.accept() else {
             return;
@@ -600,19 +647,68 @@ fn spawn_fake_twitch() -> FakeTwitch {
             )
         } else if request.contains(r#""operationName":"GetIDFromLogin""#) {
             counted.fetch_add(1, Ordering::SeqCst);
+            let login = quoted_after(&request, r#""login":""#);
             if request.contains("ghost") {
                 String::from(r#"{"data":{"user":null}}"#)
+            } else if login.starts_with("foundoff") {
+                String::from(r#"{"data":{"user":{"id":"900"}}}"#)
+            } else if let Some(suffix) = login.strip_prefix("found") {
+                format!(r#"{{"data":{{"user":{{"id":"3{suffix}"}}}}}}"#)
             } else if request.contains("delta") {
                 String::from(r#"{"data":{"user":{"id":"200"}}}"#)
             } else {
                 String::from(r#"{"data":{"user":{"id":"201"}}}"#)
             }
         } else if request.contains(r#""operationName":"ChannelPointsContext""#) {
-            String::from(
-                r#"{"data":{"community":{"channel":{"self":{"communityPoints":null},"communityPointsSettings":{"isEnabled":false,"goals":[]}}}}}"#,
+            let points = if quoted_after(&request, r#""channelLogin":""#).starts_with("found") {
+                r#"{"balance":1234}"#
+            } else {
+                "null"
+            };
+            format!(
+                r#"{{"data":{{"community":{{"channel":{{"self":{{"communityPoints":{points}}},"communityPointsSettings":{{"isEnabled":{},"goals":[]}}}}}}}}}}"#,
+                points != "null"
             )
         } else if request.contains(r#""operationName":"WithIsStreamLiveQuery""#) {
-            String::from(r#"{"data":{"user":{"stream":null}}}"#)
+            if quoted_after(&request, r#""id":""#).starts_with('3') {
+                String::from(r#"{"data":{"user":{"stream":{"id":"stream-1"}}}}"#)
+            } else {
+                String::from(r#"{"data":{"user":{"stream":null}}}"#)
+            }
+        } else if request.contains(r#""operationName":"VideoPlayerStreamInfoOverlayChannel""#) {
+            let game = if quoted_after(&request, r#""channel":""#).contains("slots") {
+                "Slots"
+            } else {
+                "Game Name"
+            };
+            format!(
+                r#"{{"data":{{"user":{{"broadcastSettings":{{"title":"Title","game":{{"id":"g","displayName":"{game}"}}}},"stream":{{"id":"stream-1","viewersCount":5,"tags":[]}}}}}}}}"#
+            )
+        } else if request.contains(r#""operationName":"UserPointsContribution""#) {
+            String::from(
+                r#"{"data":{"user":{"channel":{"self":{"communityPoints":{"goalContributions":[]}}}}}}"#,
+            )
+        } else if request.contains(r#""operationName":"DirectoryPage_Game""#) {
+            let mut directory = shared_directory.lock().unwrap();
+            directory.requests += 1;
+            if directory.fail {
+                String::from(r#"{"errors":[{"message":"boom"}]}"#)
+            } else {
+                let edges = directory
+                    .games
+                    .get(quoted_after(&request, r#""slug":""#))
+                    .map(|logins| {
+                        logins
+                            .iter()
+                            .map(|login| {
+                                format!(r#"{{"node":{{"broadcaster":{{"login":"{login}"}}}}}}"#)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                format!(r#"{{"data":{{"game":{{"streams":{{"edges":[{edges}]}}}}}}}}"#)
+            }
         } else {
             String::from(r#"{"data":{}}"#)
         };
@@ -625,6 +721,7 @@ fn spawn_fake_twitch() -> FakeTwitch {
             playback_url: format!("http://{address}/hls/"),
         },
         id_lookups,
+        directory,
     }
 }
 
@@ -754,7 +851,48 @@ impl Harness {
     fn restarts(&self) -> Vec<usize> {
         self.restarts.lock().unwrap().clone()
     }
+
+    fn list(&self, game: &str, logins: &[&str]) {
+        self.twitch
+            .directory
+            .lock()
+            .unwrap()
+            .games
+            .insert(game.to_string(), self::logins(logins));
+    }
+
+    fn directory_requests(&self) -> usize {
+        self.twitch.directory.lock().unwrap().requests
+    }
+
+    async fn discovered(&self) -> Vec<String> {
+        self.runtime
+            .state_snapshot()
+            .await
+            .unwrap()
+            .streamers
+            .into_iter()
+            .filter(|streamer| streamer.discovered)
+            .map(|streamer| streamer.username)
+            .collect()
+    }
 }
+
+/// A watcher whose settings would make a discovered channel dangerous if they
+/// were not forced: predictions, raids, goals and chat are all on.
+async fn discovering(games: &[&str], edit: impl FnOnce(&mut Value)) -> Harness {
+    harness(|value| {
+        value["streak_discovery_games"] = serde_json::json!(games);
+        value["betting(make_predictions)"] = Value::from(true);
+        value["follow_raid"] = Value::from(true);
+        value["community_goals"] = Value::from(true);
+        value["chat_presence"] = Value::from("ALWAYS");
+        edit(value);
+    })
+    .await
+}
+
+const SIX_HOURS: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[tokio::test]
 async fn an_unchanged_file_does_nothing() {
@@ -1148,6 +1286,290 @@ async fn a_change_that_would_leave_no_channel_is_rejected() {
         Some("no-channels")
     );
     assert_eq!(harness.status().rejected_attempts, 1);
+}
+
+// ---------------------------------------------------------------- discovery
+
+#[tokio::test]
+async fn discovery_adds_live_channels_with_safe_settings_and_restarts_once() {
+    let mut harness = discovering(&["chess"], |value| {
+        value["streamers_exclude"] = serde_json::json!(["found3"]);
+    })
+    .await;
+    // alpha is configured, found3 is excluded and foundoff4 is offline.
+    harness.list(
+        "chess",
+        &["alpha", "found1", "found2", "found3", "foundoff4"],
+    );
+
+    harness.tick(Duration::ZERO).await;
+
+    assert_eq!(
+        harness.logins().await,
+        ["alpha", "bravo", "found1", "found2"]
+    );
+    assert_eq!(harness.discovered().await, ["found1", "found2"]);
+    let snapshot = harness.runtime.state_snapshot().await.unwrap();
+    assert!(snapshot.streamers[0].settings.make_predictions);
+    assert!(snapshot.streamers[0].settings.follow_raid);
+    for found in &snapshot.streamers[2..] {
+        let settings = &found.settings;
+        assert!(!settings.make_predictions && !settings.follow_raid);
+        assert!(!settings.community_goals && !settings.claim_moments);
+        assert!(!settings.farm_drops && !settings.claim_drops);
+        assert!(!settings.watch_streak_vod_recovery && settings.watch_streak);
+        assert_eq!(settings.irc_mode, tm_domain::IrcMode::Never);
+    }
+    let topics = tm_pubsub::build_topics("user-1", &snapshot.streamers).unwrap();
+    assert!(topics.contains(&String::from("raid.100")));
+    assert!(topics.contains(&String::from("video-playback-by-id.31")));
+    assert!(!topics
+        .iter()
+        .any(|topic| topic.ends_with(".31") && !topic.starts_with("video")));
+    assert_eq!(snapshot.desired_chat_logins(), ["alpha", "bravo"]);
+    assert_eq!(harness.restarts(), [4]);
+    assert_eq!(harness.directory_requests(), 1);
+
+    // Configured channels first, then the discovered ones while their streak is open.
+    assert_eq!(
+        snapshot.watch_target_logins(time_now()),
+        ["alpha", "bravo", "found1", "found2"]
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_listing_neither_reloads_nor_restarts() {
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    harness.list("chess", &["found1", "found2", "foundoff4"]);
+    harness.tick(Duration::ZERO).await;
+    assert_eq!(harness.restarts(), [4]);
+
+    harness.tick(CHECK_INTERVAL).await;
+    harness.tick(Duration::from_secs(6 * 60 * 60 - 60)).await;
+    assert_eq!(harness.directory_requests(), 1, "at most every six hours");
+
+    harness.tick(SIX_HOURS + Duration::from_secs(60)).await;
+    assert_eq!(harness.directory_requests(), 2);
+    assert_eq!(harness.restarts(), [4], "same set, no restart");
+    assert_eq!(harness.discovered().await, ["found1", "found2"]);
+}
+
+#[tokio::test]
+async fn a_failed_listing_changes_nothing_and_warns_once() {
+    let (log, _guard) = capture_logs();
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    harness.list("chess", &["found1"]);
+    harness.twitch.directory.lock().unwrap().fail = true;
+
+    harness.tick(Duration::ZERO).await;
+    harness.tick(RETRY_INTERVAL + Duration::from_secs(1)).await;
+
+    assert_eq!(
+        harness.directory_requests(),
+        2,
+        "retried after five minutes"
+    );
+    assert_eq!(harness.logins().await, ["alpha", "bravo"]);
+    assert!(harness.restarts().is_empty());
+    assert_eq!(
+        log.text().matches("could not list live channels").count(),
+        1
+    );
+
+    harness.twitch.directory.lock().unwrap().fail = false;
+    harness
+        .tick(RETRY_INTERVAL * 2 + Duration::from_secs(2))
+        .await;
+    assert_eq!(harness.discovered().await, ["found1"]);
+    assert_eq!(harness.restarts(), [3]);
+}
+
+#[tokio::test]
+async fn channels_that_are_unlisted_or_offline_at_a_refresh_are_removed_in_one_change() {
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    harness.list("chess", &["found1", "found2", "found3"]);
+    harness.tick(Duration::ZERO).await;
+    assert_eq!(harness.discovered().await, ["found1", "found2", "found3"]);
+
+    // found2 goes offline but is still listed, found3 drops out of the listing.
+    harness
+        .runtime
+        .apply_event(
+            tm_domain::MinerEvent::Playback {
+                channel_id: String::from("32"),
+                kind: tm_domain::PlaybackType::StreamDown,
+            },
+            time_now(),
+        )
+        .await
+        .unwrap();
+    harness.list("chess", &["found1", "found2", "found4"]);
+    harness.tick(SIX_HOURS + Duration::from_secs(60)).await;
+
+    assert_eq!(harness.discovered().await, ["found1", "found4"]);
+    assert_eq!(harness.restarts(), [5, 4], "one restart for both changes");
+    let snapshot = harness.runtime.state_snapshot().await.unwrap();
+    assert_eq!(snapshot.retired_streamers.len(), 2);
+}
+
+#[tokio::test]
+async fn discovery_stays_within_five_per_game_and_twenty_in_total() {
+    let games = ["g1", "g2", "g3", "g4", "g5"];
+    let mut harness = discovering(&games, |_| {}).await;
+    for (index, game) in games.iter().enumerate() {
+        let names = (0..8)
+            .map(|channel| format!("found{index}x{channel}"))
+            .collect::<Vec<_>>();
+        harness.list(game, &names.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    harness.tick(Duration::ZERO).await;
+
+    assert_eq!(harness.discovered().await.len(), 20);
+    assert_eq!(
+        harness.directory_requests(),
+        4,
+        "the fifth game is not read"
+    );
+    let discovered = harness.discovered().await;
+    for game in 0..4 {
+        let count = discovered
+            .iter()
+            .filter(|login| login.starts_with(&format!("found{game}x")))
+            .count();
+        assert_eq!(count, 5, "game {game}");
+    }
+    assert_eq!(harness.restarts(), [22]);
+}
+
+#[tokio::test]
+async fn exclusions_are_honored_for_logins_and_games() {
+    let mut harness = discovering(&["chess"], |value| {
+        value["game_exclude"] = serde_json::json!(["Slots"]);
+        value["streamers_exclude"] = serde_json::json!(["found2"]);
+    })
+    .await;
+    harness.list("chess", &["found1", "found2", "foundslots3"]);
+
+    harness.tick(Duration::ZERO).await;
+
+    assert_eq!(harness.discovered().await, ["found1"]);
+
+    // A game excluded later removes the channels playing it at the next refresh.
+    edit_config(&harness.path, |value| {
+        value["game_exclude"] = serde_json::json!(["slots", "game name"]);
+        value["streak_discovery_games"] = serde_json::json!(["chess", "go"]);
+    });
+    harness.tick(CHECK_INTERVAL).await;
+    assert!(harness.discovered().await.is_empty());
+    assert_eq!(harness.logins().await, ["alpha", "bravo"]);
+}
+
+#[tokio::test]
+async fn a_reload_that_changes_streamers_leaves_discovered_channels_alone() {
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    harness.list("chess", &["found1", "found2"]);
+    harness.tick(Duration::ZERO).await;
+
+    edit_config(&harness.path, |value| {
+        value["streamers"] = serde_json::json!(["alpha", "delta"]);
+        value["betting(make_predictions)"] = Value::from(true);
+        value["bet"]["percentage"] = Value::from(9);
+    });
+    harness.tick(CHECK_INTERVAL).await;
+
+    assert_eq!(
+        harness.logins().await,
+        ["alpha", "found1", "found2", "delta"]
+    );
+    assert_eq!(harness.discovered().await, ["found1", "found2"]);
+    let snapshot = harness.runtime.state_snapshot().await.unwrap();
+    assert!(snapshot.streamers[0].settings.make_predictions);
+    assert!(
+        !snapshot.streamers[1].settings.make_predictions,
+        "the reload keeps the safe settings"
+    );
+    assert_eq!(harness.status().last_result, Some(ReloadResult::Applied));
+    assert_eq!(harness.restarts(), [4, 4]);
+}
+
+#[tokio::test]
+async fn a_configured_name_takes_over_a_discovered_channel() {
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    harness.list("chess", &["found1", "found2"]);
+    harness.tick(Duration::ZERO).await;
+    assert_eq!(harness.discovered().await, ["found1", "found2"]);
+
+    edit_config(&harness.path, |value| {
+        value["streamers"] = serde_json::json!(["alpha", "bravo", "found1"]);
+    });
+    harness.tick(CHECK_INTERVAL).await;
+
+    assert_eq!(harness.discovered().await, ["found2"]);
+    let snapshot = harness.runtime.state_snapshot().await.unwrap();
+    let taken = snapshot
+        .streamers
+        .iter()
+        .find(|streamer| streamer.username == "found1")
+        .unwrap();
+    assert!(taken.settings.make_predictions && taken.settings.follow_raid);
+    assert_eq!(snapshot.streamers.len(), 4, "tracked once, not twice");
+    // The new raid and prediction topics need the transports restarted.
+    assert_eq!(harness.restarts(), [4, 4]);
+
+    // Later refreshes never turn it back into a discovered channel or drop it.
+    harness.tick(SIX_HOURS + Duration::from_secs(60)).await;
+    assert_eq!(harness.discovered().await, ["found2"]);
+    assert_eq!(harness.logins().await.len(), 4);
+}
+
+#[tokio::test]
+async fn turning_the_key_off_removes_the_discovered_channels_at_once() {
+    let mut harness = discovering(&["chess"], |_| {}).await;
+    harness.list("chess", &["found1", "found2"]);
+    harness.tick(Duration::ZERO).await;
+
+    edit_config(&harness.path, |value| {
+        value["streak_discovery_games"] = serde_json::json!([]);
+    });
+    harness.tick(CHECK_INTERVAL).await;
+
+    assert_eq!(harness.logins().await, ["alpha", "bravo"]);
+    assert_eq!(harness.restarts(), [4, 2]);
+    assert_eq!(harness.status().last_result, Some(ReloadResult::Applied));
+}
+
+#[tokio::test]
+async fn discovery_never_runs_without_games() {
+    let mut harness = harness(|_| {}).await;
+
+    harness.tick(Duration::ZERO).await;
+    harness.tick(SIX_HOURS * 2).await;
+
+    assert_eq!(harness.directory_requests(), 0);
+    assert!(harness.restarts().is_empty());
+}
+
+#[test]
+fn channels_found_by_discovery_are_the_configs_only_to_exclude() {
+    let running = named(&["alpha", "bravo"], &[]);
+    let channels = [
+        tracked("1", &["alpha"]),
+        discovered("2", &["found1"]),
+        discovered("3", &["bravo"]),
+    ];
+
+    // Dropping the configured list never drops a discovered channel.
+    let next = named(&["alpha"], &[]);
+    let plan = plan_channels(&running, &next, &desired(&next), &channels);
+    assert!(plan.remove.is_empty());
+    assert!(plan.resolve.is_empty());
+
+    // A newly excluded one goes, and a name that discovery tracks is still resolved.
+    let next = named(&["alpha", "found1"], &["bravo"]);
+    let plan = plan_channels(&running, &next, &desired(&next), &channels);
+    assert_eq!(plan.remove, logins(&["3"]));
+    assert_eq!(plan.resolve, logins(&["found1"]));
 }
 
 #[tokio::test]

@@ -2685,6 +2685,48 @@ fn reload_adds_channels_once_and_removes_them_in_order() {
 }
 
 #[test]
+fn a_configured_channel_takes_over_a_discovered_one_in_place_and_never_the_reverse() {
+    let mut state = reload_state(&["alpha", "bravo"]);
+    state.streamers[1].discovered = true;
+    state.streamers[1].settings = StreamerSettings::default().for_discovered();
+    state.streamers[1].stream.as_mut().unwrap().minute_watched = 4.0;
+    let configured = StreamerSettings {
+        make_predictions: true,
+        ..StreamerSettings::default()
+    };
+
+    let mut reload = unchanged_reload(&state);
+    reload.add = vec![Streamer {
+        username: String::from("bravo"),
+        channel_id: String::from("101"),
+        settings: configured.clone(),
+        ..Streamer::default()
+    }];
+    let outcome = state.apply_config_reload(reload);
+
+    assert_eq!(outcome, ConfigReloadOutcome::default());
+    assert!(!state.streamers[1].discovered);
+    assert_eq!(state.streamers[1].settings, configured);
+    assert!(
+        (state.streamers[1].stream.as_ref().unwrap().minute_watched - 4.0).abs() < f64::EPSILON,
+        "watch progress is kept"
+    );
+    assert_eq!(state.streamers.len(), 2);
+
+    let mut reverse = unchanged_reload(&state);
+    reverse.add = vec![Streamer {
+        username: String::from("bravo"),
+        channel_id: String::from("101"),
+        discovered: true,
+        settings: StreamerSettings::default().for_discovered(),
+        ..Streamer::default()
+    }];
+    state.apply_config_reload(reverse);
+    assert!(!state.streamers[1].discovered);
+    assert_eq!(state.streamers[1].settings, configured);
+}
+
+#[test]
 fn removed_channel_loses_its_watch_slot_and_the_other_keeps_its_progress() {
     let mut state = reload_state(&["alpha", "bravo"]);
     let now = ts(600);

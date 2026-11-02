@@ -31,7 +31,11 @@ Accepted point rewards are also appended to a local ledger, `earnings/YYYY-MM.js
 in the data directory, which `--earnings`, the silent-loss alarms, and the daily
 report read. The ledger is a file on the operator's machine, not an integration:
 exporters that send earnings data to external analytics services remain out of
-scope, and nothing in the miner reads the ledger back into mining decisions.
+scope. The miner reads the ledger back for one purpose only: an hourly,
+background read assigns each channel a coarse yield tier, which can break a tie
+between waiting channels at a fair rotation and nothing else. A missing,
+empty, or unreadable ledger leaves every channel in tier 0, which changes no
+other mining decision.
 
 ## Event flow
 
@@ -139,6 +143,13 @@ The reload is then applied in a fixed order:
 
 Settings read once at startup, and changes that would start or stop a task that
 exists only for some channels, are reported in the status block and left alone.
+
+The same task refreshes streak discovery every six hours. It lists live channels
+for `streak_discovery_games`, resolves the new ones, and applies all additions
+and removals as one `ConfigReload` followed by one transport restart, or does
+nothing when the set did not change. Discovered channels carry a `discovered`
+flag, run with forced-safe settings, and are never touched by a change to
+`streamers`; a name the config later lists takes the channel over in place.
 
 ## Enforced invariants
 

@@ -84,6 +84,8 @@ pub(crate) const SETTING_RULES: &[Rule] = &[
     restart("followers_order", true),
     restart("drop_account_link", true),
     restart("drop_discovery_games", true),
+    // Live because the config-watch task reads the running value at each check.
+    live("streak_discovery_games", true),
     restart("log_format", true),
     live("bet", true),
     restart("timezone", true),

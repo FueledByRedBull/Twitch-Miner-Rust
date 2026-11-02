@@ -99,6 +99,10 @@ pub struct StreamerSettingsOverride {
     pub watch_streak_vod_recovery: Option<bool>,
     pub community_goals: Option<bool>,
     pub chat_presence: Option<String>,
+    /// Positive channel-points balance at which the channel stops getting watch
+    /// slots for points. Left out of existing files, like every opt-in key.
+    #[serde(default)]
+    pub points_limit: Option<i64>,
     pub bet: BetConfig,
 }
 
@@ -207,6 +211,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub drop_discovery_games: Vec<String>,
     #[serde(default)]
+    pub streak_discovery_games: Vec<String>,
+    #[serde(default)]
     pub log_format: LogFormat,
     pub bet: BetConfig,
     pub timezone: Option<String>,
@@ -262,6 +268,7 @@ pub fn default_config_value() -> Value {
         "followers_order": "DESC",
         "drop_account_link": "linked",
         "drop_discovery_games": [],
+        "streak_discovery_games": [],
         "log_format": "text",
         "timezone": Value::Null,
         "privacy": {
@@ -336,6 +343,7 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     validate_streamer_override_shapes(&value)?;
     validate_known_keys(&value)?;
     validate_enum_values(&value)?;
+    validate_points_limits(&value)?;
 
     let mut top_level_defaults = default_config_value();
     if existed {
@@ -449,6 +457,14 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
                 Some(chat_presence),
                 parse_chat_presence_value,
             )?;
+        }
+        if override_settings
+            .points_limit
+            .is_some_and(|limit| limit <= 0)
+        {
+            return Err(ConfigError::Validation(format!(
+                "config.streamer_overrides.{login}.points_limit must be a positive whole number"
+            )));
         }
         validate_bet_config(
             &format!("config.streamer_overrides.{login}.bet"),
@@ -579,6 +595,23 @@ fn validate_enum_values(value: &Value) -> Result<(), ConfigError> {
             if let Some(bet) = override_object.get("bet").and_then(Value::as_object) {
                 validate_bet_values(bet, &format!("{override_path}.bet"))?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_points_limits(value: &Value) -> Result<(), ConfigError> {
+    let Some(overrides) = value.get("streamer_overrides").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (login, override_value) in overrides {
+        let Some(limit) = override_value.get("points_limit") else {
+            continue;
+        };
+        if !limit.is_null() && limit.as_i64().is_none_or(|limit| limit <= 0) {
+            return Err(ConfigError::Validation(format!(
+                "config.streamer_overrides.{login}.points_limit must be a positive whole number, not {limit}"
+            )));
         }
     }
     Ok(())
@@ -917,6 +950,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "followers_order",
     "drop_account_link",
     "drop_discovery_games",
+    "streak_discovery_games",
     "log_format",
     "bet",
     "timezone",
@@ -947,6 +981,7 @@ const DISCORD_CONFIG_KEYS: &[&str] = &["webhook_api", "events"];
 const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &[
     "drop_account_link",
     "drop_discovery_games",
+    "streak_discovery_games",
     "log_format",
     "webhook",
 ];
@@ -962,6 +997,7 @@ const STREAMER_OVERRIDE_KEYS: &[&str] = &[
     "watch_streak_vod_recovery",
     "community_goals",
     "chat_presence",
+    "points_limit",
     "bet",
 ];
 

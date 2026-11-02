@@ -1,11 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant as StdInstant};
 
+use tm_domain::ChannelScore;
 use tm_runtime::RuntimeTime;
 
 const MINUTE_WATCHER_RESUME_GAP: i64 = 10 * 60;
 const MAX_CONCURRENT_WATCHERS: usize = 2;
 const WATCH_ROTATION_SECONDS: i64 = 15 * 60;
+// Every fourth fair rotation ignores the scores, so a low-scoring channel waits
+// a bounded number of rotations however many better ones queue behind it.
+const FIFO_ROTATION_INTERVAL: u32 = 4;
 // Streak promotions defer the fair rotation clock, so cap how long a channel at
 // the front of the queue can hold its slot before fair rotation wins outright.
 const MAX_ROTATION_DEFERRAL_SECONDS: i64 = 2 * WATCH_ROTATION_SECONDS;
@@ -32,6 +36,7 @@ pub(crate) struct WatchRotation {
     selection_reasons: HashMap<String, &'static str>,
     watchdog_rotation_pending: bool,
     fair_hold: Option<(RuntimeTime, Vec<(String, RuntimeTime)>)>,
+    fair_rotations: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,9 +54,18 @@ impl WatchRotation {
         streaks: &[StreakCandidate],
         now: RuntimeTime,
     ) -> Vec<String> {
-        self.select_with_progress(eligible, campaigns, streaks, &HashMap::new(), now)
+        self.select_with_progress(
+            eligible,
+            campaigns,
+            streaks,
+            &HashMap::new(),
+            &HashMap::new(),
+            now,
+        )
     }
 
+    /// `scores` break the tie at a fair rotation only: the queue stays FIFO and
+    /// a channel without a score counts as the default one.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn select_with_progress(
         &mut self,
@@ -59,6 +73,7 @@ impl WatchRotation {
         campaign_logins: &[String],
         streak_candidates: &[StreakCandidate],
         credit_times: &HashMap<String, RuntimeTime>,
+        scores: &HashMap<String, ChannelScore>,
         now: RuntimeTime,
     ) -> Vec<String> {
         let previous_spare_slots =
@@ -173,6 +188,7 @@ impl WatchRotation {
             })
         });
         let mut fair_rotated = false;
+        let mut score_jumped = None;
         if let Some(Some((position, candidate))) = promotion {
             if let Some(login) = self.queue.remove(position) {
                 self.queue.push_front(login);
@@ -197,6 +213,7 @@ impl WatchRotation {
                 if let Some(login) = self.queue.pop_front() {
                     self.queue.push_back(login);
                 }
+                score_jumped = self.prefer_higher_score(rotating_slots, scores);
                 self.spare_since = Some(now);
                 self.last_fair_rotation = Some(now);
                 // Give the fair-selected channels their turn before a promotion
@@ -231,6 +248,8 @@ impl WatchRotation {
                 "streak-promotion"
             } else if self.watchdog_rotation_pending {
                 "watchdog-switch"
+            } else if score_jumped.as_ref() == Some(login) {
+                "score-jump"
             } else if fair_rotated {
                 "fair-rotation"
             } else {
@@ -247,6 +266,43 @@ impl WatchRotation {
                 .insert(candidate.login.clone(), candidate.broadcast_id.clone());
         }
         selected
+    }
+
+    /// Called right after a fair rotation moved the outgoing channel to the back.
+    /// The channel FIFO would bring in gives way to the first waiting channel with
+    /// the highest strictly greater score; everyone else keeps their order. The
+    /// outgoing channel just had its turn, so it is not one of the waiting ones.
+    /// Returns the channel that took the place.
+    fn prefer_higher_score(
+        &mut self,
+        rotating_slots: usize,
+        scores: &HashMap<String, ChannelScore>,
+    ) -> Option<String> {
+        self.fair_rotations = (self.fair_rotations + 1) % FIFO_ROTATION_INTERVAL;
+        if self.fair_rotations == 0 {
+            return None;
+        }
+        let score_of = |login: &String| scores.get(login).copied().unwrap_or_default();
+        let entering = rotating_slots - 1;
+        let waiting_end = self.queue.len().saturating_sub(1);
+        let mut best_score = score_of(self.queue.get(entering)?);
+        let mut best = None;
+        for (position, login) in self
+            .queue
+            .iter()
+            .enumerate()
+            .take(waiting_end)
+            .skip(rotating_slots)
+        {
+            let score = score_of(login);
+            if score > best_score {
+                best_score = score;
+                best = Some(position);
+            }
+        }
+        let login = self.queue.remove(best?)?;
+        self.queue.insert(entering, login.clone());
+        Some(login)
     }
 
     fn hold_for_credit(
@@ -334,6 +390,8 @@ pub(crate) fn minute_watcher_resume_gap(
 #[cfg(test)]
 mod tests {
     use super::{StreakCandidate, WatchRotation};
+    use std::collections::HashMap;
+    use tm_domain::ChannelScore;
     use tm_runtime::RuntimeTime;
 
     fn ts(seconds: u64) -> RuntimeTime {
@@ -353,14 +411,20 @@ mod tests {
 
     #[test]
     fn fair_rotation_waits_only_for_nearby_credit_with_a_fixed_deadline() {
-        use std::collections::HashMap;
         let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
         let campaigns = logins(&["alpha"]);
         for (release, credit) in [(960, Some(950)), (1_020, None)] {
             let mut rotation = WatchRotation::default();
             let mut credits = HashMap::from([(String::from("bravo"), ts(660))]);
             let streaks = [streak("bravo", "broadcast-b")];
-            rotation.select_with_progress(&eligible, &campaigns, &streaks, &credits, ts(0));
+            rotation.select_with_progress(
+                &eligible,
+                &campaigns,
+                &streaks,
+                &credits,
+                &HashMap::new(),
+                ts(0),
+            );
             for now in [900, 920] {
                 assert_eq!(
                     rotation.select_with_progress(
@@ -368,6 +432,7 @@ mod tests {
                         &campaigns,
                         &streaks,
                         &credits,
+                        &HashMap::new(),
                         ts(now)
                     ),
                     logins(&["alpha", "bravo"])
@@ -377,7 +442,14 @@ mod tests {
                 credits.insert(String::from("bravo"), ts(credit));
             }
             assert_eq!(
-                rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(release)),
+                rotation.select_with_progress(
+                    &eligible,
+                    &campaigns,
+                    &[],
+                    &credits,
+                    &HashMap::new(),
+                    ts(release)
+                ),
                 logins(&["alpha", "charlie"])
             );
             assert_eq!(rotation.selection_reason("charlie"), "fair-rotation");
@@ -389,9 +461,23 @@ mod tests {
                 .map(|at| (String::from("bravo"), ts(at)))
                 .into_iter()
                 .collect();
-            rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(0));
+            rotation.select_with_progress(
+                &eligible,
+                &campaigns,
+                &[],
+                &credits,
+                &HashMap::new(),
+                ts(0),
+            );
             assert_eq!(
-                rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(900)),
+                rotation.select_with_progress(
+                    &eligible,
+                    &campaigns,
+                    &[],
+                    &credits,
+                    &HashMap::new(),
+                    ts(900)
+                ),
                 logins(&["alpha", "charlie"])
             );
         }
@@ -399,14 +485,27 @@ mod tests {
 
     #[test]
     fn credit_wait_never_delays_forced_changes_or_fairness_ceiling() {
-        use std::collections::HashMap;
         let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
         let campaigns = logins(&["alpha"]);
         for case in 0..6 {
             let mut rotation = WatchRotation::default();
             let mut credits = HashMap::from([(String::from("bravo"), ts(660))]);
-            rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(0));
-            rotation.select_with_progress(&eligible, &campaigns, &[], &credits, ts(900));
+            rotation.select_with_progress(
+                &eligible,
+                &campaigns,
+                &[],
+                &credits,
+                &HashMap::new(),
+                ts(0),
+            );
+            rotation.select_with_progress(
+                &eligible,
+                &campaigns,
+                &[],
+                &credits,
+                &HashMap::new(),
+                ts(900),
+            );
             let mut eligible = eligible.clone();
             let mut campaigns = campaigns.clone();
             let mut streaks = Vec::new();
@@ -421,8 +520,14 @@ mod tests {
                 _ => {}
             }
             let now = if case == 5 { 1_800 } else { 920 };
-            let selected =
-                rotation.select_with_progress(&eligible, &campaigns, &streaks, &credits, ts(now));
+            let selected = rotation.select_with_progress(
+                &eligible,
+                &campaigns,
+                &streaks,
+                &credits,
+                &HashMap::new(),
+                ts(now),
+            );
             assert_ne!(selected, logins(&["alpha", "bravo"]), "case {case}");
             assert!(rotation.fair_hold.is_none(), "case {case}");
         }
@@ -430,26 +535,25 @@ mod tests {
 
     #[test]
     fn fair_rotation_waits_for_the_outgoing_slot_credit() {
-        use std::collections::HashMap;
         let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
         let mut rotation = WatchRotation::default();
         let mut credits = HashMap::from([
             (String::from("alpha"), ts(660)),
             (String::from("bravo"), ts(670)),
         ]);
-        rotation.select_with_progress(&eligible, &[], &[], &credits, ts(0));
+        rotation.select_with_progress(&eligible, &[], &[], &credits, &HashMap::new(), ts(0));
         assert_eq!(
-            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(900)),
+            rotation.select_with_progress(&eligible, &[], &[], &credits, &HashMap::new(), ts(900)),
             logins(&["alpha", "bravo"])
         );
         credits.insert(String::from("alpha"), ts(950));
         assert_eq!(
-            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(960)),
+            rotation.select_with_progress(&eligible, &[], &[], &credits, &HashMap::new(), ts(960)),
             logins(&["bravo", "charlie"])
         );
         credits.insert(String::from("bravo"), ts(970));
         assert_eq!(
-            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(980)),
+            rotation.select_with_progress(&eligible, &[], &[], &credits, &HashMap::new(), ts(980)),
             logins(&["bravo", "charlie"])
         );
     }
@@ -459,14 +563,21 @@ mod tests {
         let eligible = logins(&["alpha", "bravo", "charlie"]);
         let mut rotation = WatchRotation::default();
         let mut credits = std::collections::HashMap::from([(String::from("alpha"), ts(660))]);
-        rotation.select_with_progress(&eligible, &[], &[], &credits, ts(0));
+        rotation.select_with_progress(&eligible, &[], &[], &credits, &HashMap::new(), ts(0));
         assert_eq!(
-            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(900)),
+            rotation.select_with_progress(&eligible, &[], &[], &credits, &HashMap::new(), ts(900)),
             logins(&["alpha", "bravo"])
         );
         credits.insert(String::from("alpha"), ts(950));
         assert_eq!(
-            rotation.select_with_progress(&eligible, &[], &[], &credits, ts(1_020)),
+            rotation.select_with_progress(
+                &eligible,
+                &[],
+                &[],
+                &credits,
+                &HashMap::new(),
+                ts(1_020)
+            ),
             logins(&["bravo", "charlie"])
         );
     }
@@ -965,5 +1076,242 @@ mod tests {
             rotation.select_with_campaigns(&eligible, &[], &candidates, ts(1_800)),
             logins(&["s02", "s00"])
         );
+    }
+
+    fn better() -> ChannelScore {
+        ChannelScore {
+            yield_tier: 1,
+            ..ChannelScore::default()
+        }
+    }
+
+    fn scores(better_logins: &[&str]) -> HashMap<String, ChannelScore> {
+        better_logins
+            .iter()
+            .map(|login| ((*login).to_owned(), better()))
+            .collect()
+    }
+
+    fn select(
+        rotation: &mut WatchRotation,
+        eligible: &[String],
+        scores: &HashMap<String, ChannelScore>,
+        seconds: u64,
+    ) -> Vec<String> {
+        rotation.select_with_progress(eligible, &[], &[], &HashMap::new(), scores, ts(seconds))
+    }
+
+    #[test]
+    fn a_higher_scoring_waiting_channel_enters_at_a_fair_rotation() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta", "echo"]);
+        let scores = scores(&["echo"]);
+        let mut rotation = WatchRotation::default();
+
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 0),
+            logins(&["alpha", "bravo"])
+        );
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 900),
+            logins(&["bravo", "echo"])
+        );
+        assert_eq!(rotation.selection_reason("echo"), "score-jump");
+        assert_eq!(rotation.selection_reason("bravo"), "fair-rotation");
+        // Everyone else kept their order, so charlie is next in line again.
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 1_800),
+            logins(&["echo", "charlie"])
+        );
+        assert_eq!(rotation.selection_reason("charlie"), "fair-rotation");
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 2_700),
+            logins(&["charlie", "delta"])
+        );
+    }
+
+    #[test]
+    fn the_first_of_several_equally_best_waiting_channels_enters() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]);
+        let mut scores = scores(&["delta", "echo"]);
+        let mut rotation = WatchRotation::default();
+        select(&mut rotation, &eligible, &scores, 0);
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 900),
+            logins(&["bravo", "delta"])
+        );
+
+        // A strictly better channel further back wins over the first of the rest.
+        let mut rotation = WatchRotation::default();
+        scores.insert(
+            String::from("foxtrot"),
+            ChannelScore {
+                drops: true,
+                ..ChannelScore::default()
+            },
+        );
+        select(&mut rotation, &eligible, &scores, 0);
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 900),
+            logins(&["bravo", "foxtrot"])
+        );
+    }
+
+    #[test]
+    fn the_channel_that_just_left_does_not_jump_back_in() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let scores = scores(&["alpha"]);
+        let mut rotation = WatchRotation::default();
+        select(&mut rotation, &eligible, &scores, 0);
+
+        assert_eq!(
+            select(&mut rotation, &eligible, &scores, 900),
+            logins(&["bravo", "charlie"])
+        );
+        assert_eq!(rotation.selection_reason("charlie"), "fair-rotation");
+    }
+
+    #[test]
+    fn equal_scores_and_an_empty_map_rotate_exactly_like_fifo() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]);
+        let equal = eligible
+            .iter()
+            .map(|login| (login.clone(), better()))
+            .collect::<HashMap<_, _>>();
+        for campaigns in [Vec::new(), logins(&["delta"])] {
+            let mut plain = WatchRotation::default();
+            let mut empty = WatchRotation::default();
+            let mut tied = WatchRotation::default();
+            for seconds in (0..=14_400).step_by(20) {
+                let expected = plain.select_with_campaigns(&eligible, &campaigns, &[], ts(seconds));
+                for (rotation, scores) in [(&mut empty, HashMap::new()), (&mut tied, equal.clone())]
+                {
+                    let selected = rotation.select_with_progress(
+                        &eligible,
+                        &campaigns,
+                        &[],
+                        &HashMap::new(),
+                        &scores,
+                        ts(seconds),
+                    );
+                    assert_eq!(selected, expected, "{seconds}s");
+                    for login in &selected {
+                        assert_eq!(
+                            rotation.selection_reason(login),
+                            plain.selection_reason(login),
+                            "{seconds}s {login}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_fourth_fair_rotation_is_plain_fifo_so_a_low_scorer_gets_a_turn() {
+        let eligible = logins(&["a", "b", "c", "d", "e", "f", "g"]);
+        // g is the only channel that never scores above the others.
+        let scores = scores(&["c", "d", "e", "f"]);
+        let mut rotation = WatchRotation::default();
+        select(&mut rotation, &eligible, &scores, 0);
+
+        let mut selections = Vec::new();
+        for turn in 1..=8 {
+            selections.push(select(&mut rotation, &eligible, &scores, turn * 900));
+        }
+
+        assert_eq!(
+            selections[..7],
+            [
+                logins(&["b", "c"]),
+                logins(&["c", "d"]),
+                logins(&["d", "e"]),
+                logins(&["e", "f"]),
+                logins(&["f", "c"]),
+                logins(&["c", "d"]),
+                logins(&["d", "e"]),
+            ]
+        );
+        assert_eq!(selections[7], logins(&["e", "g"]));
+        assert_eq!(rotation.selection_reason("g"), "fair-rotation");
+    }
+
+    #[test]
+    fn a_low_scoring_channel_waits_a_bounded_number_of_rotations() {
+        let names = (0..9).map(|index| format!("c{index}")).collect::<Vec<_>>();
+        let scores = scores(&names[1..8].iter().map(String::as_str).collect::<Vec<_>>());
+        let mut rotation = WatchRotation::default();
+        select(&mut rotation, &names, &scores, 0);
+
+        let mut waited = None;
+        for turn in 1..=40 {
+            if select(&mut rotation, &names, &scores, turn * 900).contains(&names[8]) {
+                waited = Some(turn);
+                break;
+            }
+        }
+
+        // At worst one FIFO step in four moves it forward.
+        assert!(waited.is_some_and(|turn| turn <= 36));
+    }
+
+    #[test]
+    fn holding_for_a_credit_wins_over_any_score() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let campaigns = logins(&["alpha"]);
+        let scores = scores(&["delta"]);
+        let mut credits = HashMap::from([(String::from("bravo"), ts(660))]);
+        let mut rotation = WatchRotation::default();
+        let mut select = |credits: &HashMap<String, RuntimeTime>, seconds| {
+            rotation.select_with_progress(&eligible, &campaigns, &[], credits, &scores, ts(seconds))
+        };
+
+        select(&credits, 0);
+        for seconds in [900, 920] {
+            assert_eq!(select(&credits, seconds), logins(&["alpha", "bravo"]));
+        }
+        credits.insert(String::from("bravo"), ts(950));
+        assert_eq!(select(&credits, 960), logins(&["alpha", "delta"]));
+        assert_eq!(rotation.selection_reason("delta"), "score-jump");
+    }
+
+    #[test]
+    fn scores_never_change_the_campaign_pin_or_a_streak_promotion() {
+        let eligible = logins(&["alpha", "bravo", "charlie", "delta"]);
+        let scores = scores(&["bravo", "charlie", "delta"]);
+
+        let mut pinned = WatchRotation::default();
+        let selected = pinned.select_with_progress(
+            &eligible,
+            &logins(&["alpha"]),
+            &[],
+            &HashMap::new(),
+            &scores,
+            ts(0),
+        );
+        assert_eq!(selected, logins(&["alpha", "bravo"]));
+        assert_eq!(pinned.selection_reason("alpha"), "campaign-priority");
+        let selected = pinned.select_with_progress(
+            &eligible,
+            &logins(&["alpha"]),
+            &[],
+            &HashMap::new(),
+            &scores,
+            ts(900),
+        );
+        assert_eq!(selected[0], "alpha");
+        assert_eq!(pinned.selection_reason("alpha"), "campaign-priority");
+
+        let mut promoted = WatchRotation::default();
+        select(&mut promoted, &eligible, &scores, 0);
+        let selected = promoted.select_with_progress(
+            &eligible,
+            &[],
+            &[streak("charlie", "broadcast-c")],
+            &HashMap::new(),
+            &self::scores(&["delta"]),
+            ts(100),
+        );
+        assert_eq!(selected, logins(&["charlie", "alpha"]));
+        assert_eq!(promoted.selection_reason("charlie"), "streak-promotion");
     }
 }

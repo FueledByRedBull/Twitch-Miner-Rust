@@ -881,6 +881,18 @@ impl TwitchClient {
         Ok(game_directory_logins_from_typed(response))
     }
 
+    /// Live channels of a game, most viewed first, whether or not Drops are on.
+    pub async fn fetch_live_channels_typed(
+        &self,
+        game_slug: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, TwitchClientError> {
+        let response: GameDirectoryData = self
+            .post_gql_typed(&operations::live_game_directory(game_slug, limit))
+            .await?;
+        Ok(game_directory_logins_from_typed(response))
+    }
+
     pub async fn fetch_drop_catalog_typed(
         &self,
     ) -> Result<Vec<DropCatalogCampaign>, TwitchClientError> {

@@ -244,6 +244,50 @@ prediction of Twitch's next award. The 30-minute fairness ceiling still limits
 streak deferrals. This bounds voluntary switching; it does not guarantee that
 Twitch will credit every partial watch interval.
 
+**Channel scoring.** `watch_priority` still decides the order in which eligible
+channels enter the rotation queue, and the queue stays first-in, first-out. It
+is deliberately not part of the score below: it gives every channel its own
+position, so no two channels would ever tie and fair rotation would stop. At a
+fair rotation, after the outgoing channel moves to the back, the miner compares
+the channel FIFO would bring in with the channels waiting behind it, leaving out
+the one that just left. A waiting channel with a strictly higher score takes
+that place (the first of several equal best), and everyone else keeps their
+order. Scores compare, in this order: an uncollected watch streak
+(`should_prioritize_streak`), an earnable Drop campaign, the active points
+multiplier that `SUBSCRIBED` ranks by (in thousandths), and a yield tier.
+Equal scores, or no scores at all, rotate exactly as before. Every fourth fair
+rotation ignores the scores, so a low-scoring channel waits a bounded number of
+rotations. A channel that entered this way shows `score-jump` as its selection
+reason in `--status`; `campaign-priority`, `streak-promotion`,
+`watchdog-switch`, and `fair-rotation` keep their meaning. The campaign pin,
+streak promotion, the credit wait, and the 30-minute fairness ceiling are
+unchanged, and a pending credit wait still blocks the switch whatever the scores
+are.
+
+The yield tier comes from the earnings ledger: per channel, the sum of the last
+14 days of every reward other than `WATCH` and `CLAIM`, since those two arrive
+at a fixed rate whichever channels are watched. The top quartile of channels
+with a positive sum (rounded up, ties included) is tier 1; everything else,
+including every channel when there is no ledger, is tier 0. The tiers are read
+on a blocking thread at most once an hour; a failed read keeps the previous
+tiers and logs one warning. Expect a gain of a few percent at most: the
+variation comes from streaks, raids, and multipliers only.
+
+**Points limit.** A channel whose known balance has reached its `points_limit`
+override is handled like a channel with points disabled: `pick_streamers_to_watch`
+leaves it out of every points-based list, so only a verified Drop campaign can
+still give it a slot. An unknown balance never counts as reached.
+
+**Streak discovery.** `streak_discovery_games` lists live channels per game with
+the same `DirectoryPage_Game` persisted operation and hash as Drop discovery,
+sent with an empty `systemFilters` instead of `DROPS_ENABLED`; the response has
+the same shape and the same parser. This request has never been exercised
+against live Twitch. At most five channels per game and 20 in total are tracked,
+refreshed about every six hours by the `config-watch` task. A discovered channel
+is eligible for a watch slot only while `should_prioritize_streak` holds for it,
+and it sorts after every configured channel in the selection order, so it never
+takes a plain rotation turn from one.
+
 ## Offline streak recovery
 
 Offline streak recovery uses the three typed read-only operations above

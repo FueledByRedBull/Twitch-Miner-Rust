@@ -53,8 +53,9 @@ tell whether a reload applied is described in the
 | `farm_drops`, `watch_one_stream_when_drops_active`, `claim_moments` | |
 | `betting(make_predictions)`, `follow_raid`, `community_goals`, `chat_presence` | `make_predictions` applies to predictions created after the reload. |
 | `claim_drops`, `watch_streak_vod_recovery` | Live while they keep the same background tasks running; see below. |
+| `streak_discovery_games` | The next check refreshes streak discovery at once: new games are listed, and channels of games you removed are dropped. Otherwise it refreshes about every six hours. |
 | `bet` (every field) | Used by the next prediction. |
-| `streamer_overrides` | Replaces the per-channel overrides. |
+| `streamer_overrides` | Replaces the per-channel overrides. A new or changed `points_limit` applies to the next watch selection. |
 | `emojis`, `show_claimed_bonus_msg`, `show_game` | |
 | `discord.webhook_api`, `discord.events`, `webhook.url`, `webhook.events` | Notifications use the new target and filter from the reload on. |
 
@@ -80,14 +81,19 @@ while the file is unchanged. Removing a channel stops tracking it. A channel
 with a prediction whose placement is not settled stays tracked, even though it
 is no longer listed, until that prediction resolves, and is then removed.
 Only channels this change drops are removed; channels found by
-`drop_discovery_games` stay until a restart. In follower mode the follower list
+`drop_discovery_games` stay until a restart. Channels found by
+`streak_discovery_games` are never added or removed by a change to `streamers`,
+and a login you add to `streamers` that discovery already tracks becomes a
+normal configured channel. In follower mode the follower list
 is fetched again only when `streamers` or `streamers_exclude` changed, never on
 a timer. A change that would leave no channel is rejected.
 
 **PubSub subscriptions.** `follow_raid`, `betting(make_predictions)`,
 `farm_drops`, `claim_drops`, `claim_moments`, and `community_goals` decide which
 PubSub topics are subscribed. A reload that changes the topics reconnects the
-transports, as a channel change does.
+transports, as a channel change does. Streak-discovered channels add one
+presence topic each, listed last, so they are the first topics dropped when the
+500-topic limit is reached.
 
 **Missing keys.** A file that lacks keys, such as the fields a partial
 `streamer_overrides` entry omits, is read with the same defaults a restart would
@@ -104,6 +110,7 @@ start fills the keys in.
 | `followers_order` | `DESC` | Order of followed channels when `streamers` is empty: `ASC` or `DESC`. |
 | `drop_account_link` | `linked` | Which Drop campaigns to farm by game-account link: `linked` skips campaigns you have not linked, `all` farms everything, `none` skips any campaign that involves a game account. |
 | `drop_discovery_games` | `[]` | Game slugs (the last part of the game's Twitch directory URL, such as `rocket-league`) to find channels for. At each start the miner adds up to five live channels with Drops enabled per game. They use your global settings and `streamers_exclude` still applies, but the list is only refreshed when the miner restarts. |
+| `streak_discovery_games` | `[]` | Opt-in. Game slugs, as for `drop_discovery_games`, to look for channels where a watch streak may be waiting. About every six hours the miner adds up to five live channels per game, at most 20 in all, most viewed first, and drops the ones that went offline or are no longer listed. A discovered channel gets a watch slot only while its streak is not yet collected in the current broadcast, for at most ten minutes of watching per broadcast, never ahead of a configured channel, and runs with predictions, raids, community goals, Drops, moments, streak recovery, and chat off. `streamers_exclude`, `game_exclude`, and your own `streamers` apply: a channel you also list stays a normal configured channel. Discovered channels are never written to the file. A failed lookup changes nothing and logs one warning. Existing files are not rewritten to add the key, so a rollback to an older release can still read them. |
 | `game_priority` | `[]` | Games to prefer, in order. |
 | `game_exclude` | `[]` | Games whose streams are not watched. |
 | `watch_priority` | `["STREAK", "DROPS", "ORDER"]` | How the two watched channels are chosen. Priorities are tried in order; see the next table. |
@@ -216,6 +223,15 @@ only. An override may set `make_predictions`, `follow_raid`, `farm_drops`,
 `chat_presence`, and a partial `bet` object; anything it omits is inherited.
 `watch_streak` exists only here: streak handling is on for every channel unless
 an override turns it off.
+
+`points_limit` also exists only here. It is a positive whole number, and the
+file is rejected with the key's exact path otherwise. Once your known balance on
+that channel reaches it, the channel gets no watch slot for points; it can still
+be watched for a Drop campaign. Claims, presence, and everything else carry on,
+and the channel returns to the rotation when the balance drops below the limit.
+An unknown balance never counts as reached. Like the opt-in top-level keys, it
+is never filled into an existing override, so older releases can still read the
+file.
 
 ```json
 "streamer_overrides": {

@@ -97,12 +97,20 @@ impl RuntimeState {
 
         let mut outcome = ConfigReloadOutcome::default();
         for streamer in reload.add {
-            if streamer.channel_id.is_empty()
-                || self
-                    .streamers
-                    .iter()
-                    .any(|tracked| tracked.channel_id == streamer.channel_id)
+            if streamer.channel_id.is_empty() {
+                continue;
+            }
+            if let Some(tracked) = self
+                .streamers
+                .iter_mut()
+                .find(|tracked| tracked.channel_id == streamer.channel_id)
             {
+                // A channel the config now names takes over a discovered one in
+                // place, keeping its watch progress; discovery never does the reverse.
+                if tracked.discovered && !streamer.discovered {
+                    tracked.discovered = false;
+                    tracked.settings = streamer.settings;
+                }
                 continue;
             }
             self.retired_streamers

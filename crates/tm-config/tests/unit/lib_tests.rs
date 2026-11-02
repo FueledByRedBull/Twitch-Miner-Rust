@@ -477,6 +477,135 @@ fn existing_config_stays_readable_by_a_rollback_release() {
 }
 
 #[test]
+fn the_ranking_settings_are_never_written_into_an_existing_file() {
+    let dir = unique_temp_dir("ranking-opt-in");
+    fs::create_dir_all(&dir).unwrap();
+
+    // A file that needs a migration is rewritten; the rewrite must not add
+    // either key, so a rollback release still accepts it.
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    let config = load_or_create_config(&path).unwrap();
+    assert!(config.streak_discovery_games.is_empty());
+    assert_eq!(config.streamer_overrides["bob"].points_limit, None);
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(rewritten.get("streak_discovery_games").is_none());
+    let bob = &rewritten["streamer_overrides"]["bob"];
+    assert!(bob.get("points_limit").is_none(), "{bob}");
+    assert!(
+        bob.get("make_predictions").is_some(),
+        "other keys are filled"
+    );
+
+    // A file that sets them keeps them.
+    let chosen = dir.join("chosen.json");
+    fs::write(
+        &chosen,
+        br#"{"username":"Alice","streak_discovery_games":["chess"],"streamer_overrides":{"bob":{"points_limit":5000}}}"#,
+    )
+    .unwrap();
+    let config = load_or_create_config(&chosen).unwrap();
+    assert_eq!(config.streak_discovery_games, ["chess"]);
+    assert_eq!(config.streamer_overrides["bob"].points_limit, Some(5_000));
+    let rewritten: Value = serde_json::from_slice(&fs::read(&chosen).unwrap()).unwrap();
+    assert_eq!(
+        rewritten["streamer_overrides"]["bob"]["points_limit"],
+        5_000
+    );
+
+    // A new file lists the discovery key like the other opt-in keys, and no
+    // override carries a limit.
+    let fresh = dir.join("fresh.json");
+    load_or_create_config(&fresh).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh).unwrap()).unwrap();
+    assert_eq!(fresh["streak_discovery_games"], json!([]));
+}
+
+#[test]
+fn points_limit_must_be_a_positive_whole_number() {
+    let dir = unique_temp_dir("points-limit-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    for (name, raw) in [
+        ("zero", "0"),
+        ("negative", "-5"),
+        ("fraction", "1.5"),
+        ("text", r#""10""#),
+        ("flag", "true"),
+    ] {
+        let path = dir.join(format!("{name}.json"));
+        let original = format!(
+            r#"{{"username":"Alice","streamer_overrides":{{"bob":{{"points_limit":{raw}}}}}}}"#
+        );
+        fs::write(&path, &original).unwrap();
+        let error = load_or_create_config(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("config.streamer_overrides.bob.points_limit"),
+            "{error}"
+        );
+        assert!(error.contains("positive whole number"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert!(preview_config(&path).is_err());
+    }
+
+    let null = dir.join("null.json");
+    fs::write(
+        &null,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"points_limit":null}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_or_create_config(&null).unwrap().streamer_overrides["bob"].points_limit,
+        None
+    );
+
+    let mut config = ConfigFile {
+        username: String::from("alice"),
+        ..ConfigFile::default()
+    };
+    config.streamer_overrides.insert(
+        String::from("bob"),
+        StreamerSettingsOverride {
+            points_limit: Some(0),
+            ..StreamerSettingsOverride::default()
+        },
+    );
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("points_limit"), "{error}");
+    config
+        .streamer_overrides
+        .get_mut("bob")
+        .unwrap()
+        .points_limit = Some(1);
+    validate_config(&config).unwrap();
+}
+
+#[test]
+fn points_limit_is_an_override_only_setting() {
+    let mut config = ConfigFile::default();
+    config.streamer_overrides.insert(
+        String::from("Bob"),
+        StreamerSettingsOverride {
+            points_limit: Some(2_500),
+            ..StreamerSettingsOverride::default()
+        },
+    );
+    config
+        .streamer_overrides
+        .insert(String::from("carol"), StreamerSettingsOverride::default());
+
+    let base = build_base_streamer_settings(&config);
+    let merged = build_override_settings(&base, &config.streamer_overrides);
+
+    assert_eq!(base.points_limit, None);
+    assert_eq!(merged["bob"].points_limit, Some(2_500));
+    assert_eq!(merged["carol"].points_limit, None);
+}
+
+#[test]
 fn log_format_defaults_to_text_and_accepts_json() {
     let dir = unique_temp_dir("log-format");
     fs::create_dir_all(&dir).unwrap();
@@ -1053,6 +1182,37 @@ fn reload_diff_labels_live_and_restart_settings() {
         assert_eq!(class_of(restart), ReloadClass::NeedsRestart, "{restart}");
     }
     assert_eq!(changes.len(), 11 + 8);
+}
+
+#[test]
+fn streak_discovery_games_are_live_and_points_limits_follow_the_overrides() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.streak_discovery_games = vec![String::from("chess")];
+    new.streamer_overrides.insert(
+        String::from("alice"),
+        StreamerSettingsOverride {
+            points_limit: Some(10),
+            ..StreamerSettingsOverride::default()
+        },
+    );
+
+    let changes = diff_configs(&old, &new).unwrap();
+
+    assert_eq!(
+        changed_names(&old, &new),
+        [
+            (String::from("streak_discovery_games"), ReloadClass::Live),
+            (String::from("streamer_overrides"), ReloadClass::Live),
+        ]
+    );
+    assert_eq!(
+        changes[0].values,
+        Some((String::from("[]"), String::from(r#"["chess"]"#)))
+    );
+    assert_eq!(changes[1].values, None, "channel names are never shown");
+    let merged = merge_live_settings(&old, &new).unwrap();
+    assert_eq!(merged.streak_discovery_games, new.streak_discovery_games);
 }
 
 #[test]

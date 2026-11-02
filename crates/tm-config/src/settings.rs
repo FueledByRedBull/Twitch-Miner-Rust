@@ -35,6 +35,7 @@ pub fn build_base_streamer_settings(config: &ConfigFile) -> StreamerSettings {
         watch_streak: true,
         watch_streak_vod_recovery: config.watch_streak_vod_recovery,
         community_goals: config.community_goals,
+        points_limit: None,
         bet: merge_bet_settings(&BetSettings::default(), &config.bet),
         irc_mode: parse_chat_presence(&config.chat_presence, IrcMode::Online),
     }
@@ -88,6 +89,9 @@ fn merge_streamer_settings(
     }
     if let Some(value) = override_settings.community_goals {
         settings.community_goals = value;
+    }
+    if override_settings.points_limit.is_some() {
+        settings.points_limit = override_settings.points_limit;
     }
     settings.bet = merge_bet_settings(&settings.bet, &override_settings.bet);
     if let Some(chat_presence) = override_settings.chat_presence.as_deref() {

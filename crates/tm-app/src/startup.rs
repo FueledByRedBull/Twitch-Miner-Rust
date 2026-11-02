@@ -160,8 +160,9 @@ pub(crate) async fn load_targets(
     };
     // Drop discovery runs only here, once per start, and a long run keeps what it
     // found even after those channels go offline. A config reload calls this
-    // without discovery to refresh the configured list; discovered channels stay
-    // tracked until the next restart.
+    // without discovery to refresh the configured list; Drop-discovered channels
+    // stay tracked until the next restart. Streak discovery is separate: it runs
+    // from the config-watch task, never here.
     for game in &config.drop_discovery_games {
         match twitch
             .fetch_drops_enabled_channels_typed(game, DROP_DISCOVERY_CHANNELS_PER_GAME)

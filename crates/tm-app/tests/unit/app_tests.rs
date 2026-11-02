@@ -31,7 +31,7 @@ mod tests {
         available_watch_logins, build_minute_watched_event, handle_minute_watched_info_error,
         record_watch_attempt, refresh_watch_selection_metadata, released_watch_channel_ids,
         resolve_spade_url, send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
-        watch_metadata_defect, WatchAttemptOutcome, WatchFailureState,
+        watch_metadata_defect, watch_progress_resets, WatchAttemptOutcome, WatchFailureState,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -3498,6 +3498,28 @@ mod tests {
         assert_eq!(
             released_watch_channel_ids(&previous, &selected),
             vec![String::from("channel-a")]
+        );
+    }
+
+    #[test]
+    fn a_discovered_channel_keeps_its_streak_budget_spent_when_released() {
+        let streamer = |channel_id: &str, discovered| Streamer {
+            channel_id: channel_id.to_string(),
+            discovered,
+            ..Streamer::default()
+        };
+        let streamers = [streamer("found", true), streamer("configured", false)];
+
+        assert_eq!(
+            watch_progress_resets(
+                vec![
+                    String::from("found"),
+                    String::from("configured"),
+                    String::from("removed"),
+                ],
+                &streamers,
+            ),
+            vec![String::from("configured"), String::from("removed")]
         );
     }
 
