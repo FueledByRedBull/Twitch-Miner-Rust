@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tm_domain::{MinerEvent, Streamer};
+use tm_net::NetworkPolicy;
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
-use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -22,6 +22,7 @@ pub struct PubSubClientSettings {
     pub ping_interval: Duration,
     pub pong_timeout: Duration,
     pub websocket_url: String,
+    pub network: NetworkPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +49,7 @@ impl Default for PubSubClientSettings {
             ping_interval: Duration::from_secs(25),
             pong_timeout: Duration::from_secs(60),
             websocket_url: WEBSOCKET_URL.to_string(),
+            network: NetworkPolicy::direct(),
         }
     }
 }
@@ -62,6 +64,15 @@ impl PubSubClient {
     #[must_use]
     pub fn new(settings: PubSubClientSettings) -> Self {
         Self { settings }
+    }
+
+    /// The production endpoint, reached the way `network` says.
+    #[must_use]
+    pub fn with_network(network: NetworkPolicy) -> Self {
+        Self::new(PubSubClientSettings {
+            network,
+            ..PubSubClientSettings::default()
+        })
     }
 
     pub async fn connect_and_listen(
@@ -85,9 +96,11 @@ impl PubSubClient {
         tracked_streamers: &[Streamer],
         sender: mpsc::Sender<PubSubConnectionEvent>,
     ) -> Result<(), PubSubError> {
-        let (mut socket, _) =
-            connect_async_with_config(&self.settings.websocket_url, Some(bounded_frames()), false)
-                .await?;
+        let (mut socket, _) = self
+            .settings
+            .network
+            .connect_websocket(&self.settings.websocket_url, bounded_frames())
+            .await?;
         let mut pending_listens = HashMap::new();
         for (topic, payload) in topics.iter().zip(listen_payloads(topics, auth_token)) {
             if let Some(nonce) = payload.get("nonce").and_then(serde_json::Value::as_str) {

@@ -12,6 +12,7 @@ use tm_config::{
     default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
     ConfigError, ConfigFile,
 };
+use tm_net::NetworkPolicy;
 use tm_observability::Event as DiscordEvent;
 use tm_twitch::generate_device_id;
 
@@ -126,8 +127,9 @@ pub(crate) fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+pub(crate) fn build_http_client(network: &NetworkPolicy) -> Result<reqwest::Client> {
+    network
+        .http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -575,10 +577,11 @@ mod tests {
         saved_session_retry_delay,
     };
     use tm_auth::AuthClientError;
+    use tm_net::NetworkPolicy;
 
     #[test]
     fn build_http_client_accepts_secure_default() {
-        assert!(build_http_client().is_ok());
+        assert!(build_http_client(&NetworkPolicy::direct()).is_ok());
     }
 
     #[tokio::test]
@@ -599,7 +602,7 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        let response = build_http_client()
+        let response = build_http_client(&NetworkPolicy::direct())
             .unwrap()
             .get(format!("http://{address}/start"))
             .send()
@@ -607,6 +610,36 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "isolated loopback fixture must fail the test on setup or I/O failure"
+    )]
+    async fn build_http_client_fails_instead_of_connecting_directly_when_the_proxy_is_down() {
+        let destination = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let dead_proxy = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        for scheme in ["socks5h", "http"] {
+            let network = NetworkPolicy::from_setting(&format!("{scheme}://{dead_proxy}")).unwrap();
+            let result = build_http_client(&network)
+                .unwrap()
+                .get(format!("http://{}/", destination.local_addr().unwrap()))
+                .send()
+                .await;
+            assert!(result.is_err(), "{scheme}");
+        }
+
+        let direct_connection = destination.accept();
+        assert!(
+            matches!(&direct_connection, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "the destination was reached directly"
+        );
     }
 
     #[test]

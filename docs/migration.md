@@ -25,6 +25,18 @@ working Rust implementation:
 | Prediction and per-streamer override settings | Preserved. |
 | `password`, `disable_ssl_cert_verification`, `watch_queue_logging`, `auto_update`, `watch_streak_warm_start_cache`, `smart_logging`, `betting.make_predictions`, `watch_streams` | Migrated or rejected as listed below. |
 
+## Proxies and environment variables
+
+Before 0.3.8, some connections followed `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY` because the HTTP library reads them by default, while the
+WebSockets and chat ignored them. Now no connection reads them: only the
+`proxy` setting counts, and it carries every connection with no direct
+fallback. If you routed the miner through a proxy with those variables (in a
+Compose file or the container environment, for example), move the address into
+`proxy` before upgrading, as `socks5h://host:port` or `http://host:port`.
+Otherwise the miner connects directly. The details are in the
+[configuration reference](configuration.md#network-and-proxy).
+
 ## Moving a data directory
 
 The Rust miner can reuse the Go layout when its data directory is mounted at

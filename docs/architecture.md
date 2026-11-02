@@ -21,6 +21,11 @@ responsibility:
   EventSub connection lifecycle, capacity planning, and protocol normalization
   are separate modules behind one facade.
 - `tm-irc` owns IRC protocol handling.
+- `tm-net` owns how the miner reaches the network: the optional proxy setting's
+  parsing, the `NetworkPolicy` built from it at startup, and every HTTP client,
+  TCP stream, and WebSocket connection. It depends on no other workspace crate.
+  `tm-config` uses it only to validate the setting; `tm-app` builds the policy
+  once and hands it to the clients.
 - `tm-runtime` owns the single-writer runtime state model.
 - `tm-observability` owns logging, privacy helpers, and notification payloads.
 
@@ -163,6 +168,7 @@ flag, run with forced-safe settings, and are never touched by a change to
 | Transports | EventSub, PubSub, IRC, and polling are independently supervised and cannot directly own runtime state. |
 | Watching | At most two Twitch-creditable slots run; an eligible campaign can pin one while the remaining slot fair-rotates. |
 | Privacy | Credentials, identifiers, balances, and raw responses do not cross privacy-safe diagnostic interfaces. |
+| Network | A configured proxy carries every connection and there is no direct fallback; environment proxy variables are never read. Only `tm-net` opens sockets, builds HTTP clients, or resolves names, and a source scan in its tests fails when another crate does. |
 | Lifecycle | Health belongs to the current process session, and shutdown uses normal signal-driven task termination. |
 | Reload | A config reload never writes the file, applies as one runtime command after every fallible step, and never removes a channel whose prediction placement is unsettled. |
 

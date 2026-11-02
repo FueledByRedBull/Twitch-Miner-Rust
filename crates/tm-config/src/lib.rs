@@ -19,6 +19,7 @@ use thiserror::Error;
 #[cfg(test)]
 use tm_domain::IrcMode;
 use tm_domain::{parse_watch_priority, FollowersOrder, MAX_PREDICTION_POINTS};
+use tm_net::NetworkPolicy;
 
 mod reload;
 mod settings;
@@ -157,6 +158,31 @@ impl fmt::Debug for WebhookConfig {
     }
 }
 
+/// The `proxy` setting as written. It can carry credentials, so `Debug` never
+/// shows it; an empty value means no proxy.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProxySetting(String);
+
+impl ProxySetting {
+    /// The network policy this setting selects.
+    pub fn network_policy(&self) -> Result<NetworkPolicy, ConfigError> {
+        NetworkPolicy::from_setting(&self.0).map_err(|error| {
+            ConfigError::Validation(format!("config.proxy is not usable: {error}"))
+        })
+    }
+}
+
+impl fmt::Debug for ProxySetting {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(if self.0.trim().is_empty() {
+            "ProxySetting(unset)"
+        } else {
+            "ProxySetting(<redacted>)"
+        })
+    }
+}
+
 impl fmt::Debug for DiscordConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -223,6 +249,11 @@ pub struct ConfigFile {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub webhook: WebhookConfig,
+    /// Proxy that carries every connection, as `socks5h://` or `http://` with an
+    /// optional `user:password@` and a port. Empty means no proxy. Left out of
+    /// existing files, like every opt-in key.
+    #[serde(default)]
+    pub proxy: ProxySetting,
     pub streamer_overrides: HashMap<String, StreamerSettingsOverride>,
 }
 
@@ -274,6 +305,7 @@ pub fn default_config_value() -> Value {
         "streak_discovery_games": [],
         "log_format": "text",
         "notify_device_login": false,
+        "proxy": "",
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
@@ -435,6 +467,7 @@ fn validate_notification_urls(config: &ConfigFile) -> Result<(), ConfigError> {
 
 pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
     validate_notification_urls(config)?;
+    config.proxy.network_policy()?;
     let username = config.username.trim().to_lowercase();
     if username.is_empty() || username == "your-twitch-username" {
         return Err(ConfigError::Validation(String::from(
@@ -957,6 +990,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "streak_discovery_games",
     "log_format",
     "notify_device_login",
+    "proxy",
     "bet",
     "timezone",
     "privacy",
@@ -989,6 +1023,7 @@ const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &[
     "streak_discovery_games",
     "log_format",
     "notify_device_login",
+    "proxy",
     "webhook",
 ];
 const WEBHOOK_CONFIG_KEYS: &[&str] = &["url", "events"];

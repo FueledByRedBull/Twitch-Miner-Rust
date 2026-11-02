@@ -4,6 +4,7 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use thiserror::Error;
+use tm_net::NetworkPolicy;
 
 use crate::device_flow::{
     build_device_code_request_with_scope, build_token_poll_request, build_token_refresh_request,
@@ -149,9 +150,14 @@ impl fmt::Debug for TokenPollResponse {
 }
 
 impl TwitchAuthClient {
+    /// Connects directly. To follow the configured proxy, pass a client built from
+    /// the network policy to [`Self::with_client`].
     pub fn new(timeout: Duration) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: NetworkPolicy::direct()
+                .http_client_builder()
+                .timeout(timeout)
+                .build()?,
             endpoints: AuthEndpoints::default(),
         })
     }

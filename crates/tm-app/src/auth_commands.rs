@@ -13,6 +13,7 @@ use tm_auth::{
     TwitchAuthClient, KEY_FILE_ENV,
 };
 use tm_config::AppPaths;
+use tm_net::NetworkPolicy;
 use tm_twitch::generate_device_id;
 
 use crate::bootstrap::{
@@ -120,17 +121,24 @@ fn duration_text(seconds: u64) -> String {
     format_resume_gap(Duration::from_secs(seconds))
 }
 
-/// The configured login, read without writing the configuration.
-fn configured_username(paths: &AppPaths) -> Result<String> {
+/// The configured login and network policy, read without writing the configuration.
+fn configured_login(paths: &AppPaths) -> Result<(String, NetworkPolicy)> {
     let preview = tm_config::preview_config(&paths.config_path)?;
     validate_app_config(&preview.config)?;
-    normalized_username(&preview.config.username)
+    Ok((
+        normalized_username(&preview.config.username)?,
+        preview.config.proxy.network_policy()?,
+    ))
+}
+
+fn configured_username(paths: &AppPaths) -> Result<String> {
+    configured_login(paths).map(|(username, _)| username)
 }
 
 pub(crate) async fn print_auth_status(paths: &AppPaths, json: bool) -> Result<()> {
-    let username = configured_username(paths)?;
+    let (username, network) = configured_login(paths)?;
     let key = load_session_key(|message| eprintln!("warning: {message}"))?;
-    let auth_client = TwitchAuthClient::with_client(build_http_client()?);
+    let auth_client = TwitchAuthClient::with_client(build_http_client(&network)?);
     let report =
         collect_auth_status(&paths.work_dir, &username, key.as_ref(), &auth_client).await?;
     if json {

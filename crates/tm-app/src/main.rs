@@ -42,8 +42,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use tm_auth::SessionKey;
 use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
+use tm_net::NetworkPolicy;
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
-use tm_twitch::TwitchClient;
+use tm_twitch::{TwitchClient, TwitchEndpoints};
 
 mod alarms;
 mod auth_commands;
@@ -175,13 +176,15 @@ async fn run_cli(cli: Cli) -> Result<()> {
         return result;
     }
     let loaded_config = load_active_config(&cli, &requested_paths, has_override)?;
+    let network = loaded_config.config.proxy.network_policy()?;
     let session_key = load_session_key(|message| tracing::warn!(operation = "auth", "{message}"))?;
     if cli.canary {
-        let http_client = build_http_client()?;
+        let http_client = build_http_client(&network)?;
         return canary::run_read_only_canary(
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
             http_client,
+            &network,
             session_key.as_ref(),
         )
         .await;
@@ -194,14 +197,14 @@ async fn run_cli(cli: Cli) -> Result<()> {
         return import_session_token(
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
-            &tm_auth::TwitchAuthClient::with_client(build_http_client()?),
+            &tm_auth::TwitchAuthClient::with_client(build_http_client(&network)?),
             &token,
             session_key.as_ref(),
         )
         .await;
     }
     run_prepared_miner(
-        prepare_miner(loaded_config, session_key.as_ref()).await?,
+        prepare_miner(loaded_config, session_key.as_ref(), &network).await?,
         requested_paths,
     )
     .await
@@ -327,14 +330,24 @@ struct PreparedMiner {
 async fn prepare_miner(
     loaded_config: LoadedConfig,
     session_key: Option<&SessionKey>,
+    network: &NetworkPolicy,
 ) -> Result<PreparedMiner> {
     let LoadedConfig {
         config,
         active_paths,
     } = loaded_config;
-    let observability = build_observability(&config)?;
+    let observability = build_observability(&config, network)?;
     if let Some(warning) = device_login_delivery_warning(&config, &observability) {
         tracing::warn!(operation = "auth", "{warning}");
+    }
+    let ignored = network
+        .ignored_env_proxies(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    if !ignored.is_empty() {
+        tracing::warn!(
+            operation = "run",
+            "{} ignored: connecting directly because the proxy setting is empty; set it to use a proxy",
+            ignored.join(", ")
+        );
     }
     tracing::info!(
         operation = "run",
@@ -351,7 +364,7 @@ async fn prepare_miner(
         observability.start_session_message(&session_id)
     );
     let started_at = time_now();
-    let http_client = build_http_client()?;
+    let http_client = build_http_client(network)?;
     let session = load_or_login_session(
         &config,
         &active_paths.work_dir,
@@ -368,11 +381,13 @@ async fn prepare_miner(
     let prediction_eventsub_authorized =
         session.has_any_scope(&["channel:read:predictions", "channel:manage:predictions"]);
     let twitch_cookie_header = session.cookie_header_for_host("twitch.tv");
-    let twitch = Arc::new(TwitchClient::with_client_and_cookie_header(
+    let twitch = Arc::new(TwitchClient::with_network(
         http_client,
         &auth_token,
         DEFAULT_USER_AGENT,
         twitch_cookie_header,
+        TwitchEndpoints::default(),
+        network,
     ));
     let mut streak_cache = if let Ok(cache) = StreakCache::load(&active_paths.work_dir, started_at)
     {
@@ -462,6 +477,7 @@ async fn run_prepared_miner(prepared: PreparedMiner, requested_paths: AppPaths) 
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let health = status::HealthTracker::default();
+    health.set_network(twitch.network());
     let (ledger, ledger_task) = ledger::LedgerHandle::start(
         &active_paths.work_dir,
         utilities::configured_timezone(&config),

@@ -1093,7 +1093,9 @@ mod tests {
             },
             ..ConfigFile::default()
         };
-        let visible = crate::observability::build_observability(&config).unwrap();
+        let visible =
+            crate::observability::build_observability(&config, &tm_net::NetworkPolicy::direct())
+                .unwrap();
         let private = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),

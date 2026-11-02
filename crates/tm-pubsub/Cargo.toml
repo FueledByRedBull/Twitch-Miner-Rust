@@ -18,6 +18,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 tm-domain = { path = "../tm-domain", version = "0.3.7" }
+tm-net = { path = "../tm-net", version = "0.3.7" }
 
 [lints]
 workspace = true

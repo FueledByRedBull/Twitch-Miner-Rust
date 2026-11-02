@@ -17,6 +17,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tm_domain::Streamer;
+use tm_net::NetworkPolicy;
 use tracing::field::{Field, Visit};
 use tracing::{Event as TraceEvent, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
@@ -372,9 +373,14 @@ struct WebhookPayload<'a> {
 }
 
 impl DiscordClient {
+    /// Connects directly. To follow the configured proxy, pass a client built from
+    /// the network policy to [`Self::with_client`].
     pub fn new(timeout: std::time::Duration) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: NetworkPolicy::direct()
+                .http_client_builder()
+                .timeout(timeout)
+                .build()?,
         })
     }
 

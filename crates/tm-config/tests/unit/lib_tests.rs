@@ -1352,3 +1352,152 @@ fn merging_live_settings_keeps_restart_settings_at_their_running_value() {
         ]
     );
 }
+
+const PROXY_SECRET: &str = "socks5h://proxy-user:proxy-secret@proxy-host.invalid:1080";
+
+fn config_with_proxy(proxy: &str) -> ConfigFile {
+    ConfigFile {
+        username: String::from("alice"),
+        proxy: serde_json::from_value(json!(proxy)).unwrap(),
+        ..ConfigFile::default()
+    }
+}
+
+#[test]
+fn proxy_is_off_by_default_and_never_written_into_an_existing_file() {
+    let dir = unique_temp_dir("proxy-opt-in");
+    fs::create_dir_all(&dir).unwrap();
+
+    // A file that needs a migration is rewritten; the rewrite must not add the
+    // key, so a rollback release still accepts it.
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    let config = load_or_create_config(&path).unwrap();
+    assert_eq!(
+        config.proxy.network_policy().unwrap(),
+        NetworkPolicy::direct()
+    );
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(rewritten.get("proxy").is_none());
+    assert!(rewritten["streamer_overrides"]["bob"]
+        .get("make_predictions")
+        .is_some());
+
+    // A file that sets it keeps it, exactly as written, through a rewrite.
+    let chosen = dir.join("chosen.json");
+    fs::write(
+        &chosen,
+        format!(
+            r#"{{"username":"Alice","proxy":"{PROXY_SECRET}","streamer_overrides":{{"bob":{{"farm_drops":true}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let config = load_or_create_config(&chosen).unwrap();
+    assert!(config
+        .proxy
+        .network_policy()
+        .unwrap()
+        .proxy_scheme()
+        .is_some());
+    let rewritten: Value = serde_json::from_slice(&fs::read(&chosen).unwrap()).unwrap();
+    assert_eq!(rewritten["proxy"], PROXY_SECRET);
+
+    // A new file lists it, empty.
+    let fresh = dir.join("fresh.json");
+    load_or_create_config(&fresh).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh).unwrap()).unwrap();
+    assert_eq!(fresh["proxy"], "");
+    assert!(OPT_IN_TOP_LEVEL_KEYS.contains(&"proxy"));
+    assert_eq!(default_config_value()["proxy"], "");
+}
+
+#[test]
+fn proxy_must_be_a_usable_proxy_url_and_errors_never_echo_it() {
+    let secret = "proxy-secret";
+    let accepted = [
+        "",
+        "   ",
+        "socks5h://127.0.0.1:1080",
+        "http://user:pw@proxy.example:3128",
+    ];
+    for proxy in accepted {
+        assert!(
+            validate_config(&config_with_proxy(proxy)).is_ok(),
+            "{proxy:?}"
+        );
+    }
+
+    let rejected = [
+        format!("socks5://proxy-user:{secret}@proxy-host.invalid:1080"),
+        format!("https://proxy-user:{secret}@proxy-host.invalid:443"),
+        format!("socks5h://proxy-user:{secret}@proxy-host.invalid"),
+        format!("ftp://proxy-user:{secret}@proxy-host.invalid:21"),
+        format!("proxy-user:{secret}@proxy-host.invalid:1080"),
+    ];
+    for proxy in rejected {
+        let error = validate_config(&config_with_proxy(&proxy)).unwrap_err();
+        assert!(matches!(error, ConfigError::Validation(_)));
+        for output in [error.to_string(), format!("{error:?}")] {
+            assert!(output.contains("config.proxy"), "{output}");
+            for leaked in [secret, "proxy-user", "proxy-host"] {
+                assert!(!output.contains(leaked), "{output}");
+            }
+        }
+    }
+
+    let local_dns = config_with_proxy("socks5://proxy.example:1080");
+    let message = local_dns.proxy.network_policy().unwrap_err().to_string();
+    assert!(message.contains("socks5h://"), "{message}");
+
+    let dir = unique_temp_dir("proxy-type");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    fs::write(&path, r#"{"username":"Alice","proxy":["socks5h://a:1"]}"#).unwrap();
+    assert!(load_or_create_config(&path).is_err());
+}
+
+#[test]
+fn proxy_is_read_once_at_startup_and_never_shown_in_a_diff() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.proxy = serde_json::from_value(json!(PROXY_SECRET)).unwrap();
+
+    let changes = diff_configs(&old, &new).unwrap();
+
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.name.as_str(), change.class))
+            .collect::<Vec<_>>(),
+        [("proxy", ReloadClass::NeedsRestart)]
+    );
+    assert_eq!(changes[0].values, None);
+    let rendered = format!("{changes:?}");
+    for leaked in ["proxy-secret", "proxy-user", "proxy-host"] {
+        assert!(!rendered.contains(leaked), "{rendered}");
+    }
+    let merged = merge_live_settings(&old, &new).unwrap();
+    assert_eq!(merged.proxy, old.proxy);
+}
+
+#[test]
+fn debug_output_redacts_the_proxy() {
+    let config = config_with_proxy(PROXY_SECRET);
+
+    for output in [format!("{config:?}"), format!("{config:#?}")] {
+        for leaked in ["proxy-secret", "proxy-user", "proxy-host", "1080"] {
+            assert!(!output.contains(leaked), "{leaked} leaked");
+        }
+        assert!(output.contains("ProxySetting(<redacted>)"));
+    }
+    assert!(format!("{:?}", ConfigFile::default()).contains("ProxySetting(unset)"));
+    // It still serializes as the plain string the file holds.
+    assert_eq!(
+        serde_json::to_value(&config.proxy).unwrap(),
+        json!(PROXY_SECRET)
+    );
+}

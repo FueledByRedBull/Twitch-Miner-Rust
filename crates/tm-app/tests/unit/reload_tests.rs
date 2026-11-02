@@ -787,7 +787,9 @@ async fn harness(edit: impl FnOnce(&mut Value)) -> Harness {
     }
     let gates = StartupGates::from_streamers(&state.streamers);
     let runtime = tm_runtime::spawn_runtime_state(state);
-    let observability = crate::observability::build_observability(&running).unwrap();
+    let observability =
+        crate::observability::build_observability(&running, &tm_net::NetworkPolicy::direct())
+            .unwrap();
     let twitch = spawn_fake_twitch();
     let client = Arc::new(TwitchClient::with_client_and_endpoints(
         reqwest::Client::builder()

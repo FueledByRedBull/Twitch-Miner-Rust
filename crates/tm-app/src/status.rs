@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use tm_net::NetworkPolicy;
 use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use tm_twitch::{InventoryDrop, InventorySnapshot};
 
@@ -52,6 +53,27 @@ struct RuntimeStatus {
     /// Absent from files written by earlier releases, like `earnings`.
     #[serde(default)]
     config_reload: crate::reload::ConfigReloadStatus,
+    /// Absent from files written by earlier releases, like `earnings`.
+    #[serde(default)]
+    network: NetworkStatus,
+}
+
+/// Whether a proxy carries the connections, and its protocol. The address and
+/// credentials are never reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+struct NetworkStatus {
+    proxy_in_use: bool,
+    proxy_scheme: Option<String>,
+}
+
+impl From<&NetworkPolicy> for NetworkStatus {
+    fn from(policy: &NetworkPolicy) -> Self {
+        let scheme = policy.proxy_scheme();
+        Self {
+            proxy_in_use: scheme.is_some(),
+            proxy_scheme: scheme.map(|scheme| scheme.to_string()),
+        }
+    }
 }
 
 impl RuntimeStatus {
@@ -136,9 +158,17 @@ pub(crate) struct HealthTracker {
     prediction_journal: Arc<Mutex<Option<crate::prediction_journal::PredictionPlacementJournal>>>,
     earnings: crate::earnings::EarningsTracker,
     reload: crate::reload::ReloadStatusTracker,
+    network: Arc<Mutex<NetworkStatus>>,
 }
 
 impl HealthTracker {
+    pub(crate) fn set_network(&self, policy: &NetworkPolicy) {
+        *self
+            .network
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = NetworkStatus::from(policy);
+    }
+
     pub(crate) fn set_journal(
         &self,
         journal: crate::prediction_journal::PredictionPlacementJournal,
@@ -686,6 +716,12 @@ impl StatusReporter {
                 .transpose()?,
             earnings: self.health.earnings.status(now),
             config_reload: self.health.reload.status(),
+            network: self
+                .health
+                .network
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         };
         atomic_json_write(&self.path, &status)?;
         Ok((status, now))
@@ -955,8 +991,9 @@ pub(crate) fn unix_now_infallible() -> u64 {
 mod tests {
     use super::{
         atomic_json_write, check_health, validate_status, validate_status_for_supervision,
-        write_support_bundle, HealthTracker, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus,
-        StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
+        write_support_bundle, HealthTracker, NetworkStatus, RuntimeMetrics, RuntimeMetricsSnapshot,
+        RuntimeStatus, StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME,
+        STATUS_SCHEMA_VERSION,
     };
     use tm_observability::{init_tracing, LoggerSettings, TracingInitOptions};
     use tm_twitch::{ClaimedDropReward, InventoryDrop, InventorySnapshot};
@@ -1069,6 +1106,7 @@ mod tests {
             prediction_journal: None,
             earnings: crate::earnings::EarningsStatus::default(),
             config_reload: crate::reload::ConfigReloadStatus::default(),
+            network: NetworkStatus::default(),
         };
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());
@@ -1548,6 +1586,68 @@ mod tests {
         assert!(bundle.contains("config_size_bytes"));
         assert!(bundle.contains("cookie_file_count"));
         assert!(bundle.contains("log_file_count"));
+        Ok(())
+    }
+
+    #[test]
+    fn status_and_support_bundle_show_only_whether_and_how_a_proxy_is_used() -> anyhow::Result<()> {
+        let proxy = "socks5h://proxy-user:proxy-secret@proxy-host.invalid:1080";
+        let policy = tm_net::NetworkPolicy::from_setting(proxy)?;
+        let directory = tempfile::tempdir()?;
+        let health = HealthTracker::default();
+        health.set_network(&policy);
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+
+        let status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(STATUS_FILE_NAME))?)?;
+        assert_eq!(
+            status["network"],
+            serde_json::json!({"proxy_in_use": true, "proxy_scheme": "socks5h"})
+        );
+        let destination = directory.path().join("support.json");
+        write_support_bundle(directory.path(), &destination)?;
+        let bundle = std::fs::read_to_string(destination)?;
+        for text in [
+            std::fs::read_to_string(directory.path().join(STATUS_FILE_NAME))?,
+            bundle,
+        ] {
+            for secret in ["proxy-user", "proxy-secret", "proxy-host", "1080"] {
+                assert!(!text.contains(secret), "{secret} leaked");
+            }
+            assert!(text.contains("socks5h"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_direct_connection_and_older_status_files_report_no_proxy() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            HealthTracker::default(),
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+        let path = directory.path().join(STATUS_FILE_NAME);
+        let mut status: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(
+            status["network"],
+            serde_json::json!({"proxy_in_use": false, "proxy_scheme": null})
+        );
+
+        status
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("status is not an object"))?
+            .remove("network");
+        std::fs::write(&path, serde_json::to_vec(&status)?)?;
+        let parsed = super::read_status(&path)?;
+        assert_eq!(parsed.network, NetworkStatus::default());
+        assert_eq!(status["schema_version"], STATUS_SCHEMA_VERSION);
         Ok(())
     }
 }

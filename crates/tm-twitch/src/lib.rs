@@ -46,3 +46,7 @@ pub use types::{
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/proxy_tests.rs"]
+mod proxy_tests;

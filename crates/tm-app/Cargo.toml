@@ -21,6 +21,7 @@ tm-auth = { path = "../tm-auth", version = "0.3.7" }
 tm-config = { path = "../tm-config", version = "0.3.7" }
 tm-domain = { path = "../tm-domain", version = "0.3.7" }
 tm-irc = { path = "../tm-irc", version = "0.3.7" }
+tm-net = { path = "../tm-net", version = "0.3.7" }
 tm-observability = { path = "../tm-observability", version = "0.3.7" }
 tm-pubsub = { path = "../tm-pubsub", version = "0.3.7" }
 tm-runtime = { path = "../tm-runtime", version = "0.3.7" }

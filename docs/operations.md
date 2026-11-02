@@ -384,6 +384,12 @@ have no `earnings` block, and earlier releases ignore it.
 **Config reload.** The `config_reload` block is described under
 [config reload](#config-reload).
 
+**Network.** The `network` block reports `proxy_in_use` and, when a proxy
+carries the connections, its `proxy_scheme` (`socks5h` or `http`). It never holds
+the address, port, or credentials, and `--support-bundle` keeps it as it is.
+Status files from earlier releases have no `network` block, and earlier releases
+ignore it. See [using a proxy](#using-a-proxy).
+
 ## Earnings ledger and alarms
 
 Every reward the runtime accepts is appended to `earnings/YYYY-MM.jsonl` in the
@@ -538,6 +544,44 @@ earnings ledger, and the watch progress of channels that stay are not touched,
 and a removed channel simply gives up its watch slot while the other keeps its
 progress. Because the old subscriptions stop first, an event that arrives in
 that short gap and is not redelivered by Twitch is missed.
+
+## Using a proxy
+
+Set [`proxy`](configuration.md#network-and-proxy) to a `socks5h://` or `http://`
+address and restart the miner. Every connection then goes through the proxy, and
+none is made directly if the proxy fails. Only this setting counts: the
+`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` environment variables are not read.
+
+**Confirming it works.**
+
+1. `--check-config` accepts the value. A `socks5://` address is refused with a
+   message to use `socks5h://`, because plain `socks5://` would look names up
+   locally.
+2. `--status` shows `"network": {"proxy_in_use": true, "proxy_scheme": "socks5h"}`.
+3. The proxy's own log shows the Twitch hosts as destinations (`gql.twitch.tv`,
+   `eventsub.wss.twitch.tv`, `pubsub-edge.twitch.tv`, `irc.chat.twitch.tv`, the
+   CDN hosts playback uses), each as a name rather than an address.
+4. For proof that nothing leaves directly, stop the proxy, or block this host's
+   outbound traffic except to the proxy, and watch the miner fail as described
+   below instead of carrying on.
+
+**What an unavailable proxy looks like.** The transports behave as they do for
+any lost connection, and none falls back to a direct one:
+
+- EventSub, PubSub and chat log reconnect warnings and retry with their usual
+  backoff. Their tasks report consecutive failures in `--status`, and
+  `--health` fails once a task is stale or has failed repeatedly.
+- Reads from Twitch are retried a few times and then fail; mutations are not
+  replayed. No points are earned while the minute-watched requests cannot get
+  through, which the earnings-stall alarm eventually reports (it is delivered
+  through the same proxy, so a Discord or webhook notification may not arrive
+  while the proxy is down).
+- At startup, the saved-session check keeps retrying with backoff while the proxy
+  is down. A new device login needs the proxy and stops with an error without
+  it.
+
+The proxy's own host name is looked up on this machine. To keep even that off
+the local resolver, write the proxy's IP address in `proxy`.
 
 ## Logs and storage
 

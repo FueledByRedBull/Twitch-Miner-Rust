@@ -102,7 +102,7 @@ container. Pass `--data-dir` so it finds your configuration and session.
 | Option | What it does |
 | --- | --- |
 | `--check-config` | Validate the configuration and preview migrations without contacting Twitch. Add `--json` for scripts. |
-| `--status` | Print the sanitized runtime status: tasks, transports, and earning state. |
+| `--status` | Print the sanitized runtime status: tasks, transports, earning state, and whether a proxy is in use. |
 | `--health` | Exit successfully only while the running miner's tasks are healthy. Docker uses this as its health check. |
 | `--earnings` | Summarize recorded point rewards by day, channel, or reason without contacting Twitch. Takes `--days N`, `--by`, and `--json`. |
 | `--auth-status` | Check the saved session once with Twitch and print its state, never a token. Add `--json` for scripts. Exits non-zero when the session is rejected or missing. |

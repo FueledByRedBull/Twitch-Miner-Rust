@@ -5,8 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use tm_domain::Streamer;
+use tm_net::NetworkPolicy;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::client::{bounded_frames, PubSubConnectionEvent};
@@ -23,13 +23,14 @@ const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(60);
 /// when `PubSub` itself is unavailable.
 #[allow(clippy::too_many_lines)]
 pub async fn connect_hermes_topics_and_listen(
+    network: &NetworkPolicy,
     url: &str,
     topics: &[String],
     auth_token: &str,
     tracked_streamers: &[Streamer],
     sender: mpsc::Sender<PubSubConnectionEvent>,
 ) -> Result<(), PubSubError> {
-    let (mut socket, _) = connect_async_with_config(url, Some(bounded_frames()), false).await?;
+    let (mut socket, _) = network.connect_websocket(url, bounded_frames()).await?;
     let subscriptions: HashMap<String, String> = topics
         .iter()
         .enumerate()
@@ -226,6 +227,7 @@ mod tests {
         let (url, server) = serve_one("ok").await;
         let (sender, mut receiver) = mpsc::channel(8);
         let result = connect_hermes_topics_and_listen(
+            &NetworkPolicy::direct(),
             &url,
             &[String::from("user-drop-events.viewer")],
             "token",
@@ -262,7 +264,15 @@ mod tests {
     async fn rejected_hermes_authentication_is_not_bad_auth() {
         let (url, server) = serve_one("error").await;
         let (sender, _receiver) = mpsc::channel(8);
-        let result = connect_hermes_topics_and_listen(&url, &[], "token", &[], sender).await;
+        let result = connect_hermes_topics_and_listen(
+            &NetworkPolicy::direct(),
+            &url,
+            &[],
+            "token",
+            &[],
+            sender,
+        )
+        .await;
         assert!(matches!(result, Err(PubSubError::Protocol(_))));
         server.await.unwrap();
     }

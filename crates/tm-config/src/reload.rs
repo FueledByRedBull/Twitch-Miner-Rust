@@ -88,6 +88,7 @@ pub(crate) const SETTING_RULES: &[Rule] = &[
     live("streak_discovery_games", true),
     restart("log_format", true),
     restart("notify_device_login", true),
+    restart("proxy", false),
     live("bet", true),
     restart("timezone", true),
     restart("privacy", true),

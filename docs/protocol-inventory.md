@@ -113,8 +113,14 @@ account identifiers. The policy follows the IANA
 and [IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml)
 special-purpose registries; protocol-specific tunnel/anycast blocks are denied
 because the remote-endpoint contract admits only ordinary public CDN addresses.
-Requests to these Twitch-supplied URLs bypass system proxies so that redirect
-and DNS-address validation cannot be bypassed.
+Requests to these Twitch-supplied URLs never use environment proxies. With a
+configured `proxy` they go through it and the resolver above is not installed:
+its lookup would run on this host, leaking the name and vetting the proxy's own
+address, so the proxy resolves the name instead. Resolved-address validation
+therefore cannot apply through a proxy. Every check on the endpoint itself still
+does (HTTPS only, no credentials in the URL, no `localhost`, `.local` or private
+IP literal), and so does the ban on redirects. With no proxy this path is
+unchanged.
 
 `CLIENT_ID` is the browser identity required consistently by device auth, GQL,
 and EventSub; it cannot be discovered safely at runtime. `Client-Version` is
@@ -431,6 +437,27 @@ scheduled. GQL remains the typed mutation/reconciliation path. Twitch currently
 supports `drop.entitlement.grant` only through webhooks or conduits, not
 WebSockets.
 
+### Network policy
+
+The `proxy` setting is the only input: `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY` are never read. Without it every connection goes out directly. With
+it, `tm-net` carries every connection and none falls back to a direct one:
+
+| Connection | Through a proxy |
+| --- | --- |
+| GQL, auth, Helix, Discord, webhook, playback and other HTTP | The HTTP client sends everything to the proxy (`socks5h://` or `CONNECT`). |
+| PubSub, Hermes, EventSub WebSockets | A tunnel to the host and port, then TLS and the WebSocket upgrade over it. The frame limits are unchanged. |
+| IRC | A tunnel to `irc.chat.twitch.tv:6697`, then the same verified TLS. |
+
+A SOCKS5 proxy receives each destination as a host name (address type 3), and an
+HTTP proxy as `CONNECT host:port`; names are never resolved on this host. A
+proxy handshake that stalls for 15 seconds, is refused, fails authentication,
+answers with a non-2xx status, or sends a malformed or oversized (over 8 KiB)
+response fails the connection with its failure class and no credentials. The
+proxy's own host name is resolved locally. A source scan in the `tm-net` tests
+fails if any other crate opens a socket, builds an HTTP client, or resolves a
+name itself.
+
 ### EventSub
 
 The preferred EventSub WebSocket path handles stream presence and observes
@@ -533,8 +560,9 @@ event.
 
 ### IRC
 
-Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` through
-Rustls with WebPKI roots; the OAuth token is never sent over plaintext IRC.
+Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` (through
+the configured proxy when there is one) and then through Rustls with WebPKI
+roots; the OAuth token is never sent over plaintext IRC.
 A session that ends within a minute, such as a rejected login, backs off
 exponentially from five seconds to five minutes. The rejection notice does not
 count as activity, so repeated rejections reach the task health threshold.

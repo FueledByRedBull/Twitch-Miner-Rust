@@ -206,6 +206,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
         params.config.disable_at_in_nickname,
         params.observability.clone(),
         params.health.clone(),
+        params.twitch.network().clone(),
     ));
     let streak_cache = Some(spawn_streak_cache_loop(
         params.stop_rx.clone(),
@@ -254,7 +255,7 @@ pub(crate) fn spawn_background_tasks(params: &BackgroundTaskParams<'_>) -> Resul
 fn spawn_session_watch(params: &BackgroundTaskParams<'_>) -> Result<tokio::task::JoinHandle<()>> {
     Ok(spawn_session_watch_loop(
         params.stop_rx.clone(),
-        TwitchAuthClient::with_client(build_http_client()?),
+        TwitchAuthClient::with_client(build_http_client(params.twitch.network())?),
         params.auth_token.to_string(),
         generate_device_id(),
         normalized_username(&params.config.username)?,

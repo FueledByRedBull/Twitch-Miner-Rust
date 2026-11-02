@@ -13,6 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tm_domain::MinerEvent;
 use tm_domain::{IrcMode, Streamer, StreamerSettings};
+use tm_net::NetworkPolicy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -28,6 +29,14 @@ fn streamer() -> Streamer {
             ..StreamerSettings::default()
         },
         ..Streamer::default()
+    }
+}
+
+impl EventSubClientSettings {
+    /// Production endpoints over a direct connection, for tests that point the
+    /// URLs at loopback servers.
+    fn new(client_id: impl Into<String>, auth_token: impl Into<String>) -> Self {
+        Self::with_network(client_id, auth_token, &NetworkPolicy::direct()).unwrap()
     }
 }
 

@@ -4,11 +4,12 @@ use anyhow::{anyhow, Result};
 use tm_auth::SessionKey;
 use tm_config::ConfigFile;
 use tm_domain::Streamer;
+use tm_net::NetworkPolicy;
 use tm_pubsub::{
     build_topic_batches, EventSubClient, EventSubClientSettings, EventSubConnectionEvent,
     EventSubSetupReport, PubSubClient, PubSubConnectionEvent,
 };
-use tm_twitch::{TwitchClient, TwitchClientError, TwitchFailureClass};
+use tm_twitch::{TwitchClient, TwitchClientError, TwitchEndpoints, TwitchFailureClass};
 
 use crate::bootstrap::{load_and_validate_existing_session, DEFAULT_USER_AGENT};
 
@@ -41,11 +42,12 @@ pub(crate) async fn run_read_only_canary(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
+    network: &NetworkPolicy,
     session_key: Option<&SessionKey>,
 ) -> Result<()> {
     match tokio::time::timeout(
         std::time::Duration::from_secs(90),
-        run_read_only_canary_inner(config, work_dir, http_client, session_key),
+        run_read_only_canary_inner(config, work_dir, http_client, network, session_key),
     )
     .await
     {
@@ -59,9 +61,10 @@ async fn run_read_only_canary_inner(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
+    network: &NetworkPolicy,
     session_key: Option<&SessionKey>,
 ) -> std::result::Result<(), CanaryCheckError> {
-    let context = prepare_canary(config, work_dir, http_client, session_key).await?;
+    let context = prepare_canary(config, work_dir, http_client, network, session_key).await?;
     let read_checks = run_canary_read_checks(config, &context).await?;
     run_canary_transport_checks(&context).await?;
 
@@ -97,6 +100,7 @@ async fn prepare_canary(
     config: &ConfigFile,
     work_dir: &Path,
     http_client: reqwest::Client,
+    network: &NetworkPolicy,
     session_key: Option<&SessionKey>,
 ) -> std::result::Result<CanaryContext, CanaryCheckError> {
     let session = canary_step(
@@ -110,11 +114,13 @@ async fn prepare_canary(
             anyhow!("validated canary session has no auth token"),
         )
     })?;
-    let twitch = TwitchClient::with_client_and_cookie_header(
+    let twitch = TwitchClient::with_network(
         http_client,
         auth_token,
         DEFAULT_USER_AGENT,
         session.cookie_header_for_host("twitch.tv"),
+        TwitchEndpoints::default(),
+        network,
     );
     let prediction_eventsub_authorized = prediction_eventsub_authorized(&session);
 
@@ -374,17 +380,16 @@ async fn run_eventsub_canary(
     prediction_eventsub_authorized: bool,
     tracked: &[Streamer],
 ) -> Result<()> {
-    let client = EventSubClient::new(EventSubClientSettings {
-        client_id: tm_twitch::CLIENT_ID.to_string(),
-        auth_token: twitch.auth_token().to_string(),
-        websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
-        subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
-        allow_prediction_scope_fallback: false,
-        authorized_prediction_broadcaster_id: prediction_eventsub_authorized
-            .then(|| own_channel_id.to_string()),
-        verify_subscriptions: true,
-        http_client: reqwest::Client::new(),
-    });
+    let mut settings = EventSubClientSettings::with_network(
+        tm_twitch::CLIENT_ID,
+        twitch.auth_token(),
+        twitch.network(),
+    )?;
+    settings.allow_prediction_scope_fallback = false;
+    settings.authorized_prediction_broadcaster_id =
+        prediction_eventsub_authorized.then(|| own_channel_id.to_string());
+    settings.verify_subscriptions = true;
+    let client = EventSubClient::new(settings);
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
     let tracked = tracked.to_vec();
     let task = tokio::spawn(async move { client.connect_and_listen(&tracked, sender).await });
@@ -447,8 +452,9 @@ async fn run_pubsub_canary(
         let sender = sender.clone();
         let auth_token = auth_token.clone();
         let tracked = tracked.to_vec();
+        let network = twitch.network().clone();
         tasks.spawn(async move {
-            PubSubClient::default()
+            PubSubClient::with_network(network)
                 .connect_topics_and_listen(&topics, &auth_token, None, &tracked, sender)
                 .await
         });

@@ -6,6 +6,7 @@ use anyhow::Result;
 use tm_config::{AppPaths, ConfigFile};
 use tm_domain::{format_channel_points, format_drop_progress, progress_percent, Streamer};
 use tm_irc::{ChatEventKind, ChatLogger};
+use tm_net::NetworkPolicy;
 use tm_observability::{
     discord_message, new_discord_webhook, should_send_discord_event, Anonymizer, DiscordClient,
     DiscordSettings, Event as DiscordEvent,
@@ -665,9 +666,17 @@ pub(crate) fn device_login_delivery_warning(
     )
 }
 
-pub(crate) fn build_observability(config: &ConfigFile) -> Result<AppObservability> {
+pub(crate) fn build_observability(
+    config: &ConfigFile,
+    network: &NetworkPolicy,
+) -> Result<AppObservability> {
     let live = live_settings(config);
-    let discord_client = DiscordClient::new(Duration::from_secs(15))?;
+    let discord_client = DiscordClient::with_client(
+        network
+            .http_client_builder()
+            .timeout(Duration::from_secs(15))
+            .build()?,
+    );
     Ok(AppObservability::new(
         live.discord,
         discord_client,
@@ -963,6 +972,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use tm_net::NetworkPolicy;
+
     use super::{
         await_observability_task, build_observability, privacy_safe_chat_message,
         privacy_safe_log_path, AppObservability, AppObservabilitySettings, ConfigFile,
@@ -1080,7 +1091,7 @@ mod tests {
 
     #[test]
     fn a_config_reload_swaps_live_settings_for_every_clone() {
-        let first = build_observability(&ConfigFile::default()).unwrap();
+        let first = build_observability(&ConfigFile::default(), &NetworkPolicy::direct()).unwrap();
         let second = first.clone();
         assert!(second.show_claimed_bonus());
         assert!(second.live().discord.is_none());
@@ -1116,7 +1127,8 @@ mod tests {
 
     #[test]
     fn readers_never_see_a_half_applied_reload() {
-        let observability = build_observability(&ConfigFile::default()).unwrap();
+        let observability =
+            build_observability(&ConfigFile::default(), &NetworkPolicy::direct()).unwrap();
         let writer = observability.clone();
         let on = ConfigFile {
             emojis: true,

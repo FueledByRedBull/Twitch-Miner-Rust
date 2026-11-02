@@ -64,7 +64,7 @@ tell whether a reload applied is described in the
 `debug_deep`, `show_seconds`, `claim_drops_startup`, `save_logs`,
 `show_username_in_console`, `disable_at_in_nickname`, `followers_order`,
 `drop_account_link`, `drop_discovery_games`, `log_format`,
-`notify_device_login`, `timezone`, and `privacy.anonymize_logs`. These are read once at startup. A file that changes
+`notify_device_login`, `proxy`, `timezone`, and `privacy.anonymize_logs`. These are read once at startup. A file that changes
 only these is not applied, and the status block lists their names. A file that
 changes both applies the live settings and reports the rest.
 
@@ -180,6 +180,54 @@ Discord event names: `STARTUP`, `SHUTDOWN`, `STREAMER_ONLINE`,
 `DEVICE_LOGIN` under
 [device login notifications](operations.md#device-login-notifications); like the
 others, an empty list sends them.
+
+## Network and proxy
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `proxy` | `""` | Opt-in. A proxy that carries every connection the miner makes, so Twitch and your notification targets see the proxy's address instead of yours. Empty means no proxy. Read once at startup, and never shown in logs, notifications, `--status`, the reload report, or the support bundle. Existing config files are not rewritten to add it, so a rollback to an older release can still read them. |
+
+**Formats.** Two forms are accepted, each with an optional `user:password@` and a
+required host and port:
+
+- `socks5h://host:1080` or `socks5h://user:password@host:1080`: SOCKS5, where
+  the proxy resolves host names.
+- `http://host:3128` or `http://user:password@host:3128`: an HTTP proxy that
+  tunnels with `CONNECT`.
+
+Percent-encode characters such as `@`, `:` or `/` in the user name or password
+(`p%40ss` for `p@ss`). `socks5://` is rejected, because it resolves names on
+this machine before asking the proxy and so leaks every Twitch host name to your
+local resolver; use `socks5h://`. `https://` proxies and other schemes are
+rejected too. `--check-config` and every startup validate the value, and the
+error says what is wrong without repeating the value.
+
+**No direct fallback.** With a proxy configured, every connection goes through
+it: the Twitch and Discord HTTP requests (including auth and playback), the
+PubSub, Hermes and EventSub WebSockets, and IRC chat. If the proxy is down,
+refuses a connection, rejects the credentials, or does not answer in time (15
+seconds for the WebSocket and chat handshakes), that connection fails and is
+retried the way any failed connection is. It is never retried directly, so your
+address is not exposed. The [operations guide](operations.md#using-a-proxy)
+shows how to confirm this.
+
+**Environment variables are no longer used.** Some connections used to follow
+`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` through the HTTP library's defaults.
+Since this release no connection reads them, whatever they hold: only `proxy`
+counts. If you relied on them, put the same address in `proxy`. When one is set
+and `proxy` is empty, the miner logs a warning at startup naming the variable,
+because it is connecting directly.
+
+**What a proxy cannot do.** The proxy's own host name is resolved on this
+machine; use an IP address to avoid even that lookup. Playback and other
+requests to URLs Twitch supplies are normally checked against the addresses their
+host names resolve to, to refuse private destinations. Through a proxy the proxy
+does the resolving, so that address check cannot apply; the other checks on those
+URLs (HTTPS only, no credentials, no `localhost` or `.local` names, no private
+IP literals) and the ban on redirects still do. An `http://` proxy sees the
+destination host and port of each connection but not its contents, which stay
+encrypted, and receives its own `user:password` unencrypted, as does a SOCKS5
+proxy, so use credentials only on a network you trust.
 
 ## Predictions (`bet`)
 
