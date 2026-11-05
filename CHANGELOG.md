@@ -42,6 +42,9 @@
   script, and a Windows scheduled task installer are in `deploy/`.
 - The new settings are not written into an existing configuration file, so 0.3.7 can
   still read it after a rollback unless you set one of them.
+- A PubSub or Hermes connection that stalls during its handshake now gives up after
+  30 seconds and tries again. Before, it could wait minutes for the system's TCP
+  timeout while that connection's topics went unheard.
 
 ## 0.3.7 - Unreleased
 

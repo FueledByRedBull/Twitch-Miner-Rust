@@ -809,6 +809,7 @@ fn pubsub_error_class(error: &tm_pubsub::PubSubError) -> &'static str {
         tm_pubsub::PubSubError::ReconnectRequested => "reconnect",
         tm_pubsub::PubSubError::BadAuth { .. } => "bad-auth",
         tm_pubsub::PubSubError::PongTimeout => "pong-timeout",
+        tm_pubsub::PubSubError::ConnectTimeout => "connect-timeout",
     }
 }
 
@@ -1027,6 +1028,7 @@ mod tests {
                 "bad-auth",
             ),
             (tm_pubsub::PubSubError::PongTimeout, "pong-timeout"),
+            (tm_pubsub::PubSubError::ConnectTimeout, "connect-timeout"),
         ]
     }
 

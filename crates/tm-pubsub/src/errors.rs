@@ -21,6 +21,8 @@ pub enum PubSubError {
     BadAuth { cookie_file: String },
     #[error("pubsub pong timeout")]
     PongTimeout,
+    #[error("pubsub connect timeout")]
+    ConnectTimeout,
 }
 
 impl PubSubError {

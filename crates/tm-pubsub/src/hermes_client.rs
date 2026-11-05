@@ -9,7 +9,7 @@ use tm_net::NetworkPolicy;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::client::{bounded_frames, PubSubConnectionEvent};
+use crate::client::{bounded_frames, PubSubConnectionEvent, CONNECT_TIMEOUT};
 use crate::errors::PubSubError;
 use crate::hermes::{HermesObservation, HermesObserver, HermesObserverError};
 use crate::topics::pubsub_topic_class;
@@ -30,7 +30,12 @@ pub async fn connect_hermes_topics_and_listen(
     tracked_streamers: &[Streamer],
     sender: mpsc::Sender<PubSubConnectionEvent>,
 ) -> Result<(), PubSubError> {
-    let (mut socket, _) = network.connect_websocket(url, bounded_frames()).await?;
+    let (mut socket, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        network.connect_websocket(url, bounded_frames()),
+    )
+    .await
+    .map_err(|_| PubSubError::ConnectTimeout)??;
     let subscriptions: HashMap<String, String> = topics
         .iter()
         .enumerate()
