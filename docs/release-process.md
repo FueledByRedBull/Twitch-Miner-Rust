@@ -166,6 +166,15 @@ diagnosis. Backup paths are restricted to the deployment operator on the host.
 This is a local persistent-state guarantee; it cannot reverse remote Twitch
 mutations, and a rollback binary still needs a compatible data-format check.
 
+**Encrypted sessions.** Releases before 0.3.8 cannot read a session file that
+was encrypted with `TCPM_COOKIE_KEY_FILE`; they treat it as damaged and replace
+it with a new device login. Before pointing `TWITCH_MINER_IMAGE` at such a
+release, stop the service and run `--decrypt-session` with the current image and
+the key file still mounted, as described in
+[encrypting the saved session](operations.md#encrypting-the-saved-session), or
+plan to log in again after the rollback. Restoring a data snapshot taken before
+encryption was enabled also brings back a plaintext session file.
+
 Prediction journals can retain more than 128 resolved replay records, while
 limiting unresolved placements to 128 and the file to 256 KiB. Older binaries
 that count all records against 128 will reject such a journal. Before rollback,
@@ -333,8 +342,63 @@ extracted executable comparison as the cross-package identity check. CI also
 installs the MSI quietly on a disposable Windows runner, checks the full version
 and revision under Program Files without active runtime files, and uninstalls it
 before publishing the artifact. The build also runs WiX MSI database validation.
+The Rust cache is used on pull requests and `main` but skipped on tag refs, so a
+release tag builds cold.
 How to run the Windows build is in the
 [operations guide](operations.md#running-on-windows).
+
+## Release binaries
+
+`.github/workflows/release-binaries.yml` builds static Linux archives for
+`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
+`armv7-unknown-linux-musleabihf` and macOS archives for `x86_64-apple-darwin` and
+`aarch64-apple-darwin`, all with `--locked --release`. It runs on every `v*` tag
+push and on manual dispatch, alongside Windows Release, and on pull requests that
+touch the workflow, `deploy/`, `Cargo.lock` or `rust-toolchain.toml`. The Linux
+targets are cross-built with `cargo-zigbuild` and Zig, both pinned to exact
+versions with the Zig archive checked against a recorded SHA-256; the macOS
+targets build natively on matching runners. The build sets the same
+`BUILD_REVISION`, `SOURCE_DATE_EPOCH`, `CARGO_INCREMENTAL=0` and workspace path
+remapping as the Dockerfile. The executables are static musl builds but link
+Zig's bundled musl, not the Debian musl in the container image, so they are not
+byte-identical to the binary in an image and carry no reproducibility claim;
+`verify-build-integrity.ps1` still covers only the image path. Release builds
+are cold: the Rust cache is restored on pull requests only.
+
+Each target packages `twitch-miner-<version>-<target>.tar.gz` with a `.sha256`
+sidecar, unpacks it, compares the executable with the build output and, where the
+runner can execute it, runs `--version` (which must contain the full source
+revision), `--help` and `--check-config` against `config.example.json`. The
+ARMv7 executable cannot run on any hosted runner, so it is only checked for being
+a static 32-bit ARM ELF file. A separate job verifies the systemd unit with
+`systemd-analyze verify` and syntax-checks the OpenRC script, and a final job
+fails unless every job succeeded.
+
+On tag and manual runs a job with `id-token: write` and `attestations: write`,
+and no step that compiles anything, downloads the archives and attests them with
+`actions/attest-build-provenance`. Every other job has read-only `contents`.
+Pull-request runs build and test but upload and attest nothing, so they behave
+the same for forks. `scripts/verify-release-hygiene.ps1` checks that all five
+targets are present, that attestation is limited to tag and manual runs, and that
+the cache is used on pull requests only.
+
+The workflow does not publish a GitHub Release. Like Windows Release it leaves
+its archives as workflow artifacts (30 days), and the protected promotion flow
+remains the only path to a stable tag. Release Binaries is not required evidence:
+`Promote Release` and `verify-release-evidence.ps1` still consume exactly CI,
+Multiarch Build, Deep Quality and the Windows Release lane. After promotion, a
+maintainer who wants the archives on a GitHub Release downloads them from the
+tag's run, verifies them as described in
+[verifying a download](operations.md#verifying-a-download) and attaches them by
+hand. If the artifacts have expired, dispatch the workflow again from the tag
+ref.
+
+A host that runs a downloaded binary instead of an image is outside this
+document's deployment, canary, soak and rollback evidence, which describe digest
+pinned images. A Raspberry Pi that follows this process still deploys the
+digest-pinned image. For a binary install, keep the previous archive as the
+rollback and check data-format compatibility as described under
+[Rollback](#rollback) before going back to it.
 
 ## Promotion record
 

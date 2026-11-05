@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use tm_net::NetworkPolicy;
 use tm_runtime::{RuntimeMetrics, RuntimeMetricsSnapshot};
 use tm_twitch::{InventoryDrop, InventorySnapshot};
 
@@ -46,6 +47,41 @@ struct RuntimeStatus {
     pubsub: Option<tm_pubsub::PubSubSetupReport>,
     #[serde(default)]
     prediction_journal: Option<crate::prediction_journal::JournalCapacity>,
+    /// Absent from files written by earlier releases, and ignored by their readers, so the schema version stays.
+    #[serde(default)]
+    earnings: crate::earnings::EarningsStatus,
+    /// Absent from files written by earlier releases, like `earnings`.
+    #[serde(default)]
+    config_reload: crate::reload::ConfigReloadStatus,
+    /// Absent from files written by earlier releases, like `earnings`.
+    #[serde(default)]
+    network: NetworkStatus,
+}
+
+/// Whether a proxy carries the connections, and its protocol. The address and
+/// credentials are never reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+struct NetworkStatus {
+    proxy_in_use: bool,
+    proxy_scheme: Option<String>,
+}
+
+impl From<&NetworkPolicy> for NetworkStatus {
+    fn from(policy: &NetworkPolicy) -> Self {
+        let scheme = policy.proxy_scheme();
+        Self {
+            proxy_in_use: scheme.is_some(),
+            proxy_scheme: scheme.map(|scheme| scheme.to_string()),
+        }
+    }
+}
+
+impl RuntimeStatus {
+    fn for_support_bundle(mut self) -> Self {
+        self.earnings = self.earnings.without_points();
+        self.config_reload = self.config_reload.without_channels();
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -120,9 +156,19 @@ pub(crate) struct HealthTracker {
     pubsub: Arc<Mutex<Option<tm_pubsub::PubSubSetupReport>>>,
     watch_slots: Arc<Mutex<Vec<WatchSlotStatus>>>,
     prediction_journal: Arc<Mutex<Option<crate::prediction_journal::PredictionPlacementJournal>>>,
+    earnings: crate::earnings::EarningsTracker,
+    reload: crate::reload::ReloadStatusTracker,
+    network: Arc<Mutex<NetworkStatus>>,
 }
 
 impl HealthTracker {
+    pub(crate) fn set_network(&self, policy: &NetworkPolicy) {
+        *self
+            .network
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = NetworkStatus::from(policy);
+    }
+
     pub(crate) fn set_journal(
         &self,
         journal: crate::prediction_journal::PredictionPlacementJournal,
@@ -373,6 +419,44 @@ impl HealthTracker {
         } else {
             counters.drop_progress.push(snapshot);
         }
+    }
+
+    pub(crate) fn earnings(&self) -> crate::earnings::EarningsTracker {
+        self.earnings.clone()
+    }
+
+    pub(crate) fn reload(&self) -> crate::reload::ReloadStatusTracker {
+        self.reload.clone()
+    }
+
+    pub(crate) fn selected_watch_slots(&self) -> u32 {
+        let selected = self
+            .watch_slots_snapshot()
+            .iter()
+            .filter(|slot| slot.selected)
+            .count();
+        u32::try_from(selected).unwrap_or(u32::MAX)
+    }
+
+    /// Whether a slot is currently held by the Drop campaign pin.
+    pub(crate) fn drop_target_selected(&self) -> bool {
+        self.watch_slots_snapshot().iter().any(|slot| {
+            slot.selected && slot.selection_reason.as_deref() == Some("campaign-priority")
+        })
+    }
+
+    /// Minutes watched across Drops that are not yet claimed, or `None` before
+    /// any inventory has been read.
+    pub(crate) fn unclaimed_drop_minutes(&self) -> Option<i64> {
+        let counters = self.counters_snapshot();
+        (!counters.drop_progress.is_empty()).then(|| {
+            counters
+                .drop_progress
+                .iter()
+                .filter(|drop| !drop.is_claimed)
+                .map(|drop| drop.current_minutes_watched)
+                .sum()
+        })
     }
 
     pub(crate) fn set_watch_selection(
@@ -630,6 +714,14 @@ impl StatusReporter {
                 .as_ref()
                 .map(crate::prediction_journal::PredictionPlacementJournal::capacity)
                 .transpose()?,
+            earnings: self.health.earnings.status(now),
+            config_reload: self.health.reload.status(),
+            network: self
+                .health
+                .network
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         };
         atomic_json_write(&self.path, &status)?;
         Ok((status, now))
@@ -670,7 +762,9 @@ pub(crate) fn write_support_bundle(work_dir: &Path, destination: &Path) -> Resul
         version: build_info::VERSION,
         revision: build_info::GIT_REVISION,
         target: build_info::TARGET,
-        runtime_status: read_status(&work_dir.join(STATUS_FILE_NAME)).ok(),
+        runtime_status: read_status(&work_dir.join(STATUS_FILE_NAME))
+            .ok()
+            .map(RuntimeStatus::for_support_bundle),
         config_exists: config_path.is_file(),
         config_size_bytes: fs::metadata(config_path).ok().map(|value| value.len()),
         cookie_file_count: count_files(&work_dir.join("cookies")),
@@ -889,7 +983,7 @@ fn unix_now() -> Result<u64> {
         .map_err(|error| anyhow!("system clock predates Unix epoch: {error}"))
 }
 
-fn unix_now_infallible() -> u64 {
+pub(crate) fn unix_now_infallible() -> u64 {
     unix_now().unwrap_or_default()
 }
 
@@ -897,8 +991,9 @@ fn unix_now_infallible() -> u64 {
 mod tests {
     use super::{
         atomic_json_write, check_health, validate_status, validate_status_for_supervision,
-        write_support_bundle, HealthTracker, RuntimeMetrics, RuntimeMetricsSnapshot, RuntimeStatus,
-        StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME, STATUS_SCHEMA_VERSION,
+        write_support_bundle, HealthTracker, NetworkStatus, RuntimeMetrics, RuntimeMetricsSnapshot,
+        RuntimeStatus, StatusCounters, StatusReporter, TaskStatus, STATUS_FILE_NAME,
+        STATUS_SCHEMA_VERSION,
     };
     use tm_observability::{init_tracing, LoggerSettings, TracingInitOptions};
     use tm_twitch::{ClaimedDropReward, InventoryDrop, InventorySnapshot};
@@ -1009,6 +1104,9 @@ mod tests {
             eventsub: None,
             pubsub: None,
             prediction_journal: None,
+            earnings: crate::earnings::EarningsStatus::default(),
+            config_reload: crate::reload::ConfigReloadStatus::default(),
+            network: NetworkStatus::default(),
         };
         assert!(validate_status(&status, 100).is_err());
         assert!(validate_status_for_supervision(&status, 100).is_ok());
@@ -1488,6 +1586,68 @@ mod tests {
         assert!(bundle.contains("config_size_bytes"));
         assert!(bundle.contains("cookie_file_count"));
         assert!(bundle.contains("log_file_count"));
+        Ok(())
+    }
+
+    #[test]
+    fn status_and_support_bundle_show_only_whether_and_how_a_proxy_is_used() -> anyhow::Result<()> {
+        let proxy = "socks5h://proxy-user:proxy-secret@proxy-host.invalid:1080";
+        let policy = tm_net::NetworkPolicy::from_setting(proxy)?;
+        let directory = tempfile::tempdir()?;
+        let health = HealthTracker::default();
+        health.set_network(&policy);
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            health,
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+
+        let status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join(STATUS_FILE_NAME))?)?;
+        assert_eq!(
+            status["network"],
+            serde_json::json!({"proxy_in_use": true, "proxy_scheme": "socks5h"})
+        );
+        let destination = directory.path().join("support.json");
+        write_support_bundle(directory.path(), &destination)?;
+        let bundle = std::fs::read_to_string(destination)?;
+        for text in [
+            std::fs::read_to_string(directory.path().join(STATUS_FILE_NAME))?,
+            bundle,
+        ] {
+            for secret in ["proxy-user", "proxy-secret", "proxy-host", "1080"] {
+                assert!(!text.contains(secret), "{secret} leaked");
+            }
+            assert!(text.contains("socks5h"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_direct_connection_and_older_status_files_report_no_proxy() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let reporter = StatusReporter::ready(
+            directory.path(),
+            HealthTracker::default(),
+            std::sync::Arc::new(RuntimeMetrics::default()),
+        )?;
+        reporter.heartbeat()?;
+        let path = directory.path().join(STATUS_FILE_NAME);
+        let mut status: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(
+            status["network"],
+            serde_json::json!({"proxy_in_use": false, "proxy_scheme": null})
+        );
+
+        status
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("status is not an object"))?
+            .remove("network");
+        std::fs::write(&path, serde_json::to_vec(&status)?)?;
+        let parsed = super::read_status(&path)?;
+        assert_eq!(parsed.network, NetworkStatus::default());
+        assert_eq!(status["schema_version"], STATUS_SCHEMA_VERSION);
         Ok(())
     }
 }

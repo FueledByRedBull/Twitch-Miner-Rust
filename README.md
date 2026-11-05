@@ -79,6 +79,9 @@ docker compose up --build
 On Linux the container runs as UID/GID `1000:1000`, so `data/` must be writable
 by that user. To deploy a published image by digest, run on a Raspberry Pi, or
 use the Windows ZIP/MSI build, see the [operations guide](docs/operations.md).
+To run a static binary without Docker (Linux x86_64, ARM64 or ARMv7, macOS) under
+systemd, OpenRC or a Windows scheduled task, see
+[running without Docker](docs/operations.md#running-without-docker).
 
 ## Run from source
 
@@ -102,8 +105,11 @@ container. Pass `--data-dir` so it finds your configuration and session.
 | Option | What it does |
 | --- | --- |
 | `--check-config` | Validate the configuration and preview migrations without contacting Twitch. Add `--json` for scripts. |
-| `--status` | Print the sanitized runtime status: tasks, transports, and earning state. |
+| `--status` | Print the sanitized runtime status: tasks, transports, earning state, and whether a proxy is in use. |
 | `--health` | Exit successfully only while the running miner's tasks are healthy. Docker uses this as its health check. |
+| `--earnings` | Summarize recorded point rewards by day, channel, or reason without contacting Twitch. Takes `--days N`, `--by`, and `--json`. |
+| `--auth-status` | Check the saved session once with Twitch and print its state, never a token. Add `--json` for scripts. Exits non-zero when the session is rejected or missing. |
+| `--decrypt-session` | Rewrite an [encrypted session](docs/operations.md#encrypting-the-saved-session) as plaintext before a rollback. |
 | `--support-bundle <path>` | Write a privacy-safe support file without cookies, configuration values, or logs. |
 | `--canary` | Run read-only live checks on a dedicated account before a release. |
 
@@ -124,6 +130,7 @@ keeps everything under its data directory:
 | `config.json` | Your settings |
 | `cookies/<username>.json` | Your Twitch session. Treat it like a password. |
 | `log/` | Optional saved logs |
+| `earnings/` | Local record of every point reward, with channel names and balances |
 | `streak-cache.json`, `prediction-placements.json`, `runtime-status.json` | Runtime state; no credentials |
 
 Coming from the Go or Python miner? The [migration guide](docs/migration.md)

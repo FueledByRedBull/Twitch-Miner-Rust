@@ -1,0 +1,328 @@
+name: Release Binaries
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/release-binaries.yml'
+      - 'deploy/**'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.16.0
+  CARGO_ZIGBUILD_VERSION: 0.23.4
+
+jobs:
+  validate-service-files:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the systemd unit
+        run: |
+          # The hosted runner is disposable. systemd-analyze verify resolves the
+          # unit's user and executable, so provide both before checking the file.
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin twitch-miner
+          sudo install -m 0755 /bin/true /usr/local/bin/twitch-miner
+          systemd-analyze verify deploy/systemd/twitch-miner.service
+      - name: Check the OpenRC script syntax
+        run: sh -n deploy/openrc/twitch-miner
+
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            family: linux
+            runner: ubuntu-24.04
+            zig_host: x86_64
+            zig_sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            elf_machine: Advanced Micro Devices X86-64
+            smoke: true
+            tar_owner: --owner=0 --group=0 --numeric-owner
+          - target: aarch64-unknown-linux-musl
+            family: linux
+            runner: ubuntu-24.04-arm
+            zig_host: aarch64
+            zig_sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+            elf_machine: AArch64
+            smoke: true
+            tar_owner: --owner=0 --group=0 --numeric-owner
+          # No hosted runner has an ARMv7 CPU, so this binary is checked
+          # structurally (ELF machine, static linking) but not executed.
+          - target: armv7-unknown-linux-musleabihf
+            family: linux
+            runner: ubuntu-24.04
+            zig_host: x86_64
+            zig_sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            elf_machine: ARM
+            smoke: false
+            tar_owner: --owner=0 --group=0 --numeric-owner
+          # macos-15-intel is the last Intel image GitHub offers on a standard runner.
+          - target: x86_64-apple-darwin
+            family: macos
+            runner: macos-15-intel
+            smoke: true
+            tar_owner: --uid=0 --gid=0 --uname=root --gname=wheel
+          - target: aarch64-apple-darwin
+            family: macos
+            runner: macos-15
+            smoke: true
+            tar_owner: --uid=0 --gid=0 --uname=root --gname=wheel
+    env:
+      TARGET: ${{ matrix.target }}
+      CARGO_INCREMENTAL: '0'
+      BUILD_REVISION: ${{ github.sha }}
+      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.94.0
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust builds on pull requests only
+        if: github.event_name == 'pull_request'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install pinned Zig
+        if: matrix.family == 'linux'
+        env:
+          ZIG_ARCHIVE: zig-${{ matrix.zig_host }}-linux-${{ env.ZIG_VERSION }}
+          ZIG_SHA256: ${{ matrix.zig_sha256 }}
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/zig.tar.xz" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_ARCHIVE}.tar.xz"
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check -
+          mkdir "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Install pinned cargo-zigbuild
+        if: matrix.family == 'linux'
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+          fallback: none
+
+      - name: Export the source date
+        run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build with cargo-zigbuild
+        if: matrix.family == 'linux'
+        run: cargo zigbuild --locked --release -p tm-app --target "$TARGET"
+
+      - name: Build
+        if: matrix.family == 'macos'
+        run: cargo build --locked --release -p tm-app --target "$TARGET"
+
+      - id: package
+        name: Package the release archive
+        shell: pwsh
+        env:
+          FAMILY: ${{ matrix.family }}
+          TAR_OWNER: ${{ matrix.tar_owner }}
+          # Stops macOS tar from adding ._* extended-attribute entries to the archive.
+          COPYFILE_DISABLE: '1'
+        run: |
+          function Invoke-Native {
+            param([string]$Command, [string[]]$Arguments)
+            & $Command @Arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Command failed with exit code $LASTEXITCODE."
+            }
+          }
+          $metadata = (cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json)
+          $app = @($metadata.packages | Where-Object { $_.name -eq 'tm-app' })
+          if ($app.Count -ne 1 -or $app[0].version -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Unable to determine the current tm-app package version.'
+          }
+          $version = $app[0].version
+          $base = "twitch-miner-$version-$env:TARGET"
+          "base=$base" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+          $built = (Resolve-Path "target/$env:TARGET/release/tm-app").Path
+          $stage = Join-Path $env:RUNNER_TEMP "stage/$base"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath $built -Destination (Join-Path $stage 'twitch-miner')
+          Copy-Item -LiteralPath LICENSE, README.md, config.example.json -Destination $stage
+          if ($env:FAMILY -eq 'linux') {
+            New-Item -ItemType Directory -Path (Join-Path $stage 'deploy/systemd'), (Join-Path $stage 'deploy/openrc') | Out-Null
+            Copy-Item -LiteralPath deploy/systemd/twitch-miner.service -Destination (Join-Path $stage 'deploy/systemd')
+            Copy-Item -LiteralPath deploy/openrc/twitch-miner -Destination (Join-Path $stage 'deploy/openrc')
+          }
+          @(
+            "version=$version"
+            "revision=$env:GITHUB_SHA"
+            "target=$env:TARGET"
+            "source_date_epoch=$env:SOURCE_DATE_EPOCH"
+          ) | Set-Content -LiteralPath (Join-Path $stage 'BUILD-METADATA.txt') -Encoding ascii
+          foreach ($file in Get-ChildItem -LiteralPath $stage -Recurse -File) {
+            Invoke-Native chmod @('0644', $file.FullName)
+          }
+          Invoke-Native chmod @('0755', (Join-Path $stage 'twitch-miner'))
+          if ($env:FAMILY -eq 'linux') {
+            Invoke-Native chmod @('0755', (Join-Path $stage 'deploy/openrc/twitch-miner'))
+          }
+
+          New-Item -ItemType Directory -Path dist | Out-Null
+          $archive = Join-Path (Resolve-Path dist).Path "$base.tar.gz"
+          $owner = @($env:TAR_OWNER -split ' ' | Where-Object { $_ })
+          Invoke-Native tar ($owner + @('-czf', $archive, '-C', (Split-Path $stage), $base))
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $base.tar.gz" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
+
+          # Unpack what was just written and check the archive itself, not the staging copy.
+          $extract = Join-Path $env:RUNNER_TEMP 'extract'
+          New-Item -ItemType Directory -Path $extract | Out-Null
+          Invoke-Native tar @('-xzf', $archive, '-C', $extract)
+          $root = Join-Path $extract $base
+          $expected = @('twitch-miner', 'LICENSE', 'README.md', 'config.example.json', 'BUILD-METADATA.txt')
+          if ($env:FAMILY -eq 'linux') {
+            $expected += @('deploy/systemd/twitch-miner.service', 'deploy/openrc/twitch-miner')
+          }
+          foreach ($name in $expected) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $name) -PathType Leaf)) {
+              throw "Release archive is missing $name."
+            }
+          }
+          $packaged = @(Get-ChildItem -LiteralPath $root -Recurse -File)
+          if ($packaged.Count -ne $expected.Count) {
+            throw "Release archive holds $($packaged.Count) files; expected $($expected.Count)."
+          }
+          if ((Get-FileHash -LiteralPath (Join-Path $root 'twitch-miner') -Algorithm SHA256).Hash -ne
+              (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash) {
+            throw 'Packaged executable bytes do not match the release build.'
+          }
+          "archive-root=$root" >> $env:GITHUB_OUTPUT
+
+      - name: Check the executable is static for its architecture
+        if: matrix.family == 'linux'
+        shell: pwsh
+        env:
+          ELF_MACHINE: ${{ matrix.elf_machine }}
+          ARCHIVE_ROOT: ${{ steps.package.outputs.archive-root }}
+        run: |
+          $exe = Join-Path $env:ARCHIVE_ROOT 'twitch-miner'
+          $header = (readelf -h $exe) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $header -notmatch "(?m)^\s*Machine:\s+$([regex]::Escape($env:ELF_MACHINE))\s*$") {
+            throw "Unexpected ELF machine for $env:TARGET (wanted $env:ELF_MACHINE): $header"
+          }
+          $segments = (readelf -lW $exe) -join "`n"
+          $dynamic = (readelf -dW $exe 2>&1) -join "`n"
+          if ($segments -match 'INTERP' -or $dynamic -match '\(NEEDED\)') {
+            throw 'The executable is dynamically linked; the musl build must be static.'
+          }
+
+      - name: Smoke test the packaged executable
+        if: matrix.smoke
+        shell: pwsh
+        env:
+          ARCHIVE_ROOT: ${{ steps.package.outputs.archive-root }}
+        run: |
+          $exe = Join-Path $env:ARCHIVE_ROOT 'twitch-miner'
+          $version = & $exe --version 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch [regex]::Escape($env:GITHUB_SHA)) {
+            throw "Version metadata smoke test failed: $($version -join ' ')"
+          }
+          $help = & $exe --help 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($help -join "`n") -notmatch '--check-config') {
+            throw 'Help smoke test failed.'
+          }
+          $data = Join-Path $env:RUNNER_TEMP 'TwitchMinerData'
+          New-Item -ItemType Directory -Path $data | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:ARCHIVE_ROOT 'config.example.json') -Destination (Join-Path $data 'config.json')
+          $check = & $exe --data-dir $data --check-config --json 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($check -join "`n") -notmatch '"valid"\s*:\s*true') {
+            throw "Example configuration smoke test failed: $($check -join ' ')"
+          }
+
+      - name: Upload the release archive
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/${{ steps.package.outputs.base }}.tar.gz
+            dist/${{ steps.package.outputs.base }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Require every archive and its checksum
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test "$(ls -1 ./*.tar.gz | wc -l)" -eq 5
+          sha256sum --check --strict ./*.sha256
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+  result:
+    if: always()
+    needs:
+      - validate-service-files
+      - build
+      - attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        shell: pwsh
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          $needs = $env:NEEDS | ConvertFrom-Json
+          $failed = @()
+          foreach ($job in $needs.PSObject.Properties) {
+            $outcome = $job.Value.result
+            $skippedOnPullRequest = $job.Name -eq 'attest' -and $outcome -eq 'skipped' -and
+              $env:GITHUB_EVENT_NAME -eq 'pull_request'
+            if ($outcome -ne 'success' -and -not $skippedOnPullRequest) {
+              $failed += "$($job.Name)=$outcome"
+            }
+          }
+          if ($failed.Count -ne 0) {
+            throw "Release binary jobs did not all succeed: $($failed -join ', ')"
+          }

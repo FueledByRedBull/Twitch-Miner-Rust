@@ -137,6 +137,57 @@ fn topic_batches_keep_priority_topics_within_ten_connections() {
 }
 
 #[test]
+fn discovered_channels_add_only_a_presence_topic_that_is_dropped_first() {
+    let configured = |index: usize| Streamer {
+        channel_id: format!("configured-{index}"),
+        settings: StreamerSettings {
+            community_goals: true,
+            ..StreamerSettings::default()
+        },
+        ..Streamer::default()
+    };
+    let discovered = |index: usize| Streamer {
+        channel_id: format!("found-{index}"),
+        discovered: true,
+        settings: StreamerSettings {
+            make_predictions: true,
+            follow_raid: true,
+            claim_moments: true,
+            community_goals: true,
+            claim_drops: true,
+            irc_mode: IrcMode::Online,
+            ..StreamerSettings::default()
+        }
+        .for_discovered(),
+        ..Streamer::default()
+    };
+
+    let channels = [configured(0), discovered(0), discovered(1)];
+    let topics = build_topics("user-1", &channels).unwrap();
+    assert_eq!(
+        topics,
+        [
+            "community-points-user-v1.user-1",
+            "community-points-channel-v1.configured-0",
+            "video-playback-by-id.configured-0",
+            "video-playback-by-id.found-0",
+            "video-playback-by-id.found-1",
+        ]
+    );
+
+    // At the limit the discovered channels, listed last, lose their topics
+    // before any configured channel's presence topic does.
+    let mut crowded = (0..PUBSUB_MAX_TOPICS / 2 - 1)
+        .map(configured)
+        .collect::<Vec<_>>();
+    crowded.extend((0..20).map(discovered));
+    let topics = build_topics("user-1", &crowded).unwrap();
+    assert_eq!(topics.len(), PUBSUB_MAX_TOPICS);
+    assert!(topics.contains(&String::from("video-playback-by-id.configured-0")));
+    assert!(!topics.iter().any(|topic| topic.contains("found-19")));
+}
+
+#[test]
 fn chunks_topics_at_fifty() {
     let topics: Vec<String> = (0..101).map(|value| format!("topic-{value}")).collect();
     let chunks = chunk_topics(&topics);

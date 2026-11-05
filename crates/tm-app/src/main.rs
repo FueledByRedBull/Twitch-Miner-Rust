@@ -9,8 +9,8 @@
 //! in `tm-twitch`, `tm-pubsub`, and `tm-irc`.
 //!
 //! The normal path in [`run_cli`] resolves paths and handles immediate
-//! health/status/config/support-bundle commands, then loads and validates the
-//! config, prepares the work directory, and initializes tracing. It creates the
+//! health/status/earnings/config/support-bundle/auth-status/decrypt-session commands,
+//! then loads and validates the config, prepares the work directory, and initializes tracing. It creates the
 //! session/client, bootstraps streamer context, presence, and streak cache,
 //! starts the `tm-runtime` state handle, spawns the background tasks, publishes ready
 //! health, and waits for a signal or task failure. `--canary`
@@ -25,9 +25,9 @@
 //!
 //! [`tasks::spawn_background_tasks`] registers and supervises `EventSub`, `PubSub`,
 //! presence fallback, context refresh, minute watching, drops,
-//! chat, streak-cache, and optional streak-recovery loops. [`shutdown`] watches
-//! signals and task liveness, broadcasts stop, joins with a grace period, then
-//! closes the runtime state handle and records the session summary.
+//! chat, streak-cache, earnings-alarm, config-reload, and optional streak-recovery loops.
+//! [`shutdown`] watches signals and task liveness, broadcasts stop, joins with a
+//! grace period, then closes the runtime state handle and records the session summary.
 //!
 //! For the next layer, read [`startup`] for state construction, [`tasks`] for
 //! task wiring, [`eventsub`] and [`pubsub`] for transport adapters,
@@ -40,21 +40,30 @@ use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
+use tm_auth::SessionKey;
 use tm_config::{resolve_app_paths_from_env, AppPaths, ConfigFile};
+use tm_net::NetworkPolicy;
 use tm_observability::{init_tracing, Event as DiscordEvent, TracingInitOptions};
-use tm_twitch::TwitchClient;
+use tm_twitch::{TwitchClient, TwitchEndpoints};
 
+mod alarms;
+mod auth_commands;
 mod bootstrap;
 mod canary;
+mod channel_yield;
 mod chat;
 mod context;
+mod discovery;
 mod drops;
+mod earnings;
 mod eventsub;
 mod identity_cache;
+mod ledger;
 mod minute_watcher;
 mod observability;
 mod prediction_journal;
 mod pubsub;
+mod reload;
 mod runtime_effects;
 mod session_watch;
 mod shutdown;
@@ -67,12 +76,15 @@ mod watching;
 
 use bootstrap::{
     build_http_client, has_override, import_session_token, load_config_with_fallback,
-    load_or_login_session, log_timezone_validation, prepare_work_dir, preview_config_with_fallback,
-    validate_app_config, validate_timezone_override, LoadedConfig, DEFAULT_USER_AGENT,
+    load_or_login_session, load_session_key, log_timezone_validation, prepare_work_dir,
+    preview_config_with_fallback, validate_app_config, validate_timezone_override, LoadedConfig,
+    DEFAULT_USER_AGENT,
 };
 use drops::claim_startup_drops_if_enabled;
 use identity_cache::IdentityCache;
-use observability::{build_observability, log_session_summary, log_startup};
+use observability::{
+    build_observability, device_login_delivery_warning, log_session_summary, log_startup,
+};
 use shutdown::{shutdown_background_tasks, wait_for_shutdown_or_task_failure};
 use startup::{
     bootstrap_runtime_state_with_identity_cache, build_canary_logger_settings,
@@ -95,7 +107,10 @@ const SHUTDOWN_TASK_GRACE_PERIOD: Duration = Duration::from_secs(5);
 // These booleans are the stable, mutually constrained flat CLI surface consumed
 // by health checks and deployment scripts, not independent runtime policy.
 #[allow(clippy::struct_excessive_bools)]
-#[command(version = build_info::VERSION)]
+#[command(
+    version = build_info::VERSION,
+    group(clap::ArgGroup::new("json_target").args(["check_config", "earnings", "auth_status"]))
+)]
 /// Unofficial Twitch channel-points miner.
 struct Cli {
     /// Configuration file [default: config.json in the data directory]
@@ -113,9 +128,18 @@ struct Cli {
     /// Print the running miner's sanitized status
     #[arg(long, conflicts_with = "check_config")]
     status: bool,
-    /// Print the configuration check as JSON (with --check-config)
-    #[arg(long, requires = "check_config")]
+    /// Print the configuration check, earnings report, or session state as JSON (with --check-config, --earnings or --auth-status)
+    #[arg(long, requires = "json_target")]
     json: bool,
+    /// Summarize recorded point rewards from the earnings ledger, without contacting Twitch
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary", "import_token"])]
+    earnings: bool,
+    /// Days of history for --earnings (default 7)
+    #[arg(long, value_name = "N", requires = "earnings", value_parser = clap::value_parser!(u32).range(1..=3650))]
+    days: Option<u32>,
+    /// How --earnings groups rewards (default day)
+    #[arg(long, value_enum, requires = "earnings")]
+    by: Option<earnings::EarningsGrouping>,
     /// Write a privacy-safe support file without cookies, configuration values, or logs
     #[arg(long, value_name = "PATH", conflicts_with_all = ["health", "status", "check_config", "canary"])]
     support_bundle: Option<PathBuf>,
@@ -125,6 +149,12 @@ struct Cli {
     /// Read a Twitch OAuth token from standard input, validate it, and save it as the session
     #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary"])]
     import_token: bool,
+    /// Check the saved session once with Twitch and print its state, without changing it
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary", "import_token", "earnings", "decrypt_session"])]
+    auth_status: bool,
+    /// Rewrite the encrypted session file and its backup as plaintext for a rollback; needs the session key file
+    #[arg(long, conflicts_with_all = ["health", "status", "check_config", "support_bundle", "canary", "import_token", "earnings", "auth_status"])]
+    decrypt_session: bool,
 }
 
 fn main() -> Result<()> {
@@ -142,16 +172,20 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 async fn run_cli(cli: Cli) -> Result<()> {
     let has_override = has_override(&cli);
     let requested_paths = resolve_app_paths_from_env(cli.config.clone(), cli.data_dir.clone())?;
-    if let Some(result) = run_immediate_command(&cli, &requested_paths) {
+    if let Some(result) = run_immediate_command(&cli, &requested_paths).await {
         return result;
     }
     let loaded_config = load_active_config(&cli, &requested_paths, has_override)?;
+    let network = loaded_config.config.proxy.network_policy()?;
+    let session_key = load_session_key(|message| tracing::warn!(operation = "auth", "{message}"))?;
     if cli.canary {
-        let http_client = build_http_client()?;
+        let http_client = build_http_client(&network)?;
         return canary::run_read_only_canary(
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
             http_client,
+            &network,
+            session_key.as_ref(),
         )
         .await;
     }
@@ -163,20 +197,39 @@ async fn run_cli(cli: Cli) -> Result<()> {
         return import_session_token(
             &loaded_config.config,
             &loaded_config.active_paths.work_dir,
-            &tm_auth::TwitchAuthClient::with_client(build_http_client()?),
+            &tm_auth::TwitchAuthClient::with_client(build_http_client(&network)?),
             &token,
+            session_key.as_ref(),
         )
         .await;
     }
-    run_prepared_miner(prepare_miner(loaded_config).await?, requested_paths).await
+    run_prepared_miner(
+        prepare_miner(loaded_config, session_key.as_ref(), &network).await?,
+        requested_paths,
+    )
+    .await
 }
 
-fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
+async fn run_immediate_command(cli: &Cli, paths: &AppPaths) -> Option<Result<()>> {
     if cli.health {
         return Some(status::check_health(&paths.work_dir));
     }
     if cli.status {
         return Some(status::print_status(&paths.work_dir));
+    }
+    if cli.earnings {
+        return Some(earnings::print_earnings(
+            &paths.work_dir,
+            cli.days.unwrap_or(7),
+            cli.by.unwrap_or(earnings::EarningsGrouping::Day),
+            cli.json,
+        ));
+    }
+    if cli.auth_status {
+        return Some(auth_commands::print_auth_status(paths, cli.json).await);
+    }
+    if cli.decrypt_session {
+        return Some(auth_commands::decrypt_session(paths));
     }
     if cli.check_config {
         return Some(check_config(&paths.config_path, cli.json));
@@ -274,12 +327,28 @@ struct PreparedMiner {
 }
 
 #[allow(clippy::too_many_lines)] // Keep the ordered startup and state-loading steps together.
-async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
+async fn prepare_miner(
+    loaded_config: LoadedConfig,
+    session_key: Option<&SessionKey>,
+    network: &NetworkPolicy,
+) -> Result<PreparedMiner> {
     let LoadedConfig {
         config,
         active_paths,
     } = loaded_config;
-    let observability = build_observability(&config)?;
+    let observability = build_observability(&config, network)?;
+    if let Some(warning) = device_login_delivery_warning(&config, &observability) {
+        tracing::warn!(operation = "auth", "{warning}");
+    }
+    let ignored = network
+        .ignored_env_proxies(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    if !ignored.is_empty() {
+        tracing::warn!(
+            operation = "run",
+            "{} ignored: connecting directly because the proxy setting is empty; set it to use a proxy",
+            ignored.join(", ")
+        );
+    }
     tracing::info!(
         operation = "run",
         "{} | {}",
@@ -295,9 +364,15 @@ async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
         observability.start_session_message(&session_id)
     );
     let started_at = time_now();
-    let http_client = build_http_client()?;
-    let session =
-        load_or_login_session(&config, &active_paths.work_dir, http_client.clone()).await?;
+    let http_client = build_http_client(network)?;
+    let session = load_or_login_session(
+        &config,
+        &active_paths.work_dir,
+        http_client.clone(),
+        session_key,
+        &observability,
+    )
+    .await?;
     let auth_token = session
         .auth_token()
         .ok_or_else(|| anyhow!("missing auth token after login"))?
@@ -306,11 +381,13 @@ async fn prepare_miner(loaded_config: LoadedConfig) -> Result<PreparedMiner> {
     let prediction_eventsub_authorized =
         session.has_any_scope(&["channel:read:predictions", "channel:manage:predictions"]);
     let twitch_cookie_header = session.cookie_header_for_host("twitch.tv");
-    let twitch = Arc::new(TwitchClient::with_client_and_cookie_header(
+    let twitch = Arc::new(TwitchClient::with_network(
         http_client,
         &auth_token,
         DEFAULT_USER_AGENT,
         twitch_cookie_header,
+        TwitchEndpoints::default(),
+        network,
     ));
     let mut streak_cache = if let Ok(cache) = StreakCache::load(&active_paths.work_dir, started_at)
     {
@@ -400,8 +477,18 @@ async fn run_prepared_miner(prepared: PreparedMiner, requested_paths: AppPaths) 
     let initial_streamers = runtime.state_snapshot().await?.streamers;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let health = status::HealthTracker::default();
+    health.set_network(twitch.network());
+    let (ledger, ledger_task) = ledger::LedgerHandle::start(
+        &active_paths.work_dir,
+        utilities::configured_timezone(&config),
+        stop_rx.clone(),
+        health.earnings(),
+    );
+    observability.track_task(ledger_task);
+    let observability = observability.with_ledger(ledger);
     let tasks = spawn_background_tasks(&BackgroundTaskParams {
         config: &config,
+        config_path: &active_paths.config_path,
         stop_rx,
         runtime: &runtime,
         twitch: &twitch,

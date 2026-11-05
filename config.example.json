@@ -28,6 +28,10 @@
   "followers_order": "DESC",
   "drop_account_link": "linked",
   "drop_discovery_games": [],
+  "streak_discovery_games": [],
+  "log_format": "text",
+  "notify_device_login": false,
+  "proxy": "",
   "timezone": null,
   "privacy": {
     "anonymize_logs": true

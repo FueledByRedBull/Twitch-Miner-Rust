@@ -113,8 +113,14 @@ account identifiers. The policy follows the IANA
 and [IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml)
 special-purpose registries; protocol-specific tunnel/anycast blocks are denied
 because the remote-endpoint contract admits only ordinary public CDN addresses.
-Requests to these Twitch-supplied URLs bypass system proxies so that redirect
-and DNS-address validation cannot be bypassed.
+Requests to these Twitch-supplied URLs never use environment proxies. With a
+configured `proxy` they go through it and the resolver above is not installed:
+its lookup would run on this host, leaking the name and vetting the proxy's own
+address, so the proxy resolves the name instead. Resolved-address validation
+therefore cannot apply through a proxy. Every check on the endpoint itself still
+does (HTTPS only, no credentials in the URL, no `localhost`, `.local` or private
+IP literal), and so does the ban on redirects. With no proxy this path is
+unchanged.
 
 `CLIENT_ID` is the browser identity required consistently by device auth, GQL,
 and EventSub; it cannot be discovered safely at runtime. `Client-Version` is
@@ -243,6 +249,51 @@ promotions bypass this wait. This is a bounded cadence heuristic, not a
 prediction of Twitch's next award. The 30-minute fairness ceiling still limits
 streak deferrals. This bounds voluntary switching; it does not guarantee that
 Twitch will credit every partial watch interval.
+
+**Channel scoring.** `watch_priority` still decides the order in which eligible
+channels enter the rotation queue, and the queue stays first-in, first-out. It
+is deliberately not part of the score below: it gives every channel its own
+position, so no two channels would ever tie and fair rotation would stop. At a
+fair rotation, after the outgoing channel moves to the back, the miner compares
+the channel FIFO would bring in with the channels waiting behind it, leaving out
+the one that just left. A waiting channel with a strictly higher score takes
+that place (the first of several equal best), and everyone else keeps their
+order. Scores compare, in this order: an uncollected watch streak
+(`should_prioritize_streak`), an earnable Drop campaign, the active points
+multiplier that `SUBSCRIBED` ranks by (in thousandths), and a yield tier.
+Equal scores, or no scores at all, rotate exactly as before. Every fourth fair
+rotation ignores the scores, so a low-scoring channel waits a bounded number of
+rotations. A channel that entered this way shows `score-jump` as its selection
+reason in `--status`; `campaign-priority`, `streak-promotion`,
+`watchdog-switch`, and `fair-rotation` keep their meaning. The campaign pin,
+streak promotion, the credit wait, and the 30-minute fairness ceiling are
+unchanged, and a pending credit wait still blocks the switch whatever the scores
+are.
+
+The yield tier comes from the earnings ledger: per channel, the sum of the last
+14 days of every reward other than `WATCH` and `CLAIM`, since those two arrive
+at a fixed rate whichever channels are watched. The top quartile of channels
+with a positive sum (rounded up, ties included) is tier 1; everything else,
+including every channel when there is no ledger, is tier 0. The tiers are read
+on a blocking thread at most once an hour; a failed read keeps the previous
+tiers and logs one warning. Expect a gain of a few percent at most: the
+variation comes from streaks, raids, and multipliers only.
+
+**Points limit.** A channel whose known balance has reached its `points_limit`
+override is handled like a channel with points disabled: `pick_streamers_to_watch`
+leaves it out of every points-based list, so only a verified Drop campaign can
+still give it a slot. An unknown balance never counts as reached.
+
+**Streak discovery.** `streak_discovery_games` lists live channels per game with
+the same `DirectoryPage_Game` persisted operation and hash as Drop discovery,
+sent with an empty `systemFilters` instead of `DROPS_ENABLED`; the response has
+the same shape and the same parser. This request has never been exercised
+against live Twitch. At most five channels per game and 20 in total are tracked,
+refreshed about every six hours by the `config-watch` task. A discovered channel
+is eligible for a watch slot only while `should_prioritize_streak` holds for it.
+It enters the queue after every configured channel and then takes plain
+first-in, first-out turns: it is never a streak promotion candidate, and it
+scores nothing, so it never jumps a configured channel.
 
 ## Offline streak recovery
 
@@ -387,6 +438,27 @@ scheduled. GQL remains the typed mutation/reconciliation path. Twitch currently
 supports `drop.entitlement.grant` only through webhooks or conduits, not
 WebSockets.
 
+### Network policy
+
+The `proxy` setting is the only input: `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY` are never read. Without it every connection goes out directly. With
+it, `tm-net` carries every connection and none falls back to a direct one:
+
+| Connection | Through a proxy |
+| --- | --- |
+| GQL, auth, Helix, Discord, webhook, playback and other HTTP | The HTTP client sends everything to the proxy (`socks5h://` or `CONNECT`). |
+| PubSub, Hermes, EventSub WebSockets | A tunnel to the host and port, then TLS and the WebSocket upgrade over it. The frame limits are unchanged. |
+| IRC | A tunnel to `irc.chat.twitch.tv:6697`, then the same verified TLS. |
+
+A SOCKS5 proxy receives each destination as a host name (address type 3), and an
+HTTP proxy as `CONNECT host:port`; names are never resolved on this host. A
+proxy handshake that stalls for 15 seconds, is refused, fails authentication,
+answers with a non-2xx status, or sends a malformed or oversized (over 8 KiB)
+response fails the connection with its failure class and no credentials. The
+proxy's own host name is resolved locally. A source scan in the `tm-net` tests
+fails if any other crate opens a socket, builds an HTTP client, or resolves a
+name itself.
+
 ### EventSub
 
 The preferred EventSub WebSocket path handles stream presence and observes
@@ -489,8 +561,9 @@ event.
 
 ### IRC
 
-Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` through
-Rustls with WebPKI roots; the OAuth token is never sent over plaintext IRC.
+Optional IRC chat presence connects only to `irc.chat.twitch.tv:6697` (through
+the configured proxy when there is one) and then through Rustls with WebPKI
+roots; the OAuth token is never sent over plaintext IRC.
 A session that ends within a minute, such as a rejected login, backs off
 exponentially from five seconds to five minutes. The rejection notice does not
 count as activity, so repeated rejections reach the task health threshold.

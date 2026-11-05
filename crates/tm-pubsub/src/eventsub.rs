@@ -9,9 +9,10 @@ use thiserror::Error;
 use time::format_description::well_known::Rfc2822;
 use time::OffsetDateTime;
 use tm_domain::{MinerEvent, Streamer};
+use tm_net::NetworkPolicy;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::client::bounded_frames;
 
@@ -74,13 +75,19 @@ pub struct EventSubClientSettings {
     pub allow_prediction_scope_fallback: bool,
     pub authorized_prediction_broadcaster_id: Option<String>,
     pub verify_subscriptions: bool,
+    /// Must be built from `network` so the HTTP and WebSocket sides agree.
     pub http_client: reqwest::Client,
+    pub network: NetworkPolicy,
 }
 
 impl EventSubClientSettings {
-    #[must_use]
-    pub fn new(client_id: impl Into<String>, auth_token: impl Into<String>) -> Self {
-        Self {
+    /// Production endpoints, reached the way `network` says.
+    pub fn with_network(
+        client_id: impl Into<String>,
+        auth_token: impl Into<String>,
+        network: &NetworkPolicy,
+    ) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             client_id: client_id.into(),
             auth_token: auth_token.into(),
             websocket_url: EVENTSUB_WEBSOCKET_URL.to_string(),
@@ -88,8 +95,9 @@ impl EventSubClientSettings {
             allow_prediction_scope_fallback: true,
             authorized_prediction_broadcaster_id: None,
             verify_subscriptions: false,
-            http_client: reqwest::Client::new(),
-        }
+            http_client: network.http_client_builder().build()?,
+            network: network.clone(),
+        })
     }
 }
 
@@ -401,7 +409,9 @@ impl EventSubClient {
         let setup = async {
             let (mut socket, _) = tokio::time::timeout(
                 deadlines.connect,
-                connect_async_with_config(websocket_url, Some(bounded_frames()), false),
+                self.settings
+                    .network
+                    .connect_websocket(websocket_url, bounded_frames()),
             )
             .await
             .map_err(|_| EventSubError::Timeout(EventSubTimeoutStage::WebSocketConnect))??;

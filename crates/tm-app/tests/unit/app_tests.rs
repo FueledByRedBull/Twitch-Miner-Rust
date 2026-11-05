@@ -31,7 +31,7 @@ mod tests {
         available_watch_logins, build_minute_watched_event, handle_minute_watched_info_error,
         record_watch_attempt, refresh_watch_selection_metadata, released_watch_channel_ids,
         resolve_spade_url, send_minute_watched_for_streamer, send_minute_watched_with_spade_cache,
-        watch_metadata_defect, WatchAttemptOutcome, WatchFailureState,
+        watch_metadata_defect, watch_progress_resets, WatchAttemptOutcome, WatchFailureState,
     };
     use crate::observability::{
         format_resume_gap, streamer_game_name, AppObservability, AppObservabilitySettings,
@@ -355,6 +355,50 @@ mod tests {
         };
 
         assert!(!build_canary_logger_settings(&config).save);
+    }
+
+    #[test]
+    fn earnings_cli_takes_window_grouping_and_json_but_only_alone() {
+        let defaults = Cli::try_parse_from(["tm-app", "--earnings"]).unwrap();
+        assert!(defaults.earnings && !defaults.json);
+        assert_eq!((defaults.days, defaults.by), (None, None));
+
+        let full = Cli::try_parse_from([
+            "tm-app",
+            "--earnings",
+            "--days",
+            "30",
+            "--by",
+            "channel",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(full.days, Some(30));
+        assert_eq!(full.by, Some(crate::earnings::EarningsGrouping::Channel));
+        assert!(full.json);
+
+        for rejected in [
+            vec!["--days", "3"],
+            vec!["--by", "day"],
+            vec!["--earnings", "--days", "0"],
+            vec!["--earnings", "--by", "week"],
+            vec!["--earnings", "--status"],
+            vec!["--earnings", "--check-config"],
+            vec!["--earnings", "--health"],
+            vec!["--earnings", "--canary"],
+        ] {
+            let args = std::iter::once("tm-app").chain(rejected.iter().copied());
+            assert!(Cli::try_parse_from(args).is_err(), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn json_log_format_reaches_the_logger_settings() {
+        let mut config = ConfigFile::default();
+        assert!(!crate::startup::build_logger_settings(&config).json);
+        config.log_format = tm_config::LogFormat::Json;
+        assert!(crate::startup::build_logger_settings(&config).json);
+        assert!(build_canary_logger_settings(&config).json);
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -817,6 +861,11 @@ mod tests {
             support_bundle: None,
             canary: false,
             import_token: false,
+            earnings: false,
+            days: None,
+            by: None,
+            auth_status: false,
+            decrypt_session: false,
         };
         assert!(!has_override(&cli));
 
@@ -830,6 +879,11 @@ mod tests {
             support_bundle: None,
             canary: false,
             import_token: false,
+            earnings: false,
+            days: None,
+            by: None,
+            auth_status: false,
+            decrypt_session: false,
         };
         assert!(has_override(&cli));
     }
@@ -1039,7 +1093,9 @@ mod tests {
             },
             ..ConfigFile::default()
         };
-        let visible = crate::observability::build_observability(&config).unwrap();
+        let visible =
+            crate::observability::build_observability(&config, &tm_net::NetworkPolicy::direct())
+                .unwrap();
         let private = AppObservability::new(
             None,
             DiscordClient::new(std::time::Duration::from_secs(1)).unwrap(),
@@ -1729,13 +1785,19 @@ mod tests {
             ..ConfigFile::default()
         };
 
-        let session = load_or_login_session_with_auth_client(&config, &temp_dir, &auth_client)
-            .await
-            .unwrap();
+        let session = load_or_login_session_with_auth_client(
+            &config,
+            &temp_dir,
+            &auth_client,
+            None,
+            &test_observability(),
+        )
+        .await
+        .unwrap();
         assert_eq!(session.auth_token(), Some("token-123"));
         assert_eq!(session.user_id(), Some("user-123"));
         assert!(session.has_scope("channel:read:predictions"));
-        let reloaded = AuthSession::load_from_dir(&temp_dir, "tester").unwrap();
+        let reloaded = AuthSession::load_from_dir(&temp_dir, "tester", None).unwrap();
         assert_eq!(reloaded.auth_token(), session.auth_token());
         assert_eq!(reloaded.user_id(), session.user_id());
         assert_eq!(
@@ -1795,7 +1857,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = AuthSession::new("tester", CookieStore::new());
         stored.set_auth_token("saved-token");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
 
         let responses = vec![
             Vec::new(),
@@ -1823,6 +1885,8 @@ mod tests {
             &auth_client,
             Duration::ZERO,
             Duration::ZERO,
+            None,
+            &test_observability(),
         )
         .await
         .unwrap();
@@ -1852,24 +1916,30 @@ mod tests {
         };
 
         assert!(
-            import_session_token(&config, directory.path(), &auth_client, "rejected\n")
+            import_session_token(&config, directory.path(), &auth_client, "rejected\n", None)
                 .await
                 .is_err()
         );
-        assert!(AuthSession::load_from_dir(directory.path(), "tester").is_err());
+        assert!(AuthSession::load_from_dir(directory.path(), "tester", None).is_err());
         assert!(
-            import_session_token(&config, directory.path(), &auth_client, "")
+            import_session_token(&config, directory.path(), &auth_client, "", None)
                 .await
                 .is_err()
         );
 
-        import_session_token(&config, directory.path(), &auth_client, "oauth:abc123\n")
-            .await
-            .unwrap();
+        import_session_token(
+            &config,
+            directory.path(),
+            &auth_client,
+            "oauth:abc123\n",
+            None,
+        )
+        .await
+        .unwrap();
         server.join().unwrap();
 
         assert!(requests.lock().unwrap()[1].contains("OAuth abc123"));
-        let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
+        let saved = AuthSession::load_from_dir(directory.path(), "tester", None).unwrap();
         assert_eq!(saved.auth_token(), Some("abc123"));
         assert_eq!(saved.user_id(), Some("user-456"));
     }
@@ -1880,7 +1950,7 @@ mod tests {
         let mut stored = AuthSession::new("tester", CookieStore::new());
         stored.set_auth_token("expired-token");
         stored.set_refresh_token("old-refresh");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
 
         let responses = vec![
             http_response("401 Unauthorized", r#"{"status":401}"#),
@@ -1912,6 +1982,8 @@ mod tests {
             &auth_client,
             Duration::ZERO,
             Duration::ZERO,
+            None,
+            &test_observability(),
         )
         .await
         .unwrap();
@@ -1922,7 +1994,7 @@ mod tests {
         let header = session.cookie_header_for_host("www.twitch.tv").unwrap();
         assert!(!header.contains("refresh"));
         assert!(requests.lock().unwrap()[1].contains("grant_type=refresh_token"));
-        let saved = AuthSession::load_from_dir(directory.path(), "tester").unwrap();
+        let saved = AuthSession::load_from_dir(directory.path(), "tester", None).unwrap();
         assert_eq!(saved.auth_token(), Some("fresh-token"));
         assert_eq!(saved.refresh_token(), Some("new-refresh"));
     }
@@ -1932,7 +2004,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = AuthSession::new("tester", CookieStore::new());
         stored.set_auth_token("expired-token");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
 
         let responses = vec![
             http_response("401 Unauthorized", r#"{"status":401}"#),
@@ -1970,6 +2042,8 @@ mod tests {
             &auth_client,
             Duration::ZERO,
             Duration::ZERO,
+            None,
+            &test_observability(),
         )
         .await
         .unwrap();
@@ -1985,7 +2059,7 @@ mod tests {
     async fn saved_session_without_auth_token_falls_back_to_device_login() {
         let directory = tempfile::tempdir().unwrap();
         AuthSession::new("tester", CookieStore::new())
-            .save_to_dir(directory.path())
+            .save_to_dir(directory.path(), None)
             .unwrap();
 
         let (auth_endpoints, auth_server) = spawn_auth_server();
@@ -2001,10 +2075,15 @@ mod tests {
             ..ConfigFile::default()
         };
 
-        let session =
-            load_or_login_session_with_auth_client(&config, directory.path(), &auth_client)
-                .await
-                .unwrap();
+        let session = load_or_login_session_with_auth_client(
+            &config,
+            directory.path(),
+            &auth_client,
+            None,
+            &test_observability(),
+        )
+        .await
+        .unwrap();
 
         auth_server.join().unwrap();
         assert_eq!(session.auth_token(), Some("token-123"));
@@ -2031,10 +2110,15 @@ mod tests {
             ..ConfigFile::default()
         };
 
-        let session =
-            load_or_login_session_with_auth_client(&config, directory.path(), &auth_client)
-                .await
-                .unwrap();
+        let session = load_or_login_session_with_auth_client(
+            &config,
+            directory.path(),
+            &auth_client,
+            None,
+            &test_observability(),
+        )
+        .await
+        .unwrap();
 
         auth_server.join().unwrap();
         assert_eq!(session.auth_token(), Some("token-123"));
@@ -2066,6 +2150,8 @@ mod tests {
             &auth_client,
             Duration::ZERO,
             Duration::ZERO,
+            None,
+            &test_observability(),
         )
         .await
         .unwrap_err();
@@ -2479,6 +2565,7 @@ mod tests {
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
             pending_prediction_winners: std::collections::HashMap::new(),
+            retired_streamers: Vec::new(),
         };
         let runtime = tm_runtime::spawn_runtime_state(state);
         let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
@@ -2553,6 +2640,7 @@ mod tests {
             processed_prediction_ids: std::collections::VecDeque::new(),
             completed_predictions: std::collections::VecDeque::new(),
             pending_prediction_winners: std::collections::HashMap::new(),
+            retired_streamers: Vec::new(),
         };
         let runtime = tm_runtime::spawn_runtime_state(state);
         let streamer = runtime.state_snapshot().await.unwrap().streamers[0].clone();
@@ -3449,6 +3537,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_discovered_channel_keeps_its_streak_budget_spent_when_released() {
+        let streamer = |channel_id: &str, discovered| Streamer {
+            channel_id: channel_id.to_string(),
+            discovered,
+            ..Streamer::default()
+        };
+        let streamers = [streamer("found", true), streamer("configured", false)];
+
+        assert_eq!(
+            watch_progress_resets(
+                vec![
+                    String::from("found"),
+                    String::from("configured"),
+                    String::from("removed"),
+                ],
+                &streamers,
+            ),
+            vec![String::from("configured"), String::from("removed")]
+        );
+    }
+
     #[tokio::test]
     async fn minute_watcher_recovers_channel_rename_by_stable_id() {
         let (endpoints, requests, twitch_server) = spawn_json_response_server(vec![
@@ -3549,9 +3659,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = AuthSession::new("tester", CookieStore::new());
         stored.set_auth_token("backup-token");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
         stored.set_auth_token("newer-token");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
         let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
         fs::write(&primary, b"{not-json").unwrap();
 
@@ -3573,6 +3683,8 @@ mod tests {
             &auth_client,
             Duration::ZERO,
             Duration::ZERO,
+            None,
+            &test_observability(),
         )
         .await
         .unwrap();
@@ -3581,7 +3693,7 @@ mod tests {
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(session.auth_token(), Some("backup-token"));
         assert_eq!(
-            AuthSession::load_from_dir(directory.path(), "tester")
+            AuthSession::load_from_dir(directory.path(), "tester", None)
                 .unwrap()
                 .auth_token(),
             Some("backup-token")
@@ -3593,9 +3705,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = AuthSession::new("tester", CookieStore::new());
         stored.set_auth_token("expired-backup-token");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
         stored.set_auth_token("newer-token");
-        stored.save_to_dir(directory.path()).unwrap();
+        stored.save_to_dir(directory.path(), None).unwrap();
         let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
         fs::write(primary, b"{not-json").unwrap();
 
@@ -3625,6 +3737,8 @@ mod tests {
             &auth_client,
             Duration::ZERO,
             Duration::ZERO,
+            None,
+            &test_observability(),
         )
         .await
         .unwrap();
@@ -4175,5 +4289,765 @@ mod tests {
         let snapshot = runtime.state_snapshot().await.unwrap();
         assert!(snapshot.predictions.contains_key("above-minimum"));
         assert!(!snapshot.predictions.contains_key("equal-minimum"));
+    }
+
+    const SESSION_KEY_HEX: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const OTHER_SESSION_KEY_HEX: &str =
+        "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+    const DEVICE_LOGIN_URL: &str = "https://www.twitch.tv/activate";
+
+    fn session_key(hex: &str) -> tm_auth::SessionKey {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.key");
+        fs::write(&path, hex).unwrap();
+        tm_auth::SessionKey::from_file(&path).unwrap()
+    }
+
+    fn contains_text(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+
+    fn tester_config(notify_device_login: bool) -> ConfigFile {
+        ConfigFile {
+            username: String::from("tester"),
+            notify_device_login,
+            ..ConfigFile::default()
+        }
+    }
+
+    fn auth_client_for(endpoints: AuthEndpoints) -> TwitchAuthClient {
+        TwitchAuthClient::with_client_and_endpoints(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            endpoints,
+        )
+    }
+
+    /// A local notifier endpoint that records every request it receives.
+    struct WebhookSink {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        thread: thread::JoinHandle<()>,
+    }
+
+    impl WebhookSink {
+        fn spawn() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}/hook", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = {
+                let requests = Arc::clone(&requests);
+                let stop = Arc::clone(&stop);
+                thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        if let Ok((mut stream, _)) = listener.accept() {
+                            stream.set_nonblocking(false).unwrap();
+                            let request = read_http_request(&mut stream);
+                            requests.lock().unwrap().push(request);
+                            stream
+                                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                                .unwrap();
+                        } else {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                })
+            };
+            Self {
+                url,
+                requests,
+                stop,
+                thread,
+            }
+        }
+
+        fn observability(&self, anonymize_logs: bool) -> AppObservability {
+            observability_with_webhook(&self.url, anonymize_logs)
+        }
+
+        fn finish(self) -> Vec<String> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.thread.join().unwrap();
+            let requests = self.requests.lock().unwrap().clone();
+            requests
+        }
+    }
+
+    fn observability_with_webhook(url: &str, anonymize_logs: bool) -> AppObservability {
+        AppObservability::new(
+            None,
+            DiscordClient::new(Duration::from_secs(2)).unwrap(),
+            AppObservabilitySettings {
+                anonymize_logs,
+                ..AppObservabilitySettings::default()
+            },
+        )
+        .with_webhook(Some(tm_observability::DiscordWebhook {
+            webhook_api: url.to_string(),
+            events: Vec::new(),
+        }))
+    }
+
+    fn request_body(request: &str) -> serde_json::Value {
+        serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    fn expired_session(directory: &Path, key: Option<&tm_auth::SessionKey>) {
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("expired-token");
+        stored.save_to_dir(directory, key).unwrap();
+    }
+
+    fn device_login_responses(validation: &str) -> Vec<Vec<u8>> {
+        vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"device_code":"private-device-code-xyz","user_code":"WXYZ-1234","interval":0,"expires_in":900}"#,
+            ),
+            http_response("200 OK", r#"{"access_token":"fresh-token"}"#),
+            http_response("200 OK", validation),
+        ]
+    }
+
+    async fn login_with(
+        directory: &Path,
+        endpoints: AuthEndpoints,
+        config: &ConfigFile,
+        key: Option<&tm_auth::SessionKey>,
+        observability: &AppObservability,
+    ) -> anyhow::Result<AuthSession> {
+        load_or_login_session_with_auth_client_and_retry(
+            config,
+            directory,
+            &auth_client_for(endpoints),
+            Duration::ZERO,
+            Duration::ZERO,
+            key,
+            observability,
+        )
+        .await
+    }
+
+    #[test]
+    fn device_login_message_holds_only_the_url_the_code_and_the_expiry() {
+        for anonymize_logs in [false, true] {
+            let observability = AppObservability::new(
+                None,
+                DiscordClient::new(Duration::from_secs(1)).unwrap(),
+                AppObservabilitySettings {
+                    anonymize_logs,
+                    ..AppObservabilitySettings::default()
+                },
+            );
+            assert_eq!(
+                observability.device_login_message(
+                    DEVICE_LOGIN_URL,
+                    "WXYZ-1234",
+                    Duration::from_secs(900)
+                ),
+                "Twitch device login needed: open https://www.twitch.tv/activate and enter code WXYZ-1234. The code expires in 15 minutes."
+            );
+        }
+        let emoji = AppObservability::new(
+            None,
+            DiscordClient::new(Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings {
+                emoji: true,
+                ..AppObservabilitySettings::default()
+            },
+        );
+        assert!(emoji
+            .device_login_message(DEVICE_LOGIN_URL, "WXYZ-1234", Duration::from_secs(60))
+            .starts_with("🔑 Twitch device login needed"));
+    }
+
+    #[tokio::test]
+    async fn device_login_is_sent_to_the_notifier_only_when_enabled() {
+        for (notify, anonymize_logs) in [(false, false), (true, false), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            expired_session(directory.path(), None);
+            let sink = WebhookSink::spawn();
+            let observability = sink.observability(anonymize_logs);
+            let (endpoints, _, server) = spawn_auth_validation_server(device_login_responses(
+                r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+            ));
+
+            let session = login_with(
+                directory.path(),
+                endpoints,
+                &tester_config(notify),
+                None,
+                &observability,
+            )
+            .await
+            .unwrap();
+            observability.shutdown_pending_tasks().await;
+            server.join().unwrap();
+            let requests = sink.finish();
+
+            assert_eq!(session.auth_token(), Some("fresh-token"));
+            if !notify {
+                assert!(requests.is_empty(), "{requests:?}");
+                continue;
+            }
+            assert_eq!(requests.len(), 1, "{requests:?}");
+            let body = request_body(&requests[0]);
+            assert_eq!(body["event"], "DEVICE_LOGIN");
+            assert_eq!(
+                body["message"],
+                "Twitch device login needed: open https://www.twitch.tv/activate and enter code WXYZ-1234. The code expires in 15 minutes."
+            );
+            for private in [
+                "private-device-code-xyz",
+                "tester",
+                "expired-token",
+                "fresh-token",
+                "user-456",
+            ] {
+                assert!(!requests[0].contains(private), "{private}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_notifier_that_never_answers_does_not_delay_the_login() {
+        let directory = tempfile::tempdir().unwrap();
+        expired_session(directory.path(), None);
+        // Accepts the connection and then says nothing until the test ends.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let attempted = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let silent = {
+            let attempted = Arc::clone(&attempted);
+            let release = Arc::clone(&release);
+            thread::spawn(move || {
+                let (_stream, _) = listener.accept().unwrap();
+                attempted.store(true, Ordering::SeqCst);
+                while !release.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        let observability = AppObservability::new(
+            None,
+            DiscordClient::new(Duration::from_secs(60)).unwrap(),
+            AppObservabilitySettings::default(),
+        )
+        .with_webhook(Some(tm_observability::DiscordWebhook {
+            webhook_api: url,
+            events: Vec::new(),
+        }));
+        let (endpoints, _, server) = spawn_auth_validation_server(device_login_responses(
+            r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+        ));
+
+        let started = StdInstant::now();
+        let session = login_with(
+            directory.path(),
+            endpoints,
+            &tester_config(true),
+            None,
+            &observability,
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+        server.join().unwrap();
+        // The send was started in the background, and the login did not wait for it.
+        for _ in 0..400 {
+            if attempted.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(attempted.load(Ordering::SeqCst));
+        release.store(true, Ordering::SeqCst);
+        silent.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_notification_does_not_stop_the_login() {
+        let directory = tempfile::tempdir().unwrap();
+        expired_session(directory.path(), None);
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/hook", closed.local_addr().unwrap());
+        drop(closed);
+        let observability = observability_with_webhook(&url, false);
+        let (endpoints, _, server) = spawn_auth_validation_server(device_login_responses(
+            r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+        ));
+
+        let session = login_with(
+            directory.path(),
+            endpoints,
+            &tester_config(true),
+            None,
+            &observability,
+        )
+        .await
+        .unwrap();
+        observability.shutdown_pending_tasks().await;
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+        let saved = AuthSession::load_from_dir(directory.path(), "tester", None).unwrap();
+        assert_eq!(saved.auth_token(), Some("fresh-token"));
+    }
+
+    #[tokio::test]
+    async fn a_successful_refresh_sends_no_device_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("expired-token");
+        stored.set_refresh_token("old-refresh");
+        stored.save_to_dir(directory.path(), None).unwrap();
+        let sink = WebhookSink::spawn();
+        let observability = sink.observability(false);
+        let (endpoints, requests, server) = spawn_auth_validation_server(vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"access_token":"fresh-token","refresh_token":"new-refresh"}"#,
+            ),
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","scopes":[]}"#,
+            ),
+        ]);
+
+        let session = login_with(
+            directory.path(),
+            endpoints,
+            &tester_config(true),
+            None,
+            &observability,
+        )
+        .await
+        .unwrap();
+        observability.shutdown_pending_tasks().await;
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("fresh-token"));
+        assert!(requests.lock().unwrap()[1].contains("grant_type=refresh_token"));
+        assert!(sink.finish().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_device_login_for_another_account_never_replaces_the_saved_session() {
+        for key in [None, Some(session_key(SESSION_KEY_HEX))] {
+            let directory = tempfile::tempdir().unwrap();
+            expired_session(directory.path(), key.as_ref());
+            let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+            let before = fs::read(&primary).unwrap();
+            let sink = WebhookSink::spawn();
+            let observability = sink.observability(false);
+            let (endpoints, _, server) = spawn_auth_validation_server(device_login_responses(
+                r#"{"login":"someone_else","user_id":"user-999","scopes":[]}"#,
+            ));
+
+            let error = login_with(
+                directory.path(),
+                endpoints,
+                &tester_config(true),
+                key.as_ref(),
+                &observability,
+            )
+            .await
+            .unwrap_err();
+            observability.shutdown_pending_tasks().await;
+
+            server.join().unwrap();
+            let text = format!("{error:#}");
+            assert!(
+                text.contains(
+                    "validated token belongs to Twitch login 'someone_else', expected 'tester'"
+                ),
+                "{text}"
+            );
+            assert!(text.contains("the saved session was not changed"), "{text}");
+            assert!(!text.contains("fresh-token"), "{text}");
+            assert_eq!(fs::read(&primary).unwrap(), before);
+            assert!(!primary.with_extension("json.bak").exists());
+            sink.finish();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_device_code_notifies_once_and_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        expired_session(directory.path(), None);
+        let sink = WebhookSink::spawn();
+        let observability = sink.observability(false);
+        let (endpoints, requests, server) = spawn_auth_validation_server(vec![
+            http_response("401 Unauthorized", r#"{"status":401}"#),
+            http_response(
+                "200 OK",
+                r#"{"device_code":"private-device-code-xyz","user_code":"WXYZ-1234","interval":0,"expires_in":0}"#,
+            ),
+        ]);
+
+        let error = login_with(
+            directory.path(),
+            endpoints,
+            &tester_config(true),
+            None,
+            &observability,
+        )
+        .await
+        .unwrap_err();
+        observability.shutdown_pending_tasks().await;
+
+        server.join().unwrap();
+        assert!(error
+            .to_string()
+            .contains("device code expired before authorization"));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert_eq!(sink.finish().len(), 1);
+    }
+
+    #[test]
+    fn startup_warns_only_when_no_notifier_would_deliver_device_login() {
+        use crate::observability::device_login_delivery_warning;
+
+        let webhook = |events: &[tm_observability::Event]| {
+            test_observability().with_webhook(Some(tm_observability::DiscordWebhook {
+                webhook_api: String::from("http://127.0.0.1:9/hook"),
+                events: events.to_vec(),
+            }))
+        };
+        let enabled = tester_config(true);
+        let disabled = tester_config(false);
+
+        assert!(
+            device_login_delivery_warning(&enabled, &test_observability())
+                .unwrap()
+                .contains("DEVICE_LOGIN")
+        );
+        assert!(device_login_delivery_warning(&disabled, &test_observability()).is_none());
+        assert!(device_login_delivery_warning(&disabled, &webhook(&[])).is_none());
+        assert!(device_login_delivery_warning(&enabled, &webhook(&[])).is_none());
+        assert!(device_login_delivery_warning(
+            &enabled,
+            &webhook(&[tm_observability::Event::DeviceLogin])
+        )
+        .is_none());
+        assert!(device_login_delivery_warning(
+            &enabled,
+            &webhook(&[tm_observability::Event::Startup])
+        )
+        .is_some());
+
+        // Each target filters on its own: Discord alone can deliver it.
+        let discord = AppObservability::new(
+            Some(tm_observability::DiscordWebhook {
+                webhook_api: String::from("https://discord.com/api/webhooks/1/token"),
+                events: vec![tm_observability::Event::DeviceLogin],
+            }),
+            DiscordClient::new(Duration::from_secs(1)).unwrap(),
+            AppObservabilitySettings::default(),
+        );
+        assert!(device_login_delivery_warning(&enabled, &discord).is_none());
+        let discord = discord.with_webhook(Some(tm_observability::DiscordWebhook {
+            webhook_api: String::from("http://127.0.0.1:9/hook"),
+            events: vec![tm_observability::Event::Startup],
+        }));
+        assert!(device_login_delivery_warning(&enabled, &discord).is_none());
+    }
+
+    #[test]
+    fn auth_commands_are_immediate_and_exclusive() {
+        let status = Cli::try_parse_from(["tm-app", "--auth-status", "--json"]).unwrap();
+        assert!(status.auth_status && status.json);
+        assert!(Cli::try_parse_from(["tm-app", "--auth-status"]).is_ok());
+        let decrypt = Cli::try_parse_from(["tm-app", "--decrypt-session"]).unwrap();
+        assert!(decrypt.decrypt_session && !decrypt.json);
+
+        for rejected in [
+            vec!["--decrypt-session", "--json"],
+            vec!["--auth-status", "--decrypt-session"],
+            vec!["--auth-status", "--status"],
+            vec!["--auth-status", "--check-config"],
+            vec!["--auth-status", "--earnings"],
+            vec!["--auth-status", "--canary"],
+            vec!["--auth-status", "--import-token"],
+            vec!["--decrypt-session", "--health"],
+            vec!["--decrypt-session", "--import-token"],
+        ] {
+            let args = std::iter::once("tm-app").chain(rejected.iter().copied());
+            assert!(Cli::try_parse_from(args).is_err(), "{rejected:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_session_is_encrypted_by_the_first_start_with_a_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = session_key(SESSION_KEY_HEX);
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("plaintext-marker-one");
+        stored.save_to_dir(directory.path(), None).unwrap();
+        stored.set_auth_token("plaintext-marker-two");
+        stored.save_to_dir(directory.path(), None).unwrap();
+        let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+        let backup = primary.with_extension("json.bak");
+        let (endpoints, _, server) = spawn_auth_validation_server(vec![http_response(
+            "200 OK",
+            r#"{"login":"tester","user_id":"user-1","scopes":[]}"#,
+        )]);
+
+        let session = login_with(
+            directory.path(),
+            endpoints,
+            &tester_config(false),
+            Some(&key),
+            &test_observability(),
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("plaintext-marker-two"));
+        for path in [&primary, &backup] {
+            let bytes = fs::read(path).unwrap();
+            assert!(tm_auth::is_encrypted_session(&bytes), "{}", path.display());
+            assert!(!contains_text(&bytes, "plaintext-marker"));
+        }
+        let reloaded = AuthSession::load_from_dir(directory.path(), "tester", Some(&key)).unwrap();
+        assert_eq!(reloaded.auth_token(), Some("plaintext-marker-two"));
+        assert!(matches!(
+            AuthSession::load_from_dir(directory.path(), "tester", None),
+            Err(tm_auth::AuthSessionError::EncryptedWithoutKey)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_session_starts_with_the_right_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = session_key(SESSION_KEY_HEX);
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("encrypted-token");
+        stored.save_to_dir(directory.path(), Some(&key)).unwrap();
+        let (endpoints, requests, server) = spawn_auth_validation_server(vec![http_response(
+            "200 OK",
+            r#"{"login":"tester","user_id":"user-1","scopes":[]}"#,
+        )]);
+
+        let session = login_with(
+            directory.path(),
+            endpoints,
+            &tester_config(false),
+            Some(&key),
+            &test_observability(),
+        )
+        .await
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(session.auth_token(), Some("encrypted-token"));
+        assert!(requests.lock().unwrap()[0].contains("OAuth encrypted-token"));
+        let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+        assert!(tm_auth::is_encrypted_session(&fs::read(primary).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_encrypted_session_stops_the_start_without_login_or_overwrite() {
+        let right = session_key(SESSION_KEY_HEX);
+        let wrong = session_key(OTHER_SESSION_KEY_HEX);
+        // (key supplied, whether to modify the file first, text the error must carry)
+        for (supplied, modify, expected) in [
+            (Some(&wrong), false, "could not be decrypted"),
+            (None, false, "TCPM_COOKIE_KEY_FILE"),
+            (Some(&right), true, "could not be decrypted"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut stored = AuthSession::new("tester", CookieStore::new());
+            stored.set_auth_token("encrypted-token");
+            stored.save_to_dir(directory.path(), Some(&right)).unwrap();
+            stored.set_auth_token("newer-token");
+            stored.save_to_dir(directory.path(), Some(&right)).unwrap();
+            let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+            let backup = primary.with_extension("json.bak");
+            if modify {
+                let mut bytes = fs::read(&primary).unwrap();
+                let last = bytes.len() - 1;
+                bytes[last] ^= 0x01;
+                fs::write(&primary, bytes).unwrap();
+            }
+            let primary_before = fs::read(&primary).unwrap();
+            let backup_before = fs::read(&backup).unwrap();
+            let (endpoints, requests, server) = spawn_auth_validation_server(Vec::new());
+
+            let error = login_with(
+                directory.path(),
+                endpoints,
+                &tester_config(true),
+                supplied,
+                &test_observability(),
+            )
+            .await
+            .unwrap_err();
+
+            server.join().unwrap();
+            let text = format!("{error:#}");
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains(SESSION_KEY_HEX), "{text}");
+            assert!(requests.lock().unwrap().is_empty());
+            assert_eq!(fs::read(&primary).unwrap(), primary_before);
+            assert_eq!(fs::read(&backup).unwrap(), backup_before);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_canary_reads_an_encrypted_session_and_never_rewrites_it() {
+        use crate::bootstrap::load_and_validate_existing_session_with_auth_client;
+
+        let key = session_key(SESSION_KEY_HEX);
+        let config = tester_config(false);
+        for (stored_with, supplied, loads) in [
+            (Some(&key), Some(&key), true),
+            (Some(&key), None, false),
+            (None, Some(&key), true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut stored = AuthSession::new("tester", CookieStore::new());
+            stored.set_auth_token("canary-token");
+            stored.save_to_dir(directory.path(), stored_with).unwrap();
+            let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+            let before = fs::read(&primary).unwrap();
+            let (endpoints, _, server) = spawn_auth_validation_server(if loads {
+                vec![http_response(
+                    "200 OK",
+                    r#"{"login":"tester","user_id":"user-1","scopes":["chat:read"]}"#,
+                )]
+            } else {
+                Vec::new()
+            });
+
+            let result = load_and_validate_existing_session_with_auth_client(
+                &config,
+                directory.path(),
+                &auth_client_for(endpoints),
+                supplied,
+            )
+            .await;
+
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), loads, "{result:?}");
+            if let Ok(session) = result {
+                assert_eq!(session.auth_token(), Some("canary-token"));
+                assert!(session.has_scope("chat:read"));
+            }
+            assert_eq!(fs::read(&primary).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_imported_token_is_saved_encrypted_and_never_replaces_an_unreadable_session() {
+        let key = session_key(SESSION_KEY_HEX);
+        let wrong = session_key(OTHER_SESSION_KEY_HEX);
+        let config = tester_config(false);
+        let validation = || {
+            http_response(
+                "200 OK",
+                r#"{"login":"tester","user_id":"user-456","client_id":"other","scopes":[]}"#,
+            )
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoints, _, server) = spawn_auth_validation_server(vec![validation()]);
+        import_session_token(
+            &config,
+            directory.path(),
+            &auth_client_for(endpoints),
+            "oauth:imported-token\n",
+            Some(&key),
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+        let primary = tm_auth::cookie_file_path(directory.path(), "tester").unwrap();
+        let bytes = fs::read(&primary).unwrap();
+        assert!(tm_auth::is_encrypted_session(&bytes));
+        assert!(!contains_text(&bytes, "imported-token"));
+        let saved = AuthSession::load_from_dir(directory.path(), "tester", Some(&key)).unwrap();
+        assert_eq!(saved.auth_token(), Some("imported-token"));
+
+        for supplied in [Some(&wrong), None] {
+            let (endpoints, _, server) = spawn_auth_validation_server(vec![validation()]);
+            let error = import_session_token(
+                &config,
+                directory.path(),
+                &auth_client_for(endpoints),
+                "oauth:replacement\n",
+                supplied,
+            )
+            .await
+            .unwrap_err();
+            server.join().unwrap();
+            assert!(format!("{error:#}").contains("TCPM_COOKIE_KEY_FILE"));
+            assert_eq!(fs::read(&primary).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn the_support_bundle_counts_encrypted_session_files_and_exposes_nothing_from_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = session_key(SESSION_KEY_HEX);
+        let mut stored = AuthSession::new("tester", CookieStore::new());
+        stored.set_auth_token("bundle-token-marker");
+        stored.save_to_dir(directory.path(), Some(&key)).unwrap();
+        stored.set_auth_token("newer-token-marker");
+        stored.save_to_dir(directory.path(), Some(&key)).unwrap();
+        let destination = directory.path().join("support.json");
+
+        crate::status::write_support_bundle(directory.path(), &destination).unwrap();
+
+        let bundle = fs::read_to_string(destination).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+        assert_eq!(value["cookie_file_count"], 2);
+        for secret in ["bundle-token-marker", "newer-token-marker", SESSION_KEY_HEX] {
+            assert!(!bundle.contains(secret));
+        }
+    }
+
+    #[test]
+    fn a_session_key_file_shared_with_others_is_warned_about_once() {
+        use crate::bootstrap::warn_if_key_file_is_shared;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.key");
+        fs::write(&path, SESSION_KEY_HEX).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let key = tm_auth::SessionKey::from_file(&path).unwrap();
+        let mut warnings = Vec::new();
+        warn_if_key_file_is_shared(Some(&key), |message| warnings.push(message.to_string()));
+        warn_if_key_file_is_shared(None, |message| warnings.push(message.to_string()));
+        assert!(warnings.is_empty());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            let shared = tm_auth::SessionKey::from_file(&path).unwrap();
+            warn_if_key_file_is_shared(Some(&shared), |message| warnings.push(message.to_string()));
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("TCPM_COOKIE_KEY_FILE"));
+            assert!(!warnings[0].contains(SESSION_KEY_HEX));
+        }
     }
 }

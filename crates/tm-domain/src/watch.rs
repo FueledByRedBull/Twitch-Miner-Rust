@@ -176,9 +176,14 @@ pub fn pick_streamers_to_watch(
     let mut has_priority_game_streak = false;
 
     for (idx, streamer) in streamers.iter().enumerate() {
-        if !streamer.is_online
-            || (!streamer.can_earn_channel_points() && !streamer.can_watch_drop_campaign())
-        {
+        // A channel at its points limit is treated like one with points
+        // disabled: only a Drop campaign can still earn it a slot.
+        let earns_points = streamer.can_earn_channel_points() && !streamer.points_limit_reached();
+        if !streamer.is_online || (!earns_points && !streamer.can_watch_drop_campaign()) {
+            continue;
+        }
+        // A discovered channel is only worth a slot while its streak is open.
+        if streamer.discovered && !should_prioritize_streak(streamer, now) {
             continue;
         }
         if streamer
@@ -207,7 +212,7 @@ pub fn pick_streamers_to_watch(
         let priority_game = game
             .as_ref()
             .is_some_and(|game| game_priority_index.contains_key(game));
-        let campaign_only = !streamer.can_earn_channel_points();
+        let campaign_only = !earns_points;
         let streak_ready = !campaign_only && should_prioritize_streak(streamer, now);
         let candidate = Candidate {
             idx,
@@ -394,7 +399,50 @@ pub fn pick_streamers_to_watch(
         add_candidate(candidate, &mut selected, &mut seen);
     }
 
+    // Configured channels always rank ahead of discovered ones; the sort is stable.
+    selected.sort_by_key(|idx| streamers[*idx].discovered);
     selected
+}
+
+/// How much a waiting channel is worth, compared lexicographically from the
+/// first field to the last, so one uncollected streak outweighs any multiplier.
+///
+/// `watch_priority` is deliberately not part of the score: it gives every
+/// channel its own position, so no two channels would ever tie and fair
+/// rotation would stop. It keeps deciding the order channels enter the queue;
+/// the score only breaks the tie between waiting channels at a rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct ChannelScore {
+    /// The channel has a watch streak to collect in its current broadcast.
+    pub uncollected_streak: bool,
+    /// The channel has an earnable Drop campaign.
+    pub drops: bool,
+    /// The active points multiplier in thousandths, the value `SUBSCRIBED` ranks by.
+    pub multiplier_millis: u32,
+    /// 1 for a channel in the top quartile of varying rewards in the ledger, else 0.
+    pub yield_tier: u8,
+}
+
+impl ChannelScore {
+    /// A discovered channel scores nothing, so it never jumps a configured one.
+    #[must_use]
+    pub fn of(streamer: &Streamer, yield_tier: u8, now: OffsetDateTime) -> Self {
+        if streamer.discovered {
+            return Self::default();
+        }
+        Self {
+            uncollected_streak: should_prioritize_streak(streamer, now),
+            drops: streamer.can_watch_drop_campaign(),
+            multiplier_millis: multiplier_millis(streamer.total_multiplier()),
+            yield_tier,
+        }
+    }
+}
+
+// The clamp keeps the value inside `u32`; a NaN converts to zero.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn multiplier_millis(total: f64) -> u32 {
+    (total * 1000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32
 }
 
 fn compare_optional_deadlines(
@@ -961,5 +1009,266 @@ mod tests {
         );
 
         assert_eq!(selected, vec![0, 1]);
+    }
+
+    fn limited(username: &str, balance: i64, limit: Option<i64>) -> Streamer {
+        Streamer {
+            username: username.to_string(),
+            is_online: true,
+            points_init: true,
+            channel_points: balance,
+            settings: StreamerSettings {
+                points_limit: limit,
+                ..StreamerSettings::default()
+            },
+            ..Streamer::default()
+        }
+    }
+
+    #[test]
+    fn a_channel_at_its_points_limit_gets_no_slot_for_points() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let streamers = vec![
+            limited("below", 99, Some(100)),
+            limited("at", 100, Some(100)),
+            limited("above", 5_000, Some(100)),
+            limited("unlimited", 5_000, None),
+        ];
+
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Order], &[], &[], now),
+            vec![0, 3]
+        );
+    }
+
+    #[test]
+    fn an_unknown_balance_never_reaches_a_points_limit() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let mut unknown = limited("unknown", 0, Some(1));
+        unknown.points_init = false;
+        unknown.channel_points = 10_000;
+
+        assert!(!unknown.points_limit_reached());
+        assert_eq!(
+            pick_streamers_to_watch(&[unknown], &[WatchPriority::Order], &[], &[], now),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn a_channel_at_its_points_limit_still_serves_a_drop_campaign() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let mut capped = limited("capped", 500, Some(100));
+        capped.settings.farm_drops = true;
+        capped.stream = Some(Stream {
+            drop_campaign_eligible: Some(true),
+            ..Stream::default()
+        });
+        let ordinary = limited("ordinary", 0, None);
+        let streamers = vec![capped, ordinary];
+
+        // Campaign first, and never again through the points-based lists.
+        assert_eq!(
+            pick_streamers_to_watch(
+                &streamers,
+                &[WatchPriority::Drops, WatchPriority::Order],
+                &[],
+                &[],
+                now
+            ),
+            vec![0, 1]
+        );
+        assert_eq!(
+            pick_streamers_to_watch(&streamers, &[WatchPriority::Order], &[], &[], now),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn a_channel_returns_to_the_rotation_once_its_balance_drops_below_the_limit() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let mut channel = limited("channel", 100, Some(100));
+        assert!(pick_streamers_to_watch(
+            &[channel.clone()],
+            &[WatchPriority::Order],
+            &[],
+            &[],
+            now
+        )
+        .is_empty());
+        channel.channel_points = 40;
+        assert_eq!(
+            pick_streamers_to_watch(&[channel], &[WatchPriority::Order], &[], &[], now),
+            vec![0]
+        );
+    }
+
+    fn open_streak(username: &str, discovered: bool) -> Streamer {
+        Streamer {
+            username: username.to_string(),
+            is_online: true,
+            discovered,
+            settings: StreamerSettings {
+                watch_streak: true,
+                ..StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                watch_streak_missing: true,
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        }
+    }
+
+    #[test]
+    fn a_discovered_channel_is_eligible_only_while_its_streak_is_open() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let mut discovered = open_streak("found", true);
+        let orders = [WatchPriority::Streak, WatchPriority::Order];
+
+        assert_eq!(
+            pick_streamers_to_watch(&[discovered.clone()], &orders, &[], &[], now),
+            vec![0]
+        );
+        discovered.stream.as_mut().unwrap().minute_watched = 10.0;
+        assert!(pick_streamers_to_watch(&[discovered.clone()], &orders, &[], &[], now).is_empty());
+        discovered.stream.as_mut().unwrap().minute_watched = 0.0;
+        discovered.stream.as_mut().unwrap().watch_streak_missing = false;
+        assert!(pick_streamers_to_watch(&[discovered.clone()], &orders, &[], &[], now).is_empty());
+
+        // The same state on a configured channel is an ordinary rotation member.
+        discovered.discovered = false;
+        assert_eq!(
+            pick_streamers_to_watch(&[discovered], &orders, &[], &[], now),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn configured_channels_always_rank_before_discovered_ones() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let mut collected = open_streak("collected", false);
+        collected.stream.as_mut().unwrap().watch_streak_missing = false;
+        let streamers = vec![
+            open_streak("found", true),
+            collected,
+            open_streak("open", false),
+        ];
+
+        for orders in [
+            vec![WatchPriority::Streak, WatchPriority::Order],
+            vec![WatchPriority::Order],
+            vec![WatchPriority::LongestStreak],
+        ] {
+            let selected = pick_streamers_to_watch(&streamers, &orders, &[], &[], now);
+            assert_eq!(selected.last(), Some(&0), "{orders:?}");
+            assert_eq!(selected.len(), 3, "{orders:?}");
+        }
+    }
+
+    #[test]
+    fn discovered_settings_turn_off_everything_but_the_streak() {
+        let base = StreamerSettings {
+            make_predictions: true,
+            follow_raid: true,
+            farm_drops: true,
+            claim_drops: true,
+            single_watcher_during_drops: true,
+            claim_moments: true,
+            watch_streak: false,
+            watch_streak_vod_recovery: true,
+            community_goals: true,
+            points_limit: Some(5),
+            irc_mode: IrcMode::Always,
+            ..StreamerSettings::default()
+        };
+
+        let settings = base.for_discovered();
+
+        assert_eq!(
+            settings,
+            StreamerSettings {
+                watch_streak: true,
+                irc_mode: IrcMode::Never,
+                ..StreamerSettings::default()
+            }
+        );
+    }
+
+    #[test]
+    fn channel_scores_compare_streak_then_drops_then_multiplier_then_yield() {
+        let score = |uncollected_streak, drops, multiplier_millis, yield_tier| ChannelScore {
+            uncollected_streak,
+            drops,
+            multiplier_millis,
+            yield_tier,
+        };
+        let ladder = [
+            score(false, false, 0, 0),
+            score(false, false, 0, 1),
+            score(false, false, 1, 0),
+            score(false, false, 2_500, 1),
+            score(false, true, 0, 0),
+            score(false, true, 0, 1),
+            score(true, false, 0, 0),
+            score(true, true, 9_000, 1),
+        ];
+        for pair in ladder.windows(2) {
+            assert!(pair[0] < pair[1], "{pair:?}");
+        }
+        assert_eq!(ChannelScore::default(), score(false, false, 0, 0));
+    }
+
+    #[test]
+    fn channel_scores_read_the_same_facts_the_priorities_rank_by() {
+        let now = datetime!(2026-03-27 06:00 UTC);
+        let mut subscriber = open_streak("subscriber", false);
+        subscriber.active_multipliers = vec![
+            crate::types::ActiveMultiplier { factor: 0.2 },
+            crate::types::ActiveMultiplier { factor: 0.3 },
+        ];
+        subscriber.settings.farm_drops = true;
+        subscriber.stream.as_mut().unwrap().drop_campaign_eligible = Some(true);
+
+        assert_eq!(
+            ChannelScore::of(&subscriber, 1, now),
+            ChannelScore {
+                uncollected_streak: true,
+                drops: true,
+                multiplier_millis: 500,
+                yield_tier: 1,
+            }
+        );
+        subscriber.stream.as_mut().unwrap().watch_streak_missing = false;
+        subscriber.stream.as_mut().unwrap().drop_campaign_eligible = Some(false);
+        assert_eq!(
+            ChannelScore::of(&subscriber, 0, now),
+            ChannelScore {
+                multiplier_millis: 500,
+                ..ChannelScore::default()
+            }
+        );
+        assert_eq!(
+            ChannelScore::of(&Streamer::default(), 0, now),
+            ChannelScore::default()
+        );
+    }
+
+    #[test]
+    fn a_discovered_channel_with_an_open_streak_scores_nothing() {
+        let now = OffsetDateTime::UNIX_EPOCH;
+        assert!(ChannelScore::of(&open_streak("configured", false), 1, now).uncollected_streak);
+        assert_eq!(
+            ChannelScore::of(&open_streak("found", true), 1, now),
+            ChannelScore::default()
+        );
+    }
+
+    #[test]
+    fn multiplier_millis_never_overflows_or_goes_negative() {
+        assert_eq!(multiplier_millis(f64::NAN), 0);
+        assert_eq!(multiplier_millis(-3.0), 0);
+        assert_eq!(multiplier_millis(1.2344), 1_234);
+        assert_eq!(multiplier_millis(f64::MAX), u32::MAX);
     }
 }

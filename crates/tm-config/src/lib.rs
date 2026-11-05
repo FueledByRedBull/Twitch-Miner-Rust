@@ -19,13 +19,16 @@ use thiserror::Error;
 #[cfg(test)]
 use tm_domain::IrcMode;
 use tm_domain::{parse_watch_priority, FollowersOrder, MAX_PREDICTION_POINTS};
+use tm_net::NetworkPolicy;
 
+mod reload;
 mod settings;
 
 use settings::{
     parse_chat_presence_value, parse_condition, parse_delay_mode, parse_outcome_key, parse_strategy,
 };
 
+pub use reload::{diff_configs, merge_live_settings, ReloadClass, SettingChange};
 pub use settings::{build_base_streamer_settings, build_override_settings, parse_chat_presence};
 
 #[derive(Debug, Error)]
@@ -97,6 +100,10 @@ pub struct StreamerSettingsOverride {
     pub watch_streak_vod_recovery: Option<bool>,
     pub community_goals: Option<bool>,
     pub chat_presence: Option<String>,
+    /// Positive channel-points balance at which the channel stops getting watch
+    /// slots for points. Left out of existing files, like every opt-in key.
+    #[serde(default)]
+    pub points_limit: Option<i64>,
     pub bet: BetConfig,
 }
 
@@ -118,6 +125,17 @@ pub enum DropAccountLink {
     None,
 }
 
+/// Console and file log layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable lines.
+    #[default]
+    Text,
+    /// One JSON object per line.
+    Json,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DiscordConfig {
     pub webhook_api: String,
@@ -137,6 +155,31 @@ impl fmt::Debug for WebhookConfig {
             .field("url", &"<redacted>")
             .field("events", &self.events)
             .finish()
+    }
+}
+
+/// The `proxy` setting as written. It can carry credentials, so `Debug` never
+/// shows it; an empty value means no proxy.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProxySetting(String);
+
+impl ProxySetting {
+    /// The network policy this setting selects.
+    pub fn network_policy(&self) -> Result<NetworkPolicy, ConfigError> {
+        NetworkPolicy::from_setting(&self.0).map_err(|error| {
+            ConfigError::Validation(format!("config.proxy is not usable: {error}"))
+        })
+    }
+}
+
+impl fmt::Debug for ProxySetting {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(if self.0.trim().is_empty() {
+            "ProxySetting(unset)"
+        } else {
+            "ProxySetting(<redacted>)"
+        })
     }
 }
 
@@ -193,12 +236,24 @@ pub struct ConfigFile {
     pub drop_account_link: DropAccountLink,
     #[serde(default)]
     pub drop_discovery_games: Vec<String>,
+    #[serde(default)]
+    pub streak_discovery_games: Vec<String>,
+    #[serde(default)]
+    pub log_format: LogFormat,
+    /// Also send the device-login URL and code through the notifiers.
+    #[serde(default)]
+    pub notify_device_login: bool,
     pub bet: BetConfig,
     pub timezone: Option<String>,
     pub privacy: PrivacyConfig,
     pub discord: DiscordConfig,
     #[serde(default)]
     pub webhook: WebhookConfig,
+    /// Proxy that carries every connection, as `socks5h://` or `http://` with an
+    /// optional `user:password@` and a port. Empty means no proxy. Left out of
+    /// existing files, like every opt-in key.
+    #[serde(default)]
+    pub proxy: ProxySetting,
     pub streamer_overrides: HashMap<String, StreamerSettingsOverride>,
 }
 
@@ -247,6 +302,10 @@ pub fn default_config_value() -> Value {
         "followers_order": "DESC",
         "drop_account_link": "linked",
         "drop_discovery_games": [],
+        "streak_discovery_games": [],
+        "log_format": "text",
+        "notify_device_login": false,
+        "proxy": "",
         "timezone": Value::Null,
         "privacy": {
             "anonymize_logs": true
@@ -320,6 +379,7 @@ fn load_config(path: &Path, write_back: bool) -> Result<ConfigPreview, ConfigErr
     validate_streamer_override_shapes(&value)?;
     validate_known_keys(&value)?;
     validate_enum_values(&value)?;
+    validate_points_limits(&value)?;
 
     let mut top_level_defaults = default_config_value();
     if existed {
@@ -407,6 +467,7 @@ fn validate_notification_urls(config: &ConfigFile) -> Result<(), ConfigError> {
 
 pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
     validate_notification_urls(config)?;
+    config.proxy.network_policy()?;
     let username = config.username.trim().to_lowercase();
     if username.is_empty() || username == "your-twitch-username" {
         return Err(ConfigError::Validation(String::from(
@@ -433,6 +494,14 @@ pub fn validate_config(config: &ConfigFile) -> Result<(), ConfigError> {
                 Some(chat_presence),
                 parse_chat_presence_value,
             )?;
+        }
+        if override_settings
+            .points_limit
+            .is_some_and(|limit| limit <= 0)
+        {
+            return Err(ConfigError::Validation(format!(
+                "config.streamer_overrides.{login}.points_limit must be a positive whole number"
+            )));
         }
         validate_bet_config(
             &format!("config.streamer_overrides.{login}.bet"),
@@ -525,6 +594,13 @@ fn validate_enum_values(value: &Value) -> Result<(), ConfigError> {
         parse_chat_presence_value,
         false,
     )?;
+    if let Some(log_format) = root.get("log_format") {
+        if !matches!(log_format.as_str(), Some("text" | "json")) {
+            return Err(ConfigError::Validation(format!(
+                "config.log_format must be \"text\" or \"json\", not {log_format}"
+            )));
+        }
+    }
     if let Some(watch_priority) = root.get("watch_priority") {
         let Some(values) = watch_priority.as_array() else {
             return Err(unsupported_enum_value(
@@ -556,6 +632,23 @@ fn validate_enum_values(value: &Value) -> Result<(), ConfigError> {
             if let Some(bet) = override_object.get("bet").and_then(Value::as_object) {
                 validate_bet_values(bet, &format!("{override_path}.bet"))?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_points_limits(value: &Value) -> Result<(), ConfigError> {
+    let Some(overrides) = value.get("streamer_overrides").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (login, override_value) in overrides {
+        let Some(limit) = override_value.get("points_limit") else {
+            continue;
+        };
+        if !limit.is_null() && limit.as_i64().is_none_or(|limit| limit <= 0) {
+            return Err(ConfigError::Validation(format!(
+                "config.streamer_overrides.{login}.points_limit must be a positive whole number, not {limit}"
+            )));
         }
     }
     Ok(())
@@ -894,6 +987,10 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "followers_order",
     "drop_account_link",
     "drop_discovery_games",
+    "streak_discovery_games",
+    "log_format",
+    "notify_device_login",
+    "proxy",
     "bet",
     "timezone",
     "privacy",
@@ -920,7 +1017,15 @@ const PRIVACY_CONFIG_KEYS: &[&str] = &["anonymize_logs"];
 const DISCORD_CONFIG_KEYS: &[&str] = &["webhook_api", "events"];
 // Older releases reject keys they do not know, so writing these defaults into an
 // existing file would stop a rollback from starting. They apply when absent.
-const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &["drop_account_link", "drop_discovery_games", "webhook"];
+const OPT_IN_TOP_LEVEL_KEYS: &[&str] = &[
+    "drop_account_link",
+    "drop_discovery_games",
+    "streak_discovery_games",
+    "log_format",
+    "notify_device_login",
+    "proxy",
+    "webhook",
+];
 const WEBHOOK_CONFIG_KEYS: &[&str] = &["url", "events"];
 const STREAMER_OVERRIDE_KEYS: &[&str] = &[
     "make_predictions",
@@ -933,6 +1038,7 @@ const STREAMER_OVERRIDE_KEYS: &[&str] = &[
     "watch_streak_vod_recovery",
     "community_goals",
     "chat_presence",
+    "points_limit",
     "bet",
 ];
 

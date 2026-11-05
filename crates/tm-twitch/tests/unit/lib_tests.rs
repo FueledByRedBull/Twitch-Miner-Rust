@@ -2806,6 +2806,70 @@ fn game_directory_keeps_only_channels_with_a_login() {
     );
 }
 
+#[test]
+fn live_game_directory_differs_from_the_drops_directory_only_by_its_filter() {
+    let filters = |operation: GqlPersistedOperation| {
+        let mut value = serde_json::to_value(operation).unwrap();
+        let filters = value["variables"]["options"]["systemFilters"].take();
+        (value, filters)
+    };
+    let (mut drops, drops_filters) = filters(operations::drops_enabled_game_directory("chess", 5));
+    let (mut live, live_filters) = filters(operations::live_game_directory("chess", 5));
+
+    assert_eq!(drops_filters, serde_json::json!(["DROPS_ENABLED"]));
+    assert_eq!(live_filters, serde_json::json!([]));
+    drops["variables"]["options"]["systemFilters"] = serde_json::Value::Null;
+    live["variables"]["options"]["systemFilters"] = serde_json::Value::Null;
+    assert_eq!(drops, live, "same operation, hash, limit and slug");
+    assert_eq!(live["operationName"], "DirectoryPage_Game");
+    assert_eq!(live["variables"]["slug"], "chess");
+    assert_eq!(live["variables"]["limit"], 5);
+}
+
+#[test]
+fn live_game_directory_fixture_keeps_only_channels_with_a_login() {
+    let directory: types::GqlResponse<types::GameDirectoryData> =
+        serde_json::from_value(protocol_fixture("twitch.live_game_directory.json")).unwrap();
+    assert_eq!(
+        crate::responses::game_directory_logins_from_typed(directory.data.unwrap()),
+        vec![String::from("bigstreamer"), String::from("smallstreamer")]
+    );
+}
+
+#[tokio::test]
+async fn live_channels_are_read_through_the_directory_without_a_drops_filter() {
+    let (base_url, requests, server) = spawn_http_server([
+        (
+            200,
+            "<script>window.__twilightBuildID = \"ef928475-9403-42f2-8a34-55784bd08e16\"</script>",
+        ),
+        (
+            200,
+            include_str!("../../../../tests/fixtures/twitch.live_game_directory.json"),
+        ),
+    ]);
+    let client = TwitchClient::with_client_and_endpoints(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap(),
+        "token",
+        "ua",
+        TwitchEndpoints {
+            twitch_url: base_url.clone(),
+            gql_url: base_url,
+            ..TwitchEndpoints::default()
+        },
+    );
+
+    assert_eq!(
+        client.fetch_live_channels_typed("chess", 5).await.unwrap(),
+        ["bigstreamer", "smallstreamer"]
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    server.join().unwrap();
+}
+
 #[tokio::test]
 async fn channel_points_context_retries_with_query_text_when_the_hash_is_retired() {
     let (base_url, requests, server) = spawn_http_server([

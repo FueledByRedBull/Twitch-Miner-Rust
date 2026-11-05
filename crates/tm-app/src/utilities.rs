@@ -19,3 +19,10 @@ pub(crate) fn new_session_id() -> String {
 pub(crate) fn time_now() -> tm_runtime::RuntimeTime {
     tm_runtime::RuntimeTime::now_utc()
 }
+
+pub(crate) fn configured_timezone(config: &tm_config::ConfigFile) -> Option<chrono_tz::Tz> {
+    config
+        .timezone
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+}

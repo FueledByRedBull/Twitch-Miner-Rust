@@ -171,6 +171,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -645,7 +651,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "web-time",
@@ -667,7 +673,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "web-time",
@@ -736,7 +742,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1004,11 +1010,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.21",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1079,29 +1105,32 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tm-auth"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.21",
+ "tm-net",
  "tm-twitch",
 ]
 
 [[package]]
 name = "tm-config"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "dirs",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.21",
  "tm-domain",
+ "tm-net",
 ]
 
 [[package]]
 name = "tm-domain"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -1110,16 +1139,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tm-net"
+version = "0.3.8"
+dependencies = [
+ "base64 0.23.1",
+ "reqwest",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-socks",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "tm-pubsub"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "futures-util",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.21",
  "time",
  "tm-domain",
+ "tm-net",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -1127,14 +1169,15 @@ dependencies = [
 
 [[package]]
 name = "tm-twitch"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.21",
  "time",
  "tm-domain",
+ "tm-net",
  "tokio",
 ]
 
@@ -1172,6 +1215,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-socks"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7e2948f60dbe26b35f2c7fb74ac2854c1fddded0fe9d7548fcc674a246f7615"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -1288,7 +1343,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sha1",
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

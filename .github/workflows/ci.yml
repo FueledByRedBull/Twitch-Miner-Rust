@@ -12,13 +12,55 @@ on:
   pull_request:
 
 jobs:
+  # A pull request that touches only documentation skips the Rust jobs. Pushes to
+  # main and every other event always run everything. A path filter on the
+  # workflow would leave the required check pending, so the decision is made here.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: classify
+        name: Classify the changed files
+        run: |
+          code=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            code=false
+            # The checkout is the merge commit, so its first parent is the base.
+            # Renames count as a delete plus an add, and a deleted file always
+            # counts as code because something may still reference it.
+            changed=$(git diff --name-status --no-renames HEAD^1 HEAD)
+            while IFS=$'\t' read -r status path; do
+              case "$status:$path" in
+                [AM]:docs/* | [AM]:LICENSE) ;;
+                [AM]:*/*) code=true ;;
+                [AM]:*.md) ;;
+                *) code=true ;;
+              esac
+            done <<< "$changed"
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   rust-qa:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/rust-qa.yml
 
   go-baseline:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -45,6 +87,7 @@ jobs:
 
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -76,6 +119,7 @@ jobs:
 
   dependency-policy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -92,6 +136,7 @@ jobs:
 
   secret-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -113,9 +158,16 @@ jobs:
           "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts="--all" .
 
   coverage:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      # Coverage maps come from instrumentation, not debug info.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -127,6 +179,10 @@ jobs:
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-llvm-cov@0.8.7
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Measure workspace coverage
         run: cargo llvm-cov --workspace --all-features --locked --fail-under-lines 60 --lcov --output-path lcov.info
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -136,11 +192,15 @@ jobs:
           if-no-files-found: error
 
   deep-quality:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/deep-quality.yml
 
   windows-package:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/windows-release.yml
@@ -150,6 +210,7 @@ jobs:
   required-checks:
     if: ${{ always() }}
     needs:
+      - changes
       - rust-qa
       - go-baseline
       - docs
@@ -159,21 +220,31 @@ jobs:
       - deep-quality
       - windows-package
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - name: Require every canonical check
-        if: >-
-          ${{
-            needs.rust-qa.result != 'success' ||
-            needs.go-baseline.result != 'success' ||
-            needs.docs.result != 'success' ||
-            needs.dependency-policy.result != 'success' ||
-            needs.secret-scan.result != 'success' ||
-            needs.coverage.result != 'success' ||
-            needs.deep-quality.result != 'success' ||
-            needs.windows-package.result != 'success'
-          }}
-        run: exit 1
+        shell: pwsh
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          # Only the jobs the changes job gates may be skipped, and only when it
+          # found documentation-only changes. Anything else that is not a success,
+          # including failure and cancellation, fails the check.
+          $gated = @('rust-qa', 'go-baseline', 'coverage', 'deep-quality', 'windows-package')
+          $needs = $env:NEEDS | ConvertFrom-Json
+          $documentationOnly = $needs.changes.outputs.code -eq 'false'
+          $failed = @()
+          foreach ($job in $needs.PSObject.Properties) {
+            $result = $job.Value.result
+            $skippedByDesign = $result -eq 'skipped' -and $documentationOnly -and $gated -contains $job.Name
+            if ($result -ne 'success' -and -not $skippedByDesign) {
+              $failed += "$($job.Name)=$result"
+            }
+          }
+          if ($failed.Count -ne 0) {
+            throw "Canonical checks did not all pass: $($failed -join ', ')"
+          }
       - name: Canonical checks passed
         run: echo 'required-checks-ok'

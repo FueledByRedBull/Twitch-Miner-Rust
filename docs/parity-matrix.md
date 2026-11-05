@@ -55,6 +55,12 @@ Streak prioritization, watch rotation, and campaign selection follow Twitch's
 current platform rules rather than parent-miner lineage; they are specified in
 the [protocol inventory](protocol-inventory.md#watch-selection).
 
+Live configuration reload, the earnings ledger and its alarms, channel scoring,
+streak discovery, `points_limit`, device login notifications, `--auth-status`,
+session encryption, and the `proxy` setting are additions outside this
+comparison. The shared vectors do not cover them, and they have no live evidence
+yet.
+
 ## Go baseline check
 
 The normalized vectors in `tests/parity/vectors.json` cover common streamer
@@ -98,6 +104,7 @@ remove those two documented Rust-only exceptions rather than add new ones. Broke
 upstream tests are never made an enforced gate here.
 
 Two more Rust-only operations back features the Go baseline does not have:
-`DirectoryPage_Game` for Drop channel discovery and `DropCurrentSessionContext` for
+`DirectoryPage_Game` for Drop channel discovery (and, with an empty
+`systemFilters`, for streak discovery) and `DropCurrentSessionContext` for
 Drop credit checks. The
 gate lists them by name, so any other new operation still fails it.

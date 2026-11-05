@@ -163,9 +163,35 @@ pub struct StreamerSettings {
     pub watch_streak: bool,
     pub watch_streak_vod_recovery: bool,
     pub community_goals: bool,
+    /// Stops spending watch slots on points once the known balance reaches this.
+    #[serde(default)]
+    pub points_limit: Option<i64>,
     pub bet: BetSettings,
     #[serde(rename = "chat_presence")]
     pub irc_mode: IrcMode,
+}
+
+impl StreamerSettings {
+    /// The settings of a channel found by category discovery: it may only
+    /// collect a watch streak, so everything that spends points, joins events
+    /// or lets a Drop campaign influence the miner is off.
+    #[must_use]
+    pub fn for_discovered(&self) -> Self {
+        Self {
+            make_predictions: false,
+            follow_raid: false,
+            farm_drops: false,
+            claim_drops: false,
+            single_watcher_during_drops: false,
+            claim_moments: false,
+            watch_streak: true,
+            watch_streak_vod_recovery: false,
+            community_goals: false,
+            points_limit: None,
+            irc_mode: IrcMode::Never,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -387,6 +413,9 @@ pub struct Streamer {
     pub last_stream_ended_at: Option<OffsetDateTime>,
     #[serde(skip)]
     pub watch_suspended_until: Option<OffsetDateTime>,
+    /// Found by `streak_discovery_games` rather than configured. Never persisted.
+    #[serde(skip)]
+    pub discovered: bool,
     pub stream: Option<Stream>,
     pub points_init: bool,
     /// `None` means Twitch did not provide the optional capability marker.
@@ -537,6 +566,17 @@ impl Streamer {
     #[must_use]
     pub fn can_earn_channel_points(&self) -> bool {
         self.channel_points_enabled != Some(false)
+    }
+
+    /// Whether the known balance has reached the channel's `points_limit`.
+    /// An unknown balance never counts as reached.
+    #[must_use]
+    pub fn points_limit_reached(&self) -> bool {
+        self.points_init
+            && self
+                .settings
+                .points_limit
+                .is_some_and(|limit| self.channel_points >= limit)
     }
 
     #[must_use]

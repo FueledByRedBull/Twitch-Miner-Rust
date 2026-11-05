@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tm_domain::{MinerEvent, Streamer};
+use tm_net::NetworkPolicy;
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
-use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -16,12 +16,17 @@ use crate::types::IncomingTransportMessage;
 use crate::WEBSOCKET_URL;
 
 const PING_JITTER_SECONDS: u64 = 5;
+/// Bounds the TCP, TLS and WebSocket handshake. Without it a reconnect that
+/// stalls mid-handshake waits for the operating system's TCP timeout.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubSubClientSettings {
     pub ping_interval: Duration,
     pub pong_timeout: Duration,
+    pub connect_timeout: Duration,
     pub websocket_url: String,
+    pub network: NetworkPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +52,9 @@ impl Default for PubSubClientSettings {
         Self {
             ping_interval: Duration::from_secs(25),
             pong_timeout: Duration::from_secs(60),
+            connect_timeout: CONNECT_TIMEOUT,
             websocket_url: WEBSOCKET_URL.to_string(),
+            network: NetworkPolicy::direct(),
         }
     }
 }
@@ -62,6 +69,15 @@ impl PubSubClient {
     #[must_use]
     pub fn new(settings: PubSubClientSettings) -> Self {
         Self { settings }
+    }
+
+    /// The production endpoint, reached the way `network` says.
+    #[must_use]
+    pub fn with_network(network: NetworkPolicy) -> Self {
+        Self::new(PubSubClientSettings {
+            network,
+            ..PubSubClientSettings::default()
+        })
     }
 
     pub async fn connect_and_listen(
@@ -85,9 +101,14 @@ impl PubSubClient {
         tracked_streamers: &[Streamer],
         sender: mpsc::Sender<PubSubConnectionEvent>,
     ) -> Result<(), PubSubError> {
-        let (mut socket, _) =
-            connect_async_with_config(&self.settings.websocket_url, Some(bounded_frames()), false)
-                .await?;
+        let (mut socket, _) = time::timeout(
+            self.settings.connect_timeout,
+            self.settings
+                .network
+                .connect_websocket(&self.settings.websocket_url, bounded_frames()),
+        )
+        .await
+        .map_err(|_| PubSubError::ConnectTimeout)??;
         let mut pending_listens = HashMap::new();
         for (topic, payload) in topics.iter().zip(listen_payloads(topics, auth_token)) {
             if let Some(nonce) = payload.get("nonce").and_then(serde_json::Value::as_str) {
@@ -318,6 +339,32 @@ mod tests {
             Instant::now() - Duration::from_secs(2),
             Duration::from_secs(1)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_handshake_that_never_answers_times_out() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Hold the connection open without ever answering the upgrade.
+            time::sleep(Duration::from_secs(5)).await;
+            drop(stream);
+        });
+        let client = PubSubClient::new(PubSubClientSettings {
+            websocket_url: format!("ws://{address}"),
+            connect_timeout: Duration::from_millis(200),
+            ..PubSubClientSettings::default()
+        });
+        let topics = vec![String::from("community-points-user-v1.viewer")];
+        let (sender, _receiver) = mpsc::channel(1);
+
+        let result = client
+            .connect_topics_and_listen(&topics, "token", None, &[], sender)
+            .await;
+
+        assert!(matches!(result, Err(PubSubError::ConnectTimeout)));
+        server.abort();
     }
 
     #[tokio::test]

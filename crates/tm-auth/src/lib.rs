@@ -7,6 +7,7 @@
 pub mod client;
 pub mod cookies;
 pub mod device_flow;
+pub mod encryption;
 pub mod session;
 
 pub use client::{
@@ -25,4 +26,5 @@ pub use device_flow::{
     device_flow_scope_for_eventsub, DeviceCodeResponse, DeviceFlowState, LoginValidationRequest,
     OAuthRequest,
 };
+pub use encryption::{is_encrypted_session, SessionKey, SessionKeyError, KEY_FILE_ENV};
 pub use session::{AuthSession, AuthSessionError};

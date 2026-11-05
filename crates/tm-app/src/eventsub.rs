@@ -72,7 +72,10 @@ async fn listen_once(
     context: &EventSubTaskContext,
     failure_attempt: &mut u32,
 ) -> Option<Result<Result<(), EventSubError>, tokio::task::JoinError>> {
-    let client = build_eventsub_client(context);
+    let client = match build_eventsub_client(context) {
+        Ok(client) => client,
+        Err(error) => return Some(Ok(Err(EventSubError::Http(error)))),
+    };
     let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
     let connect = tokio::spawn({
         let tracked_streamers = context.tracked_streamers.clone();
@@ -119,19 +122,16 @@ async fn listen_once(
     Some(connection_result)
 }
 
-fn build_eventsub_client(context: &EventSubTaskContext) -> EventSubClient {
-    EventSubClient::new(EventSubClientSettings {
-        client_id: tm_twitch::CLIENT_ID.to_string(),
-        auth_token: context.auth_token.clone(),
-        websocket_url: tm_pubsub::EVENTSUB_WEBSOCKET_URL.to_string(),
-        subscriptions_url: tm_pubsub::EVENTSUB_SUBSCRIPTIONS_URL.to_string(),
-        allow_prediction_scope_fallback: true,
-        authorized_prediction_broadcaster_id: context
-            .prediction_eventsub_authorized
-            .then(|| context.effects.persistent_user_id.clone()),
-        verify_subscriptions: false,
-        http_client: reqwest::Client::new(),
-    })
+fn build_eventsub_client(context: &EventSubTaskContext) -> Result<EventSubClient, reqwest::Error> {
+    let mut settings = EventSubClientSettings::with_network(
+        tm_twitch::CLIENT_ID,
+        context.auth_token.clone(),
+        context.effects.twitch.network(),
+    )?;
+    settings.authorized_prediction_broadcaster_id = context
+        .prediction_eventsub_authorized
+        .then(|| context.effects.persistent_user_id.clone());
+    Ok(EventSubClient::new(settings))
 }
 
 async fn process_eventsub_message(
@@ -203,18 +203,41 @@ async fn wait_to_reconnect(
     }
 }
 
+// The poll takes the channel list and its transport signals as separate values.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_eventsub_presence_poll_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
     twitch: Arc<TwitchClient>,
     tracked_streamers: Vec<tm_domain::Streamer>,
     fallback_rx: tokio::sync::watch::Receiver<Vec<usize>>,
+    resync_on_start: bool,
     observability: AppObservability,
     health: HealthTracker,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stop = stop;
         let mut fallback_rx = fallback_rx;
+        if resync_on_start {
+            // The previous transports stopped while a channel may have gone online
+            // or offline, and nothing replays a missed transition.
+            let every_channel = (0..tracked_streamers.len()).collect::<Vec<_>>();
+            tokio::select! {
+                () = poll_presence_fallback(
+                    &runtime,
+                    &twitch,
+                    &tracked_streamers,
+                    &every_channel,
+                    &observability,
+                    &health,
+                ) => {}
+                _ = stop.changed() => {
+                    if *stop.borrow() {
+                        return;
+                    }
+                }
+            }
+        }
         let mut ticker = tokio::time::interval_at(
             tokio::time::Instant::now() + PRESENCE_POLL_INTERVAL,
             PRESENCE_POLL_INTERVAL,

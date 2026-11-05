@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tm_domain::Streamer;
+use tm_net::NetworkPolicy;
 use tm_observability::{event_from_gain_reason, Event as DiscordEvent};
 use tm_pubsub::{build_topic_batches, PubSubClient, PubSubConnectionEvent};
 
@@ -129,6 +130,7 @@ pub(crate) fn spawn_pubsub_loop(
                 tracked_streamers: context.tracked_streamers.clone(),
                 topics,
                 connection_index: index + 1,
+                network: context.effects.twitch.network().clone(),
             }));
         }
         children.0.extend(
@@ -554,6 +556,7 @@ struct PubSubConnectionParams {
     tracked_streamers: Vec<Streamer>,
     topics: Vec<String>,
     connection_index: usize,
+    network: NetworkPolicy,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -567,6 +570,7 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
             tracked_streamers,
             topics,
             connection_index,
+            network,
         } = params;
         let mut stop = stop;
         let mut failure_attempt = 0_u32;
@@ -576,7 +580,7 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
                 break;
             }
 
-            let client = PubSubClient::default();
+            let client = PubSubClient::with_network(network.clone());
             let connected_at = std::time::Instant::now();
             let (connection_sender, connection_receiver) = tokio::sync::mpsc::channel(128);
             let forwarder = spawn_pubsub_forwarder(connection_receiver, sender.clone());
@@ -585,9 +589,11 @@ fn spawn_pubsub_connection_loop(params: PubSubConnectionParams) -> tokio::task::
                 let username = username.clone();
                 let tracked_streamers = tracked_streamers.clone();
                 let topics = topics.clone();
+                let network = network.clone();
                 async move {
                     if use_hermes {
                         tm_pubsub::connect_hermes_topics_and_listen(
+                            &network,
                             &format!(
                                 "{}?clientId={}",
                                 tm_pubsub::HERMES_WEBSOCKET_URL,
@@ -803,6 +809,7 @@ fn pubsub_error_class(error: &tm_pubsub::PubSubError) -> &'static str {
         tm_pubsub::PubSubError::ReconnectRequested => "reconnect",
         tm_pubsub::PubSubError::BadAuth { .. } => "bad-auth",
         tm_pubsub::PubSubError::PongTimeout => "pong-timeout",
+        tm_pubsub::PubSubError::ConnectTimeout => "connect-timeout",
     }
 }
 
@@ -866,6 +873,7 @@ pub(crate) async fn log_pubsub_event(
             channel_id,
             earned,
             reason,
+            balance,
             ..
         } => {
             let snapshot = runtime.state_snapshot().await?;
@@ -876,6 +884,11 @@ pub(crate) async fn log_pubsub_event(
             else {
                 return Ok(());
             };
+            // Callers reach this only for events the runtime accepted, so this
+            // is the one place every accepted reward passes through.
+            if *earned > 0 {
+                observability.record_reward(streamer, *earned, reason, *balance);
+            }
             let message = observability.points_earned_message(streamer, *earned, reason);
             tracing::info!(operation = "on_message", "{message}");
             if let Some(event) = event_from_gain_reason(reason) {
@@ -1015,6 +1028,7 @@ mod tests {
                 "bad-auth",
             ),
             (tm_pubsub::PubSubError::PongTimeout, "pong-timeout"),
+            (tm_pubsub::PubSubError::ConnectTimeout, "connect-timeout"),
         ]
     }
 

@@ -477,6 +477,234 @@ fn existing_config_stays_readable_by_a_rollback_release() {
 }
 
 #[test]
+fn the_ranking_settings_are_never_written_into_an_existing_file() {
+    let dir = unique_temp_dir("ranking-opt-in");
+    fs::create_dir_all(&dir).unwrap();
+
+    // A file that needs a migration is rewritten; the rewrite must not add
+    // either key, so a rollback release still accepts it.
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    let config = load_or_create_config(&path).unwrap();
+    assert!(config.streak_discovery_games.is_empty());
+    assert_eq!(config.streamer_overrides["bob"].points_limit, None);
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(rewritten.get("streak_discovery_games").is_none());
+    let bob = &rewritten["streamer_overrides"]["bob"];
+    assert!(bob.get("points_limit").is_none(), "{bob}");
+    assert!(
+        bob.get("make_predictions").is_some(),
+        "other keys are filled"
+    );
+
+    // A file that sets them keeps them.
+    let chosen = dir.join("chosen.json");
+    fs::write(
+        &chosen,
+        br#"{"username":"Alice","streak_discovery_games":["chess"],"streamer_overrides":{"bob":{"points_limit":5000}}}"#,
+    )
+    .unwrap();
+    let config = load_or_create_config(&chosen).unwrap();
+    assert_eq!(config.streak_discovery_games, ["chess"]);
+    assert_eq!(config.streamer_overrides["bob"].points_limit, Some(5_000));
+    let rewritten: Value = serde_json::from_slice(&fs::read(&chosen).unwrap()).unwrap();
+    assert_eq!(
+        rewritten["streamer_overrides"]["bob"]["points_limit"],
+        5_000
+    );
+
+    // A new file lists the discovery key like the other opt-in keys, and no
+    // override carries a limit.
+    let fresh = dir.join("fresh.json");
+    load_or_create_config(&fresh).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh).unwrap()).unwrap();
+    assert_eq!(fresh["streak_discovery_games"], json!([]));
+}
+
+#[test]
+fn notify_device_login_is_off_by_default_and_never_written_into_an_existing_file() {
+    let dir = unique_temp_dir("notify-device-login");
+    fs::create_dir_all(&dir).unwrap();
+
+    // A file that needs a migration is rewritten; the rewrite must not add the
+    // key, so a rollback release still accepts it.
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    assert!(!load_or_create_config(&path).unwrap().notify_device_login);
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(rewritten.get("notify_device_login").is_none());
+    assert!(rewritten["streamer_overrides"]["bob"]
+        .get("make_predictions")
+        .is_some());
+
+    // A file that sets it keeps it through a rewrite.
+    let chosen = dir.join("chosen.json");
+    fs::write(
+        &chosen,
+        br#"{"username":"Alice","notify_device_login":true,"streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    assert!(load_or_create_config(&chosen).unwrap().notify_device_login);
+    let rewritten: Value = serde_json::from_slice(&fs::read(&chosen).unwrap()).unwrap();
+    assert_eq!(rewritten["notify_device_login"], true);
+
+    // A new file lists it, switched off.
+    let fresh = dir.join("fresh.json");
+    load_or_create_config(&fresh).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh).unwrap()).unwrap();
+    assert_eq!(fresh["notify_device_login"], false);
+    assert!(OPT_IN_TOP_LEVEL_KEYS.contains(&"notify_device_login"));
+}
+
+#[test]
+fn notify_device_login_must_be_a_boolean() {
+    let dir = unique_temp_dir("notify-device-login-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    fs::write(&path, r#"{"username":"Alice","notify_device_login":"yes"}"#).unwrap();
+
+    assert!(load_or_create_config(&path).is_err());
+}
+
+#[test]
+fn notify_device_login_is_read_once_at_startup() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.notify_device_login = true;
+
+    assert_eq!(
+        changed_names(&old, &new),
+        [(
+            String::from("notify_device_login"),
+            ReloadClass::NeedsRestart
+        )]
+    );
+}
+
+#[test]
+fn points_limit_must_be_a_positive_whole_number() {
+    let dir = unique_temp_dir("points-limit-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    for (name, raw) in [
+        ("zero", "0"),
+        ("negative", "-5"),
+        ("fraction", "1.5"),
+        ("text", r#""10""#),
+        ("flag", "true"),
+    ] {
+        let path = dir.join(format!("{name}.json"));
+        let original = format!(
+            r#"{{"username":"Alice","streamer_overrides":{{"bob":{{"points_limit":{raw}}}}}}}"#
+        );
+        fs::write(&path, &original).unwrap();
+        let error = load_or_create_config(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("config.streamer_overrides.bob.points_limit"),
+            "{error}"
+        );
+        assert!(error.contains("positive whole number"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert!(preview_config(&path).is_err());
+    }
+
+    let null = dir.join("null.json");
+    fs::write(
+        &null,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"points_limit":null}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_or_create_config(&null).unwrap().streamer_overrides["bob"].points_limit,
+        None
+    );
+
+    let mut config = ConfigFile {
+        username: String::from("alice"),
+        ..ConfigFile::default()
+    };
+    config.streamer_overrides.insert(
+        String::from("bob"),
+        StreamerSettingsOverride {
+            points_limit: Some(0),
+            ..StreamerSettingsOverride::default()
+        },
+    );
+    let error = validate_config(&config).unwrap_err().to_string();
+    assert!(error.contains("points_limit"), "{error}");
+    config
+        .streamer_overrides
+        .get_mut("bob")
+        .unwrap()
+        .points_limit = Some(1);
+    validate_config(&config).unwrap();
+}
+
+#[test]
+fn points_limit_is_an_override_only_setting() {
+    let mut config = ConfigFile::default();
+    config.streamer_overrides.insert(
+        String::from("Bob"),
+        StreamerSettingsOverride {
+            points_limit: Some(2_500),
+            ..StreamerSettingsOverride::default()
+        },
+    );
+    config
+        .streamer_overrides
+        .insert(String::from("carol"), StreamerSettingsOverride::default());
+
+    let base = build_base_streamer_settings(&config);
+    let merged = build_override_settings(&base, &config.streamer_overrides);
+
+    assert_eq!(base.points_limit, None);
+    assert_eq!(merged["bob"].points_limit, Some(2_500));
+    assert_eq!(merged["carol"].points_limit, None);
+}
+
+#[test]
+fn log_format_defaults_to_text_and_accepts_json() {
+    let dir = unique_temp_dir("log-format");
+    fs::create_dir_all(&dir).unwrap();
+
+    let default_path = dir.join("default.json");
+    fs::write(&default_path, br#"{"username":"Alice"}"#).unwrap();
+    assert_eq!(
+        load_or_create_config(&default_path).unwrap().log_format,
+        LogFormat::Text
+    );
+
+    let json_path = dir.join("json.json");
+    fs::write(&json_path, br#"{"username":"Alice","log_format":"json"}"#).unwrap();
+    assert_eq!(
+        load_or_create_config(&json_path).unwrap().log_format,
+        LogFormat::Json
+    );
+}
+
+#[test]
+fn unsupported_log_format_is_rejected_with_its_path_and_choices() {
+    let dir = unique_temp_dir("log-format-invalid");
+    fs::create_dir_all(&dir).unwrap();
+    for (name, raw) in [("xml", r#""xml""#), ("upper", r#""JSON""#), ("number", "3")] {
+        let path = dir.join(format!("{name}.json"));
+        let original = format!(r#"{{"username":"Alice","log_format":{raw}}}"#);
+        fs::write(&path, &original).unwrap();
+        let error = load_or_create_config(&path).unwrap_err().to_string();
+        assert!(error.contains("config.log_format"), "{error}");
+        assert!(error.contains("\"text\" or \"json\""), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+}
+
+#[test]
 fn atomic_write_replaces_existing_file_and_cleans_failed_temporary_files() {
     let dir = unique_temp_dir("atomic-write");
     fs::create_dir_all(&dir).unwrap();
@@ -913,4 +1141,363 @@ fn notification_urls_are_validated() {
     assert!(check("", "http://homeassistant.local:8123/api/webhook/x"));
     assert!(!check("", "ftp://example.com"));
     assert!(!check("", "https://"));
+}
+
+fn changed_names(old: &ConfigFile, new: &ConfigFile) -> Vec<(String, ReloadClass)> {
+    diff_configs(old, new)
+        .unwrap()
+        .into_iter()
+        .map(|change| (change.name, change.class))
+        .collect()
+}
+
+#[test]
+fn every_top_level_key_has_a_reload_label() {
+    let labelled = reload::SETTING_RULES
+        .iter()
+        .map(|rule| rule.key)
+        .collect::<Vec<_>>();
+    for key in TOP_LEVEL_CONFIG_KEYS {
+        assert!(
+            labelled.contains(key),
+            "{key} is not classified in reload::SETTING_RULES"
+        );
+    }
+    for key in &labelled {
+        assert!(
+            TOP_LEVEL_CONFIG_KEYS.contains(key),
+            "{key} is classified but is not a config key"
+        );
+    }
+    assert_eq!(labelled.len(), TOP_LEVEL_CONFIG_KEYS.len());
+    let serialized = serde_json::to_value(ConfigFile::default()).unwrap();
+    for key in serialized.as_object().unwrap().keys() {
+        assert!(
+            labelled.contains(&key.as_str()),
+            "{key} is serialized but not classified"
+        );
+    }
+}
+
+#[test]
+fn reload_diff_is_empty_for_identical_configs() {
+    let config = ConfigFile::default();
+    assert!(diff_configs(&config, &config.clone()).unwrap().is_empty());
+}
+
+#[test]
+fn reload_diff_labels_live_and_restart_settings() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.betting_make_predictions = !old.betting_make_predictions;
+    new.chat_presence = String::from("NEVER");
+    new.emojis = !old.emojis;
+    new.game_priority = vec![String::from("Chess")];
+    new.watch_priority = vec![String::from("STREAK")];
+    new.streamers = vec![String::from("alice")];
+    new.streamers_exclude = vec![String::from("bob")];
+    new.show_game = !old.show_game;
+    new.discord.events = vec![String::from("STARTUP")];
+    new.bet.max_points = Some(7);
+    new.streamer_overrides
+        .insert(String::from("alice"), StreamerSettingsOverride::default());
+    new.save_logs = !old.save_logs;
+    new.debug = !old.debug;
+    new.log_format = LogFormat::Json;
+    new.privacy.anonymize_logs = !old.privacy.anonymize_logs;
+    new.timezone = Some(String::from("Europe/Athens"));
+    new.followers_order = FollowersOrder::Asc;
+    new.drop_discovery_games = vec![String::from("Chess")];
+    new.disable_at_in_nickname = !old.disable_at_in_nickname;
+
+    let changes = changed_names(&old, &new);
+    let class_of = |name: &str| {
+        changes
+            .iter()
+            .find(|(changed, _)| changed == name)
+            .unwrap_or_else(|| panic!("{name} was not reported"))
+            .1
+    };
+    for live in [
+        "betting(make_predictions)",
+        "chat_presence",
+        "emojis",
+        "game_priority",
+        "watch_priority",
+        "streamers",
+        "streamers_exclude",
+        "show_game",
+        "discord.events",
+        "bet.max_points",
+        "streamer_overrides",
+    ] {
+        assert_eq!(class_of(live), ReloadClass::Live, "{live}");
+    }
+    for restart in [
+        "save_logs",
+        "debug",
+        "log_format",
+        "privacy.anonymize_logs",
+        "timezone",
+        "followers_order",
+        "drop_discovery_games",
+        "disable_at_in_nickname",
+    ] {
+        assert_eq!(class_of(restart), ReloadClass::NeedsRestart, "{restart}");
+    }
+    assert_eq!(changes.len(), 11 + 8);
+}
+
+#[test]
+fn streak_discovery_games_are_live_and_points_limits_follow_the_overrides() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.streak_discovery_games = vec![String::from("chess")];
+    new.streamer_overrides.insert(
+        String::from("alice"),
+        StreamerSettingsOverride {
+            points_limit: Some(10),
+            ..StreamerSettingsOverride::default()
+        },
+    );
+
+    let changes = diff_configs(&old, &new).unwrap();
+
+    assert_eq!(
+        changed_names(&old, &new),
+        [
+            (String::from("streak_discovery_games"), ReloadClass::Live),
+            (String::from("streamer_overrides"), ReloadClass::Live),
+        ]
+    );
+    assert_eq!(
+        changes[0].values,
+        Some((String::from("[]"), String::from(r#"["chess"]"#)))
+    );
+    assert_eq!(changes[1].values, None, "channel names are never shown");
+    let merged = merge_live_settings(&old, &new).unwrap();
+    assert_eq!(merged.streak_discovery_games, new.streak_discovery_games);
+}
+
+#[test]
+fn reload_diff_keeps_secrets_and_names_out_of_values() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.discord.webhook_api = String::from("https://discord.com/api/webhooks/1/secret-token");
+    new.webhook.url = String::from("https://ntfy.example/secret-topic");
+    new.username = String::from("secret-account");
+    new.streamers = vec![String::from("secret-channel")];
+    new.streamers_exclude = vec![String::from("secret-excluded")];
+    new.streamer_overrides.insert(
+        String::from("secret-override"),
+        StreamerSettingsOverride::default(),
+    );
+    new.chat_presence = String::from("NEVER");
+
+    let changes = diff_configs(&old, &new).unwrap();
+    let rendered = format!("{changes:?}");
+    for secret in [
+        "secret-token",
+        "secret-topic",
+        "secret-account",
+        "secret-channel",
+        "secret-excluded",
+        "secret-override",
+    ] {
+        assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+    }
+    let names = changes
+        .iter()
+        .map(|change| change.name.as_str())
+        .collect::<Vec<_>>();
+    for name in ["discord.webhook_api", "webhook.url", "username"] {
+        assert!(names.contains(&name), "{name} missing");
+    }
+    let chat = changes
+        .iter()
+        .find(|change| change.name == "chat_presence")
+        .unwrap();
+    assert_eq!(
+        chat.values,
+        Some((String::from("\"ONLINE\""), String::from("\"NEVER\"")))
+    );
+}
+
+#[test]
+fn merging_live_settings_keeps_restart_settings_at_their_running_value() {
+    let running = ConfigFile::default();
+    let mut next = running.clone();
+    next.emojis = !running.emojis;
+    next.streamers = vec![String::from("alice")];
+    next.save_logs = !running.save_logs;
+    next.privacy.anonymize_logs = !running.privacy.anonymize_logs;
+    next.discord.events = vec![String::from("STARTUP")];
+
+    let merged = merge_live_settings(&running, &next).unwrap();
+
+    assert_eq!(merged.emojis, next.emojis);
+    assert_eq!(merged.streamers, next.streamers);
+    assert_eq!(merged.discord, next.discord);
+    assert_eq!(merged.save_logs, running.save_logs);
+    assert_eq!(merged.privacy, running.privacy);
+    let remaining = changed_names(&merged, &next);
+    assert_eq!(
+        remaining,
+        vec![
+            (String::from("save_logs"), ReloadClass::NeedsRestart),
+            (
+                String::from("privacy.anonymize_logs"),
+                ReloadClass::NeedsRestart
+            ),
+        ]
+    );
+}
+
+const PROXY_SECRET: &str = "socks5h://proxy-user:proxy-secret@proxy-host.invalid:1080";
+
+fn config_with_proxy(proxy: &str) -> ConfigFile {
+    ConfigFile {
+        username: String::from("alice"),
+        proxy: serde_json::from_value(json!(proxy)).unwrap(),
+        ..ConfigFile::default()
+    }
+}
+
+#[test]
+fn proxy_is_off_by_default_and_never_written_into_an_existing_file() {
+    let dir = unique_temp_dir("proxy-opt-in");
+    fs::create_dir_all(&dir).unwrap();
+
+    // A file that needs a migration is rewritten; the rewrite must not add the
+    // key, so a rollback release still accepts it.
+    let path = dir.join("config.json");
+    fs::write(
+        &path,
+        br#"{"username":"Alice","streamer_overrides":{"bob":{"farm_drops":true}}}"#,
+    )
+    .unwrap();
+    let config = load_or_create_config(&path).unwrap();
+    assert_eq!(
+        config.proxy.network_policy().unwrap(),
+        NetworkPolicy::direct()
+    );
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(rewritten.get("proxy").is_none());
+    assert!(rewritten["streamer_overrides"]["bob"]
+        .get("make_predictions")
+        .is_some());
+
+    // A file that sets it keeps it, exactly as written, through a rewrite.
+    let chosen = dir.join("chosen.json");
+    fs::write(
+        &chosen,
+        format!(
+            r#"{{"username":"Alice","proxy":"{PROXY_SECRET}","streamer_overrides":{{"bob":{{"farm_drops":true}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let config = load_or_create_config(&chosen).unwrap();
+    assert!(config
+        .proxy
+        .network_policy()
+        .unwrap()
+        .proxy_scheme()
+        .is_some());
+    let rewritten: Value = serde_json::from_slice(&fs::read(&chosen).unwrap()).unwrap();
+    assert_eq!(rewritten["proxy"], PROXY_SECRET);
+
+    // A new file lists it, empty.
+    let fresh = dir.join("fresh.json");
+    load_or_create_config(&fresh).unwrap();
+    let fresh: Value = serde_json::from_slice(&fs::read(&fresh).unwrap()).unwrap();
+    assert_eq!(fresh["proxy"], "");
+    assert!(OPT_IN_TOP_LEVEL_KEYS.contains(&"proxy"));
+    assert_eq!(default_config_value()["proxy"], "");
+}
+
+#[test]
+fn proxy_must_be_a_usable_proxy_url_and_errors_never_echo_it() {
+    let secret = "proxy-secret";
+    let accepted = [
+        "",
+        "   ",
+        "socks5h://127.0.0.1:1080",
+        "http://user:pw@proxy.example:3128",
+    ];
+    for proxy in accepted {
+        assert!(
+            validate_config(&config_with_proxy(proxy)).is_ok(),
+            "{proxy:?}"
+        );
+    }
+
+    let rejected = [
+        format!("socks5://proxy-user:{secret}@proxy-host.invalid:1080"),
+        format!("https://proxy-user:{secret}@proxy-host.invalid:443"),
+        format!("socks5h://proxy-user:{secret}@proxy-host.invalid"),
+        format!("ftp://proxy-user:{secret}@proxy-host.invalid:21"),
+        format!("proxy-user:{secret}@proxy-host.invalid:1080"),
+    ];
+    for proxy in rejected {
+        let error = validate_config(&config_with_proxy(&proxy)).unwrap_err();
+        assert!(matches!(error, ConfigError::Validation(_)));
+        for output in [error.to_string(), format!("{error:?}")] {
+            assert!(output.contains("config.proxy"), "{output}");
+            for leaked in [secret, "proxy-user", "proxy-host"] {
+                assert!(!output.contains(leaked), "{output}");
+            }
+        }
+    }
+
+    let local_dns = config_with_proxy("socks5://proxy.example:1080");
+    let message = local_dns.proxy.network_policy().unwrap_err().to_string();
+    assert!(message.contains("socks5h://"), "{message}");
+
+    let dir = unique_temp_dir("proxy-type");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    fs::write(&path, r#"{"username":"Alice","proxy":["socks5h://a:1"]}"#).unwrap();
+    assert!(load_or_create_config(&path).is_err());
+}
+
+#[test]
+fn proxy_is_read_once_at_startup_and_never_shown_in_a_diff() {
+    let old = ConfigFile::default();
+    let mut new = old.clone();
+    new.proxy = serde_json::from_value(json!(PROXY_SECRET)).unwrap();
+
+    let changes = diff_configs(&old, &new).unwrap();
+
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.name.as_str(), change.class))
+            .collect::<Vec<_>>(),
+        [("proxy", ReloadClass::NeedsRestart)]
+    );
+    assert_eq!(changes[0].values, None);
+    let rendered = format!("{changes:?}");
+    for leaked in ["proxy-secret", "proxy-user", "proxy-host"] {
+        assert!(!rendered.contains(leaked), "{rendered}");
+    }
+    let merged = merge_live_settings(&old, &new).unwrap();
+    assert_eq!(merged.proxy, old.proxy);
+}
+
+#[test]
+fn debug_output_redacts_the_proxy() {
+    let config = config_with_proxy(PROXY_SECRET);
+
+    for output in [format!("{config:?}"), format!("{config:#?}")] {
+        for leaked in ["proxy-secret", "proxy-user", "proxy-host", "1080"] {
+            assert!(!output.contains(leaked), "{leaked} leaked");
+        }
+        assert!(output.contains("ProxySetting(<redacted>)"));
+    }
+    assert!(format!("{:?}", ConfigFile::default()).contains("ProxySetting(unset)"));
+    // It still serializes as the plain string the file holds.
+    assert_eq!(
+        serde_json::to_value(&config.proxy).unwrap(),
+        json!(PROXY_SECRET)
+    );
 }

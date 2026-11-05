@@ -17,6 +17,7 @@ permissions:
 jobs:
   windows-release:
     runs-on: windows-2025
+    timeout-minutes: 30
     env:
       DOTNET_ROLL_FORWARD: Major
     steps:
@@ -27,10 +28,13 @@ jobs:
         with:
           toolchain: 1.94.0
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Release tag builds stay cold: no cache is restored or saved for them.
+      - name: Cache Rust builds outside release tags
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-release
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned WiX toolset
         shell: pwsh
         run: |

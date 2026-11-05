@@ -6,14 +6,17 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use tm_auth::{
     normalize_username, AuthClientError, AuthSession, AuthSessionError, LoginValidation,
-    TokenPollOutcome, TwitchAuthClient,
+    SessionKey, TokenPollOutcome, TwitchAuthClient,
 };
 use tm_config::{
     default_user_config_dir, load_or_create_config, preview_config, validate_config, AppPaths,
     ConfigError, ConfigFile,
 };
+use tm_net::NetworkPolicy;
+use tm_observability::Event as DiscordEvent;
 use tm_twitch::generate_device_id;
 
+use crate::observability::AppObservability;
 use crate::Cli;
 
 pub(crate) const DEFAULT_USER_AGENT: &str =
@@ -124,36 +127,71 @@ pub(crate) fn prepare_work_dir(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+pub(crate) fn build_http_client(network: &NetworkPolicy) -> Result<reqwest::Client> {
+    network
+        .http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")
 }
 
+/// Reads the session key named by `TCPM_COOKIE_KEY_FILE`, if any. `warn` is called at
+/// most once, when the key file is readable by group or others.
+pub(crate) fn load_session_key(warn: impl FnOnce(&str)) -> Result<Option<SessionKey>> {
+    let key = SessionKey::from_env()?;
+    warn_if_key_file_is_shared(key.as_ref(), warn);
+    Ok(key)
+}
+
+pub(crate) fn warn_if_key_file_is_shared(key: Option<&SessionKey>, warn: impl FnOnce(&str)) {
+    if key.is_some_and(SessionKey::file_readable_by_others) {
+        warn("the file named by TCPM_COOKIE_KEY_FILE is readable by group or others; restrict it to its owner (chmod 600)");
+    }
+}
+
 pub(crate) async fn load_or_login_session(
     config: &ConfigFile,
     base_dir: &Path,
     client: reqwest::Client,
+    session_key: Option<&SessionKey>,
+    observability: &AppObservability,
 ) -> Result<AuthSession> {
     let auth_client = TwitchAuthClient::with_client(client);
-    load_or_login_session_with_auth_client(config, base_dir, &auth_client).await
+    load_or_login_session_with_auth_client(
+        config,
+        base_dir,
+        &auth_client,
+        session_key,
+        observability,
+    )
+    .await
 }
 
 pub(crate) async fn load_and_validate_existing_session(
     config: &ConfigFile,
     base_dir: &Path,
     client: reqwest::Client,
+    session_key: Option<&SessionKey>,
+) -> Result<AuthSession> {
+    let auth_client = TwitchAuthClient::with_client(client);
+    load_and_validate_existing_session_with_auth_client(config, base_dir, &auth_client, session_key)
+        .await
+}
+
+pub(crate) async fn load_and_validate_existing_session_with_auth_client(
+    config: &ConfigFile,
+    base_dir: &Path,
+    auth_client: &TwitchAuthClient,
+    session_key: Option<&SessionKey>,
 ) -> Result<AuthSession> {
     let username = normalized_username(&config.username)?;
-    let mut session =
-        AuthSession::load_from_dir(base_dir, &username).context("load existing canary session")?;
+    let mut session = AuthSession::load_from_dir(base_dir, &username, session_key)
+        .context("load existing canary session")?;
     let auth_token = session
         .auth_token()
         .ok_or_else(|| anyhow!("existing canary session has no auth token"))?
         .to_string();
-    let auth_client = TwitchAuthClient::with_client(client);
     let validation = auth_client
         .validate_login_details(
             &auth_token,
@@ -175,6 +213,7 @@ pub(crate) async fn import_session_token(
     base_dir: &Path,
     auth_client: &TwitchAuthClient,
     token: &str,
+    session_key: Option<&SessionKey>,
 ) -> Result<()> {
     let username = normalized_username(&config.username)?;
     let token = token.trim();
@@ -195,7 +234,7 @@ pub(crate) async fn import_session_token(
     session.set_auth_token(token);
     session.set_user_id(validation.user_id);
     session.set_scopes(validation.scopes);
-    session.save_to_dir(base_dir)?;
+    session.save_to_dir(base_dir, session_key)?;
     println!("session token saved for {username}");
     Ok(())
 }
@@ -204,6 +243,8 @@ pub(crate) async fn load_or_login_session_with_auth_client(
     config: &ConfigFile,
     base_dir: &Path,
     auth_client: &TwitchAuthClient,
+    session_key: Option<&SessionKey>,
+    observability: &AppObservability,
 ) -> Result<AuthSession> {
     load_or_login_session_with_auth_client_and_retry(
         config,
@@ -211,6 +252,8 @@ pub(crate) async fn load_or_login_session_with_auth_client(
         auth_client,
         SAVED_SESSION_RETRY_BASE,
         SAVED_SESSION_RETRY_MAX,
+        session_key,
+        observability,
     )
     .await
 }
@@ -222,11 +265,13 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     auth_client: &TwitchAuthClient,
     retry_base: Duration,
     retry_max: Duration,
+    session_key: Option<&SessionKey>,
+    observability: &AppObservability,
 ) -> Result<AuthSession> {
     let username = normalized_username(&config.username)?;
     let device_id = generate_device_id();
 
-    match AuthSession::load_from_dir_with_backup(base_dir, &username) {
+    match AuthSession::load_from_dir_with_backup(base_dir, &username, session_key) {
         Ok((mut session, recovered_from_backup)) => {
             if let Some(auth_token) = session.auth_token().map(str::to_string) {
                 match validate_saved_session_with_retry(
@@ -243,9 +288,9 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
                         session.set_user_id(validation.user_id);
                         session.set_scopes(validation.scopes);
                         if recovered_from_backup {
-                            session.restore_to_dir(base_dir)?;
+                            session.restore_to_dir(base_dir, session_key)?;
                         } else {
-                            session.save_to_dir(base_dir)?;
+                            session.save_to_dir(base_dir, session_key)?;
                         }
                         tracing::debug!(username = %username, "loaded cookies from disk");
                         return Ok(session);
@@ -254,7 +299,7 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
                         if refresh_saved_session(&mut session, auth_client, &device_id, &username)
                             .await
                         {
-                            session.save_to_dir(base_dir)?;
+                            session.save_to_dir(base_dir, session_key)?;
                             tracing::info!(username = %username, "refreshed saved session");
                             return Ok(session);
                         }
@@ -294,6 +339,16 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
         prompt.verification_uri,
         prompt.user_code
     );
+    if config.notify_device_login {
+        observability.spawn_event(
+            DiscordEvent::DeviceLogin,
+            observability.device_login_message(
+                &prompt.verification_uri,
+                &prompt.user_code,
+                prompt.expires_in,
+            ),
+        );
+    }
     let started = tokio::time::Instant::now();
     let mut poll_interval = prompt.interval;
     let tokens = loop {
@@ -319,7 +374,10 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
             &username,
             DEFAULT_USER_AGENT,
         )
-        .await?;
+        .await
+        .context(
+            "device login could not validate the new token; the saved session was not changed",
+        )?;
     let mut session = AuthSession::new(&username, tm_auth::CookieStore::new());
     session.set_auth_token(tokens.access_token);
     if let Some(refresh_token) = tokens.refresh_token {
@@ -327,7 +385,7 @@ pub(crate) async fn load_or_login_session_with_auth_client_and_retry(
     }
     session.set_user_id(validation.user_id);
     session.set_scopes(validation.scopes);
-    session.save_to_dir(base_dir)?;
+    session.save_to_dir(base_dir, session_key)?;
     tracing::info!(username = %username, "device login completed");
     Ok(session)
 }
@@ -422,7 +480,7 @@ async fn validate_saved_session_with_retry(
     }
 }
 
-fn saved_session_retry_class(error: &AuthClientError) -> Option<&'static str> {
+pub(crate) fn saved_session_retry_class(error: &AuthClientError) -> Option<&'static str> {
     match error {
         AuthClientError::Http(error) if error.is_timeout() => Some("timeout"),
         AuthClientError::Http(error)
@@ -519,10 +577,11 @@ mod tests {
         saved_session_retry_delay,
     };
     use tm_auth::AuthClientError;
+    use tm_net::NetworkPolicy;
 
     #[test]
     fn build_http_client_accepts_secure_default() {
-        assert!(build_http_client().is_ok());
+        assert!(build_http_client(&NetworkPolicy::direct()).is_ok());
     }
 
     #[tokio::test]
@@ -543,7 +602,7 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        let response = build_http_client()
+        let response = build_http_client(&NetworkPolicy::direct())
             .unwrap()
             .get(format!("http://{address}/start"))
             .send()
@@ -551,6 +610,36 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "isolated loopback fixture must fail the test on setup or I/O failure"
+    )]
+    async fn build_http_client_fails_instead_of_connecting_directly_when_the_proxy_is_down() {
+        let destination = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let dead_proxy = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        for scheme in ["socks5h", "http"] {
+            let network = NetworkPolicy::from_setting(&format!("{scheme}://{dead_proxy}")).unwrap();
+            let result = build_http_client(&network)
+                .unwrap()
+                .get(format!("http://{}/", destination.local_addr().unwrap()))
+                .send()
+                .await;
+            assert!(result.is_err(), "{scheme}");
+        }
+
+        let direct_connection = destination.accept();
+        assert!(
+            matches!(&direct_connection, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "the destination was reached directly"
+        );
     }
 
     #[test]

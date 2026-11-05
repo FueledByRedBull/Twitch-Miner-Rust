@@ -332,6 +332,17 @@ pub fn drop_current_session(channel_id: &str) -> GqlPersistedOperation {
 /// Live channels of a game that have Drops enabled, most viewed first.
 #[must_use]
 pub fn drops_enabled_game_directory(slug: &str, limit: u32) -> GqlPersistedOperation {
+    game_directory(slug, limit, &["DROPS_ENABLED"])
+}
+
+/// Live channels of a game with no filter, most viewed first. It is the same
+/// persisted operation as the Drops directory with an empty `systemFilters`.
+#[must_use]
+pub fn live_game_directory(slug: &str, limit: u32) -> GqlPersistedOperation {
+    game_directory(slug, limit, &[])
+}
+
+fn game_directory(slug: &str, limit: u32, system_filters: &[&str]) -> GqlPersistedOperation {
     GqlPersistedOperation::new(
         "DirectoryPage_Game",
         "86bcceb4e8b1a51256ff8eed8bd8aae4acacf80d737efe904f84f3aeadf8cafd",
@@ -346,7 +357,7 @@ pub fn drops_enabled_game_directory(slug: &str, limit: u32) -> GqlPersistedOpera
                 "includeRestricted": ["SUB_ONLY_LIVE"],
                 "recommendationsContext": { "platform": "web" },
                 "sort": "VIEWER_COUNT",
-                "systemFilters": ["DROPS_ENABLED"],
+                "systemFilters": system_filters,
                 "tags": [],
                 "requestID": "JIRA-VXP-2397",
             },

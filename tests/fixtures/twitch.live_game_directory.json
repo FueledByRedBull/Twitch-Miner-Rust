@@ -1,0 +1,14 @@
+{
+  "data": {
+    "game": {
+      "streams": {
+        "edges": [
+          { "node": { "broadcaster": { "login": "bigstreamer" } } },
+          { "node": { "broadcaster": { "login": "smallstreamer" } } },
+          { "node": null },
+          { "node": { "broadcaster": null } }
+        ]
+      }
+    }
+  }
+}

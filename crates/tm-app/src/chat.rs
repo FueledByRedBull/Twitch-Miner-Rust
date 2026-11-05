@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use tm_irc::ChatClient;
+use tm_net::NetworkPolicy;
 
 use crate::observability::{AppObservability, TracingChatLogger};
 use crate::status::HealthTracker;
@@ -9,6 +10,7 @@ use crate::utilities::sleep_or_stop;
 
 const CHAT_WATCHER_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_chat_manager_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -17,6 +19,7 @@ pub(crate) fn spawn_chat_manager_loop(
     disable_at_in_nickname: bool,
     observability: AppObservability,
     health: HealthTracker,
+    network: NetworkPolicy,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut watchers: HashMap<
@@ -39,6 +42,7 @@ pub(crate) fn spawn_chat_manager_loop(
             disable_at_in_nickname,
             &observability,
             &health,
+            &network,
         )
         .await
         {
@@ -67,6 +71,7 @@ pub(crate) fn spawn_chat_manager_loop(
                         disable_at_in_nickname,
                         &observability,
                         &health,
+                        &network,
                     )
                     .await
                     {
@@ -89,6 +94,7 @@ pub(crate) fn spawn_chat_manager_loop(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_chat_watchers(
     runtime: &tm_runtime::RuntimeHandle,
     watchers: &mut HashMap<
@@ -103,6 +109,7 @@ pub(crate) async fn reconcile_chat_watchers(
     disable_at_in_nickname: bool,
     observability: &AppObservability,
     health: &HealthTracker,
+    network: &NetworkPolicy,
 ) -> Result<()> {
     let snapshot = runtime.state_snapshot().await?;
     let labels = snapshot
@@ -149,6 +156,7 @@ pub(crate) async fn reconcile_chat_watchers(
             disable_at_in_nickname,
             observability.clone(),
             health.clone(),
+            network.clone(),
         );
         watchers.insert(login.clone(), (watcher_stop, task));
         let message = observability.chat_presence_message(
@@ -179,6 +187,7 @@ async fn await_chat_watcher_task(name: &str, mut task: tokio::task::JoinHandle<(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_chat_watcher_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     username: String,
@@ -187,6 +196,7 @@ pub(crate) fn spawn_chat_watcher_loop(
     disable_at_in_nickname: bool,
     observability: AppObservability,
     health: HealthTracker,
+    network: NetworkPolicy,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stop = stop;
@@ -213,7 +223,7 @@ pub(crate) fn spawn_chat_watcher_loop(
                         break;
                     }
                 }
-                result = client.connect_and_run() => {
+                result = client.connect_and_run(&network) => {
                     if let Err(error) = result {
                         health.failure("chat", "irc-disconnect");
                         tracing::warn!(task = "chat", error_class = "irc-disconnect", channel = %channel, %error, "irc watcher disconnected");

@@ -7,8 +7,8 @@ use std::fmt;
 use std::io;
 use std::sync::{Arc, OnceLock};
 
+use tm_net::NetworkPolicy;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
@@ -149,8 +149,10 @@ where
         }
     }
 
-    pub async fn connect_and_run(&mut self) -> io::Result<()> {
-        let stream = TcpStream::connect(irc_addr()).await?;
+    /// Connects over `network` and runs the session. A configured proxy that is
+    /// unavailable is an error, never a direct connection.
+    pub async fn connect_and_run(&mut self, network: &NetworkPolicy) -> io::Result<()> {
+        let stream = network.connect_tcp(IRC_HOST, IRC_PORT).await?;
         let server_name = ServerName::try_from(IRC_HOST.to_owned())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let stream = TlsConnector::from(irc_tls_config())
@@ -592,5 +594,59 @@ mod tests {
         drop(server_side);
         let client = task.await.unwrap();
         assert!(!client.is_closed());
+    }
+
+    /// Accepts one SOCKS5 connection, records the destination it asked for,
+    /// then hangs up.
+    async fn spawn_recording_socks(
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<(String, u16)>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            stream.write_all(&[5, 0]).await.unwrap();
+            let mut head = [0_u8; 4];
+            stream.read_exact(&mut head).await.unwrap();
+            assert_eq!(head[3], 3, "the destination must be sent as a name");
+            let len = usize::from(stream.read_u8().await.unwrap());
+            let mut name = vec![0_u8; len];
+            stream.read_exact(&mut name).await.unwrap();
+            let port = stream.read_u16().await.unwrap();
+            (String::from_utf8(name).unwrap(), port)
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn the_session_connects_through_the_proxy_by_name() {
+        let (address, destination) = spawn_recording_socks().await;
+        let network = NetworkPolicy::through(
+            tm_net::ProxyConfig::parse(&format!("socks5h://{address}")).unwrap(),
+        );
+        let mut client = ChatClient::new("user", "token", "chan", StubLogger::default(), false);
+
+        assert!(client.connect_and_run(&network).await.is_err());
+
+        assert_eq!(
+            destination.await.unwrap(),
+            (String::from(IRC_HOST), IRC_PORT)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_proxy_fails_the_session() {
+        let dead = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let network =
+            NetworkPolicy::through(tm_net::ProxyConfig::parse(&format!("http://{dead}")).unwrap());
+        let mut client = ChatClient::new("user", "token", "chan", StubLogger::default(), false);
+
+        let error = client.connect_and_run(&network).await.unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     }
 }

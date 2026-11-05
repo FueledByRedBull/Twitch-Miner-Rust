@@ -5,10 +5,11 @@ use std::time::Instant as StdInstant;
 use anyhow::{anyhow, Context, Result};
 use reqwest::StatusCode;
 use serde_json::json;
-use tm_domain::{OffsetDateTime, Stream, Streamer};
+use tm_domain::{ChannelScore, OffsetDateTime, Stream, Streamer};
 use tm_observability::Event as DiscordEvent;
 use tm_twitch::TwitchClient;
 
+use crate::channel_yield::YieldTiers;
 use crate::observability::{streamer_game_name, AppObservability};
 use crate::status::HealthTracker;
 use crate::utilities::{sleep_or_stop, time_now};
@@ -76,6 +77,7 @@ struct MinuteWatcherState {
     metadata_refresh: Option<MetadataRefreshHandle>,
     watch_failures: HashMap<String, WatchFailureState>,
     watchdog: WatchdogState,
+    yield_tiers: YieldTiers,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -344,6 +346,8 @@ enum WatchAction {
     Stop,
 }
 
+// Each argument is a separate handle owned elsewhere; a parameter struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_minute_watcher_loop(
     stop: tokio::sync::watch::Receiver<bool>,
     runtime: tm_runtime::RuntimeHandle,
@@ -352,6 +356,7 @@ pub(crate) fn spawn_minute_watcher_loop(
     observability: AppObservability,
     health: HealthTracker,
     claim_coordinator: crate::drops::DropClaimCoordinator,
+    work_dir: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()> {
     let context = MinuteWatcherContext {
         runtime,
@@ -362,12 +367,13 @@ pub(crate) fn spawn_minute_watcher_loop(
         claim_coordinator,
         spade_urls: tokio::sync::Mutex::new(HashMap::new()),
     };
-    tokio::spawn(run_minute_watcher_loop(stop, context))
+    tokio::spawn(run_minute_watcher_loop(stop, context, work_dir))
 }
 
 async fn run_minute_watcher_loop(
     mut stop: tokio::sync::watch::Receiver<bool>,
     context: MinuteWatcherContext,
+    work_dir: std::path::PathBuf,
 ) {
     let mut state = MinuteWatcherState {
         watch_rotation: WatchRotation::default(),
@@ -377,6 +383,7 @@ async fn run_minute_watcher_loop(
         metadata_refresh: None,
         watch_failures: HashMap::new(),
         watchdog: WatchdogState::default(),
+        yield_tiers: YieldTiers::new(work_dir),
     };
     while !*stop.borrow() {
         if run_minute_watcher_pass(&mut stop, &context, &mut state).await == WatchAction::Stop {
@@ -479,22 +486,7 @@ async fn select_watch_logins(
         &mut state.watch_failures,
         now,
     );
-    let streak_candidates = eligible
-        .iter()
-        .filter_map(|login| {
-            let streamer = snapshot
-                .streamers
-                .iter()
-                .find(|streamer| &streamer.username == login)?;
-            let stream = streamer.stream.as_ref()?;
-            (tm_domain::should_prioritize_streak(streamer, now)
-                && !stream.broadcast_id.trim().is_empty())
-            .then(|| StreakCandidate {
-                login: login.clone(),
-                broadcast_id: stream.broadcast_id.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
+    let streak_candidates = promotable_streaks(&snapshot.streamers, &eligible, now);
     if let Some((login, channel_id)) = state
         .watchdog
         .stalled_logins(
@@ -530,11 +522,24 @@ async fn select_watch_logins(
                 .map(|last| (streamer.username.clone(), last))
         })
         .collect();
+    state.yield_tiers.refresh(StdInstant::now()).await;
+    let scores = eligible
+        .iter()
+        .filter_map(|login| {
+            let streamer = snapshot
+                .streamers
+                .iter()
+                .find(|streamer| &streamer.username == login)?;
+            let tier = state.yield_tiers.tier(&streamer.channel_id);
+            Some((login.clone(), ChannelScore::of(streamer, tier, now)))
+        })
+        .collect::<HashMap<_, _>>();
     let watch_logins = state.watch_rotation.select_with_progress(
         &eligible,
         &snapshot.campaign_watch_logins(now),
         &streak_candidates,
         &credit_times,
+        &scores,
         now,
     );
     let selected_channel_ids = watch_logins
@@ -625,7 +630,10 @@ async fn select_watch_logins(
             .observability
             .spawn_event(DiscordEvent::WatchStatus, message);
     }
-    for released in released_watch_channel_ids(&state.selected_channel_ids, &selected_channel_ids) {
+    for released in watch_progress_resets(
+        released_watch_channel_ids(&state.selected_channel_ids, &selected_channel_ids),
+        &snapshot.streamers,
+    ) {
         if let Err(error) = context.runtime.reset_watch_progress(released).await {
             tracing::warn!(%error, "watch slot release could not reset streak progress");
             return None;
@@ -635,11 +643,50 @@ async fn select_watch_logins(
     Some(watch_logins)
 }
 
+/// The eligible channels streak promotion may move to the front of the queue.
+/// A discovered channel only ever takes a plain turn, so it is not one of them.
+fn promotable_streaks(
+    streamers: &[Streamer],
+    eligible: &[String],
+    now: OffsetDateTime,
+) -> Vec<StreakCandidate> {
+    eligible
+        .iter()
+        .filter_map(|login| {
+            let streamer = streamers
+                .iter()
+                .find(|streamer| &streamer.username == login)?;
+            let stream = streamer.stream.as_ref()?;
+            (!streamer.discovered
+                && tm_domain::should_prioritize_streak(streamer, now)
+                && !stream.broadcast_id.trim().is_empty())
+            .then(|| StreakCandidate {
+                login: login.clone(),
+                broadcast_id: stream.broadcast_id.clone(),
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn released_watch_channel_ids(
     previous: &HashSet<String>,
     selected: &HashSet<String>,
 ) -> Vec<String> {
     previous.difference(selected).cloned().collect()
+}
+
+/// The released channels whose watch progress starts over. A discovered channel
+/// keeps its progress until the next broadcast: a reset would reopen its streak
+/// budget, so it could keep taking slots from configured channels.
+pub(crate) fn watch_progress_resets(released: Vec<String>, streamers: &[Streamer]) -> Vec<String> {
+    released
+        .into_iter()
+        .filter(|channel_id| {
+            !streamers
+                .iter()
+                .any(|streamer| streamer.discovered && &streamer.channel_id == channel_id)
+        })
+        .collect()
 }
 
 async fn reap_metadata_refresh(context: &MinuteWatcherContext, state: &mut MinuteWatcherState) {
@@ -1557,6 +1604,36 @@ mod tests {
         OffsetDateTime::from_unix_timestamp(seconds).expect("valid fixture timestamp")
     }
 
+    #[test]
+    fn only_configured_channels_are_promoted_for_a_streak() {
+        let open_streak = |login: &str, discovered| Streamer {
+            username: login.to_string(),
+            discovered,
+            settings: tm_domain::StreamerSettings {
+                watch_streak: true,
+                ..tm_domain::StreamerSettings::default()
+            },
+            stream: Some(Stream {
+                broadcast_id: format!("{login}-broadcast"),
+                watch_streak_missing: true,
+                ..Stream::default()
+            }),
+            ..Streamer::default()
+        };
+        let streamers = [open_streak("configured", false), open_streak("found", true)];
+        let eligible = [String::from("found"), String::from("configured")];
+
+        let candidates = promotable_streaks(&streamers, &eligible, timestamp(0));
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.login.as_str())
+                .collect::<Vec<_>>(),
+            ["configured"]
+        );
+    }
+
     #[tokio::test]
     async fn watch_cadence_includes_request_time_without_catch_up() {
         use std::io::{BufRead, BufReader, Read, Write};
@@ -2205,6 +2282,7 @@ mod tests {
             metadata_refresh: None,
             watch_failures: HashMap::new(),
             watchdog: WatchdogState::default(),
+            yield_tiers: YieldTiers::default(),
         };
 
         let selected = tokio::time::timeout(
@@ -2255,6 +2333,7 @@ mod tests {
                     metadata_refresh: Some(MetadataRefreshHandle::new(child)),
                     watch_failures: HashMap::new(),
                     watchdog: WatchdogState::default(),
+                    yield_tiers: YieldTiers::default(),
                 };
                 std::future::pending::<()>().await;
             })

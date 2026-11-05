@@ -163,6 +163,7 @@ async fn watcher_pass_dispatches_arrival_first_and_attributes_its_failure() {
         ))),
         watch_failures: HashMap::new(),
         watchdog: WatchdogState::default(),
+        yield_tiers: YieldTiers::default(),
     };
     let action = tokio::time::timeout(
         Duration::from_secs(3),

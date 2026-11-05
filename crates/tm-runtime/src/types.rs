@@ -24,6 +24,8 @@ pub struct RuntimeState {
     pub initial_points: HashMap<String, i64>,
     pub predictions: HashMap<String, PredictionEvent>,
     pub pending_prediction_winners: HashMap<String, String>,
+    /// Channels removed by a config reload, kept so the session summary still counts their points.
+    pub retired_streamers: Vec<Streamer>,
     pub processed_prediction_ids: VecDeque<String>,
     pub completed_predictions: VecDeque<PredictionEvent>,
 }
@@ -107,4 +109,31 @@ pub struct PredictionSummary {
     pub bet_line: String,
     pub outcome_lines: Vec<String>,
     pub result_line: String,
+}
+
+/// A validated configuration change for the reducer to apply as one step.
+///
+/// Every network call that could fail, such as resolving a new channel,
+/// happens before this is built, so applying it cannot fail halfway.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigReload {
+    pub watch_priorities: Vec<WatchPriority>,
+    pub game_priority: Vec<String>,
+    pub game_exclusions: Vec<String>,
+    pub follower_mode: bool,
+    /// New settings for tracked channels, keyed by channel id.
+    pub settings: HashMap<String, tm_domain::StreamerSettings>,
+    /// Resolved channels to start tracking.
+    pub add: Vec<Streamer>,
+    /// Channel ids to stop tracking.
+    pub remove: Vec<String>,
+}
+
+/// What a [`ConfigReload`] changed, as channel ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigReloadOutcome {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    /// Channels kept because a prediction placement on them is not settled.
+    pub deferred: Vec<String>,
 }

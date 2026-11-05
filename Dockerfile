@@ -20,16 +20,18 @@ COPY crates/tm-auth/Cargo.toml crates/tm-auth/Cargo.toml
 COPY crates/tm-config/Cargo.toml crates/tm-config/Cargo.toml
 COPY crates/tm-domain/Cargo.toml crates/tm-domain/Cargo.toml
 COPY crates/tm-irc/Cargo.toml crates/tm-irc/Cargo.toml
+COPY crates/tm-net/Cargo.toml crates/tm-net/Cargo.toml
 COPY crates/tm-observability/Cargo.toml crates/tm-observability/Cargo.toml
 COPY crates/tm-pubsub/Cargo.toml crates/tm-pubsub/Cargo.toml
 COPY crates/tm-runtime/Cargo.toml crates/tm-runtime/Cargo.toml
 COPY crates/tm-twitch/Cargo.toml crates/tm-twitch/Cargo.toml
-RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm-domain/src crates/tm-irc/src crates/tm-observability/src crates/tm-pubsub/src crates/tm-runtime/src crates/tm-twitch/src \
+RUN mkdir -p crates/tm-app/src crates/tm-auth/src crates/tm-config/src crates/tm-domain/src crates/tm-irc/src crates/tm-net/src crates/tm-observability/src crates/tm-pubsub/src crates/tm-runtime/src crates/tm-twitch/src \
     && printf 'fn main() {}\n' > crates/tm-app/src/main.rs \
     && printf '\n' > crates/tm-auth/src/lib.rs \
     && printf '\n' > crates/tm-config/src/lib.rs \
     && printf '\n' > crates/tm-domain/src/lib.rs \
     && printf '\n' > crates/tm-irc/src/lib.rs \
+    && printf '\n' > crates/tm-net/src/lib.rs \
     && printf '\n' > crates/tm-observability/src/lib.rs \
     && printf '\n' > crates/tm-pubsub/src/lib.rs \
     && printf '\n' > crates/tm-runtime/src/lib.rs \

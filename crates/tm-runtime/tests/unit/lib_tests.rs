@@ -243,7 +243,7 @@ fn session_summary_hides_points_in_privacy_mode() {
     );
 
     assert_eq!(summary.duration, "00:00:45.000000");
-    assert_eq!(summary.total_points_line, "Total Points gained: [hidden]");
+    assert_eq!(summary.total_points_line, "Total Points gained: +500");
     assert_eq!(summary.streamers[0].current_points, "[hidden]");
     assert_eq!(summary.streamers[0].username, "streamer-1");
     assert_eq!(summary.streamers[0].channel_id, "[hidden]");
@@ -327,6 +327,7 @@ fn playback_presence_drives_watch_and_chat_targets() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     state.apply_event(
@@ -378,6 +379,7 @@ fn viewcount_playback_does_not_promote_presence() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     state.apply_event(
@@ -426,6 +428,7 @@ fn stream_rollover_resets_watch_progress_and_marks_streak_missing() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     let updated = state
@@ -487,6 +490,7 @@ fn short_restart_chains_preserve_resolved_streak_state() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     for (offline_at, online_at, broadcast_id) in [(100, 110, "segment-b"), (200, 210, "segment-c")]
@@ -555,6 +559,7 @@ fn runtime_login_refresh_preserves_initial_balance_and_releases_suspension() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     assert!(state.update_streamer_login("123", " New-Login "));
@@ -593,6 +598,7 @@ fn stream_metadata_invalidates_campaign_only_when_identity_changes() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
     let update = StreamUpdate {
         channel_id: "123".into(),
@@ -673,6 +679,7 @@ fn context_update_emits_goal_contribution_effect_for_active_goals() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     let (effects, balance_delta) = state.apply_context_update(&ContextUpdate {
@@ -731,6 +738,7 @@ fn raid_moment_goal_and_prediction_events_emit_effects() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     let raid_effects = state.apply_event(
@@ -962,6 +970,7 @@ fn runtime_session_summary_uses_captured_initial_points() {
         processed_prediction_ids: std::collections::VecDeque::new(),
         completed_predictions: std::collections::VecDeque::new(),
         pending_prediction_winners: std::collections::HashMap::new(),
+        retired_streamers: Vec::new(),
     };
 
     state.capture_initial_points();
@@ -2550,4 +2559,361 @@ async fn drop_deadlines_rank_channels_without_overriding_game_preferences() {
         snapshot.campaign_watch_logins(ts(0)),
         vec!["alpha", "bravo"]
     );
+}
+fn reload_state(logins: &[&str]) -> RuntimeState {
+    let config = ConfigFile::default();
+    let targets = logins.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let mut state = RuntimeState::from_targets(&config, &targets, ts(0));
+    for (index, streamer) in state.streamers.iter_mut().enumerate() {
+        streamer.channel_id = format!("{}", 100 + index);
+        streamer.is_online = true;
+        streamer.presence_known = true;
+        streamer.channel_points = 1_000;
+        streamer.stream = Some(Stream::default());
+    }
+    state.capture_initial_points();
+    state
+}
+
+fn unchanged_reload(state: &RuntimeState) -> ConfigReload {
+    ConfigReload {
+        watch_priorities: state.watch_priorities.clone(),
+        game_priority: state.game_priority.clone(),
+        game_exclusions: state.game_exclusions.clone(),
+        follower_mode: state.follower_mode,
+        settings: HashMap::new(),
+        add: Vec::new(),
+        remove: Vec::new(),
+    }
+}
+
+fn unplaced_prediction(state: &RuntimeState, index: usize, event_id: &str) -> PredictionEvent {
+    PredictionEvent {
+        streamer: state.streamers[index].clone(),
+        event_id: event_id.into(),
+        title: String::from("Fixture prediction"),
+        status: String::from("ACTIVE"),
+        created_at: ts(1),
+        window_seconds: 30.0,
+        outcomes: Vec::new(),
+        decision: PredictionDecision::default(),
+        bet_placed: false,
+        bet_confirmed: false,
+        result_type: String::new(),
+        result_string: String::new(),
+    }
+}
+
+#[test]
+fn reload_applies_settings_and_priorities_to_tracked_channels() {
+    let mut state = reload_state(&["alpha", "bravo"]);
+    let mut reload = unchanged_reload(&state);
+    reload.watch_priorities = vec![WatchPriority::Streak];
+    reload.game_priority = vec![String::from("chess")];
+    reload.game_exclusions = vec![String::from("slots")];
+    reload.follower_mode = true;
+    let settings = StreamerSettings {
+        make_predictions: true,
+        irc_mode: IrcMode::Never,
+        ..StreamerSettings::default()
+    };
+    reload
+        .settings
+        .insert(String::from("101"), settings.clone());
+
+    let outcome = state.apply_config_reload(reload);
+
+    assert_eq!(outcome, ConfigReloadOutcome::default());
+    assert_eq!(state.watch_priorities, vec![WatchPriority::Streak]);
+    assert_eq!(state.game_priority, vec![String::from("chess")]);
+    assert_eq!(state.game_exclusions, vec![String::from("slots")]);
+    assert!(state.follower_mode);
+    assert_eq!(state.streamers[1].settings, settings);
+    assert_ne!(state.streamers[0].settings, settings);
+}
+
+#[test]
+fn reload_adds_channels_once_and_removes_them_in_order() {
+    let mut state = reload_state(&["alpha", "bravo", "charlie"]);
+    state.streamers[2].channel_points = 777;
+    let mut reload = unchanged_reload(&state);
+    reload.add = vec![
+        Streamer {
+            username: String::from("delta"),
+            channel_id: String::from("200"),
+            channel_points: 50,
+            ..Streamer::default()
+        },
+        Streamer {
+            username: String::from("delta-again"),
+            channel_id: String::from("200"),
+            ..Streamer::default()
+        },
+        Streamer {
+            username: String::from("alpha"),
+            channel_id: String::from("100"),
+            ..Streamer::default()
+        },
+    ];
+    reload.remove = vec![String::from("101"), String::from("missing")];
+
+    let outcome = state.apply_config_reload(reload);
+
+    assert_eq!(outcome.added, vec![String::from("200")]);
+    assert_eq!(outcome.removed, vec![String::from("101")]);
+    assert!(outcome.deferred.is_empty());
+    let logins = state
+        .streamers
+        .iter()
+        .map(|streamer| streamer.username.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(logins, ["alpha", "charlie", "delta"]);
+    assert_eq!(state.initial_points["delta"], 50);
+    assert_eq!(state.retired_streamers.len(), 1);
+    assert_eq!(state.retired_streamers[0].username, "bravo");
+
+    let mut readd = unchanged_reload(&state);
+    readd.add = vec![Streamer {
+        username: String::from("bravo"),
+        channel_id: String::from("101"),
+        channel_points: 1_100,
+        ..Streamer::default()
+    }];
+    state.apply_config_reload(readd);
+    assert!(state.retired_streamers.is_empty());
+    assert_eq!(state.initial_points["bravo"], 1_000);
+}
+
+fn retire_discovered(state: &mut RuntimeState, username: &str, channel_id: &str, earned: i64) {
+    let mut reload = unchanged_reload(state);
+    reload.add = vec![Streamer {
+        username: username.to_string(),
+        channel_id: channel_id.to_string(),
+        discovered: true,
+        ..Streamer::default()
+    }];
+    state.apply_config_reload(reload);
+    state
+        .streamers
+        .iter_mut()
+        .find(|streamer| streamer.channel_id == channel_id)
+        .unwrap()
+        .channel_points = earned;
+    let mut reload = unchanged_reload(state);
+    reload.remove = vec![channel_id.to_string()];
+    state.apply_config_reload(reload);
+}
+
+#[test]
+fn the_retired_channel_list_stays_bounded_by_dropping_the_oldest() {
+    let mut state = reload_state(&["alpha"]);
+    for index in 0..300 {
+        retire_discovered(
+            &mut state,
+            &format!("found{index}"),
+            &format!("9{index}"),
+            10,
+        );
+    }
+
+    assert_eq!(state.retired_streamers.len(), 256);
+    assert_eq!(state.retired_streamers[0].username, "found44");
+    assert!(!state.initial_points.contains_key("found0"));
+    assert!(state.initial_points.contains_key("found299"));
+}
+
+#[test]
+fn a_retired_channel_that_earned_nothing_leaves_before_one_that_earned() {
+    let mut state = reload_state(&["alpha"]);
+    retire_discovered(&mut state, "earner", "8000", 450);
+    for index in 0..256 {
+        retire_discovered(&mut state, &format!("idle{index}"), &format!("9{index}"), 0);
+    }
+
+    assert_eq!(state.retired_streamers.len(), 256);
+    assert_eq!(state.retired_streamers[0].username, "earner");
+    assert_eq!(state.retired_streamers[1].username, "idle1");
+    assert!(state.initial_points.contains_key("earner"));
+    assert!(!state.initial_points.contains_key("idle0"));
+}
+
+#[test]
+fn a_configured_channel_takes_over_a_discovered_one_in_place_and_never_the_reverse() {
+    let mut state = reload_state(&["alpha", "bravo"]);
+    state.streamers[1].discovered = true;
+    state.streamers[1].settings = StreamerSettings::default().for_discovered();
+    state.streamers[1].stream.as_mut().unwrap().minute_watched = 4.0;
+    let configured = StreamerSettings {
+        make_predictions: true,
+        ..StreamerSettings::default()
+    };
+
+    let mut reload = unchanged_reload(&state);
+    reload.add = vec![Streamer {
+        username: String::from("bravo"),
+        channel_id: String::from("101"),
+        settings: configured.clone(),
+        ..Streamer::default()
+    }];
+    let outcome = state.apply_config_reload(reload);
+
+    assert_eq!(outcome, ConfigReloadOutcome::default());
+    assert!(!state.streamers[1].discovered);
+    assert_eq!(state.streamers[1].settings, configured);
+    assert!(
+        (state.streamers[1].stream.as_ref().unwrap().minute_watched - 4.0).abs() < f64::EPSILON,
+        "watch progress is kept"
+    );
+    assert_eq!(state.streamers.len(), 2);
+
+    let mut reverse = unchanged_reload(&state);
+    reverse.add = vec![Streamer {
+        username: String::from("bravo"),
+        channel_id: String::from("101"),
+        discovered: true,
+        settings: StreamerSettings::default().for_discovered(),
+        ..Streamer::default()
+    }];
+    state.apply_config_reload(reverse);
+    assert!(!state.streamers[1].discovered);
+    assert_eq!(state.streamers[1].settings, configured);
+}
+
+#[test]
+fn removed_channel_loses_its_watch_slot_and_the_other_keeps_its_progress() {
+    let mut state = reload_state(&["alpha", "bravo"]);
+    let now = ts(600);
+    let stream = state.streamers[0].stream.as_mut().unwrap();
+    stream.update_minute_watched(ts(300), 400);
+    stream.update_minute_watched(now, 400);
+    let progress = state.streamers[0].stream.clone();
+    assert_eq!(state.watch_target_logins(now), vec!["alpha", "bravo"]);
+
+    let mut reload = unchanged_reload(&state);
+    reload.remove = vec![String::from("101")];
+    state.apply_config_reload(reload);
+
+    assert_eq!(state.watch_target_logins(now), vec!["alpha"]);
+    assert_eq!(state.streamers[0].stream, progress);
+    assert!(!state.reset_watch_progress("101"));
+}
+
+#[test]
+fn removal_waits_for_a_placement_that_is_not_settled() {
+    for (label, confirmed) in [("reserved or unknown", false), ("confirmed", true)] {
+        let mut state = reload_state(&["alpha", "bravo"]);
+        let mut event = unplaced_prediction(&state, 1, "event-placed");
+        event.bet_placed = true;
+        event.bet_confirmed = confirmed;
+        state.predictions.insert(event.event_id.clone(), event);
+        state
+            .processed_prediction_ids
+            .push_back(String::from("event-placed"));
+        let before = state.predictions.clone();
+        let mut reload = unchanged_reload(&state);
+        reload.remove = vec![String::from("101")];
+
+        let outcome = state.apply_config_reload(reload);
+
+        assert!(outcome.removed.is_empty(), "{label}");
+        assert_eq!(outcome.deferred, vec![String::from("101")], "{label}");
+        assert_eq!(state.streamers.len(), 2, "{label}");
+        assert_eq!(state.predictions, before, "{label}");
+        assert!(state.retired_streamers.is_empty(), "{label}");
+
+        state.predictions.clear();
+        let mut retry = unchanged_reload(&state);
+        retry.remove = vec![String::from("101")];
+        assert_eq!(
+            state.apply_config_reload(retry).removed,
+            vec![String::from("101")],
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn removal_releases_unplaced_predictions_and_keeps_other_channels_events() {
+    let mut state = reload_state(&["alpha", "bravo"]);
+    for (index, event_id) in [(0, "event-alpha"), (1, "event-bravo")] {
+        let event = unplaced_prediction(&state, index, event_id);
+        state.predictions.insert(event_id.into(), event);
+        state.processed_prediction_ids.push_back(event_id.into());
+    }
+    let mut placed = unplaced_prediction(&state, 0, "event-alpha-placed");
+    placed.bet_placed = true;
+    placed.bet_confirmed = true;
+    state.predictions.insert(placed.event_id.clone(), placed);
+    let mut reload = unchanged_reload(&state);
+    reload.remove = vec![String::from("101")];
+
+    let outcome = state.apply_config_reload(reload);
+
+    assert_eq!(outcome.removed, vec![String::from("101")]);
+    assert!(state.predictions.contains_key("event-alpha"));
+    assert!(state.predictions.contains_key("event-alpha-placed"));
+    assert!(!state.predictions.contains_key("event-bravo"));
+    assert_eq!(
+        state.processed_prediction_ids,
+        std::collections::VecDeque::from([String::from("event-alpha")])
+    );
+}
+
+#[test]
+fn session_summary_still_counts_points_of_removed_channels() {
+    let mut state = reload_state(&["alpha", "bravo"]);
+    state.streamers[1].channel_points = 1_250;
+    let mut reload = unchanged_reload(&state);
+    reload.remove = vec![String::from("101")];
+    state.apply_config_reload(reload);
+
+    let summary = state.session_summary(false, ts(60));
+
+    assert_eq!(summary.total_points_line, "Total Points gained: +250");
+    assert_eq!(summary.streamers.len(), 1);
+    assert_eq!(summary.streamers[0].username, "bravo");
+}
+
+#[test]
+fn prediction_creation_uses_the_tracked_channels_current_settings() {
+    let mut state = reload_state(&["alpha"]);
+    state.streamers[0].settings.make_predictions = false;
+    let mut event = unplaced_prediction(&state, 0, "event-new");
+    event.streamer.settings.make_predictions = true;
+    let created = MinerEvent::PredictionChannel {
+        kind: PredictionChannelKind::EventCreated,
+        event: Box::new(event.clone()),
+        winning_outcome_id: None,
+    };
+    assert!(!state.apply_event_with_outcome(&created, ts(2)).changed);
+
+    state.streamers[0].settings.make_predictions = true;
+    event.streamer.settings.make_predictions = false;
+    let created = MinerEvent::PredictionChannel {
+        kind: PredictionChannelKind::EventCreated,
+        event: Box::new(event),
+        winning_outcome_id: None,
+    };
+    assert!(state.apply_event_with_outcome(&created, ts(3)).changed);
+    assert!(
+        state.predictions["event-new"]
+            .streamer
+            .settings
+            .make_predictions
+    );
+}
+
+#[tokio::test]
+async fn reload_command_notifies_state_subscribers() {
+    let handle = spawn_runtime_state(reload_state(&["alpha", "bravo"]));
+    let mut changes = handle.subscribe_state_changes();
+    changes.mark_unchanged();
+    let mut reload = unchanged_reload(&handle.state_snapshot().await.unwrap());
+    reload.remove = vec![String::from("101")];
+
+    let outcome = handle.apply_config_reload(reload).await.unwrap();
+
+    assert_eq!(outcome.removed, vec![String::from("101")]);
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(handle.state_snapshot().await.unwrap().streamers.len(), 1);
 }

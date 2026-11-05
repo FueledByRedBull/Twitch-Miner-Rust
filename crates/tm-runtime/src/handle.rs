@@ -9,7 +9,8 @@ use tokio::sync::{watch, Mutex, MutexGuard};
 use crate::effect::RuntimeEffect;
 use crate::error::{Result, RuntimeError};
 use crate::types::{
-    ContextUpdate, EventApplication, RuntimeState, RuntimeSummary, SessionSummary, StreamUpdate,
+    ConfigReload, ConfigReloadOutcome, ContextUpdate, EventApplication, RuntimeState,
+    RuntimeSummary, SessionSummary, StreamUpdate,
 };
 
 /// Cloneable handle for the sole mutable [`RuntimeState`] owner.
@@ -203,6 +204,16 @@ impl RuntimeHandle {
         let state = self.lock_open("StateSnapshot").await?;
         self.metrics.record_command_wait(started.elapsed());
         Ok(state.clone())
+    }
+
+    /// Applies a validated configuration reload as one serialized command.
+    pub async fn apply_config_reload(&self, reload: ConfigReload) -> Result<ConfigReloadOutcome> {
+        let started = Instant::now();
+        let mut state = self.lock_open("ApplyConfigReload").await?;
+        self.metrics.record_command_wait(started.elapsed());
+        let outcome = state.apply_config_reload(reload);
+        self.notify_state_change();
+        Ok(outcome)
     }
 
     pub async fn begin_context_update(

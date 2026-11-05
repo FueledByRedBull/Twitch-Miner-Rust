@@ -20,6 +20,7 @@ pub(crate) fn build_logger_settings(config: &ConfigFile) -> LoggerSettings {
         debug: config.debug,
         debug_deep: config.debug_deep,
         anonymize_logs: config.privacy.anonymize_logs,
+        json: config.log_format == tm_config::LogFormat::Json,
     }
 }
 
@@ -125,7 +126,7 @@ pub(crate) async fn bootstrap_runtime_state_with_identity_cache(
 /// so it is skipped. Network, rate-limit, server, auth, and integrity failures
 /// are not specific to one streamer and still abort startup for a clean retry.
 /// So does a connection dropped mid-response or a truncated body.
-fn is_permanent_streamer_failure(error: &anyhow::Error) -> bool {
+pub(crate) fn is_permanent_streamer_failure(error: &anyhow::Error) -> bool {
     use tm_twitch::TwitchClientError;
     match error.downcast_ref::<TwitchClientError>() {
         Some(TwitchClientError::Http(_) | TwitchClientError::Json(_)) => false,
@@ -157,9 +158,11 @@ pub(crate) async fn load_targets(
     } else {
         config.streamers.clone()
     };
-    // shortcut: channels are found once per start, because tracked channels are
-    // fixed at startup; a long run keeps them even after they go offline. Finding
-    // them while running needs runtime and presence support for adding channels.
+    // Drop discovery runs only here, once per start, and a long run keeps what it
+    // found even after those channels go offline. A config reload calls this
+    // without discovery to refresh the configured list; Drop-discovered channels
+    // stay tracked until the next restart. Streak discovery is separate: it runs
+    // from the config-watch task, never here.
     for game in &config.drop_discovery_games {
         match twitch
             .fetch_drops_enabled_channels_typed(game, DROP_DISCOVERY_CHANNELS_PER_GAME)
@@ -279,7 +282,7 @@ async fn bootstrap_channel_context(
                 }
                 Err(error) => return Err(error),
                 Ok(_) => {
-                    if observability.show_claimed_bonus {
+                    if observability.show_claimed_bonus() {
                         let message = observability.bonus_claim_message(streamer, true);
                         tracing::info!(operation = "claim_bonus", "{message}");
                         observability.spawn_event(DiscordEvent::BonusClaim, message);

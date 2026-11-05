@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use time::format_description::well_known::Rfc2822;
 use time::OffsetDateTime;
 use tm_domain::{Stream, MAX_PREDICTION_POINTS};
+use tm_net::NetworkPolicy;
 
 use crate::contracts::{extract_build_id, extract_settings_script_url, extract_spade_url};
 use crate::cookies::{claim_bonus_cookie_header, is_twitch_cookie_url, merge_cookie_headers};
@@ -51,6 +52,7 @@ pub struct TwitchClient {
     /// every address returned by DNS and its redirect policy is disabled so a
     /// response cannot silently move a credential-bearing request elsewhere.
     remote_client: Result<reqwest::Client, ()>,
+    network: NetworkPolicy,
     allow_loopback_remote_endpoints: bool,
     auth_token: String,
     default_cookie_header: Option<String>,
@@ -132,7 +134,8 @@ impl TwitchClient {
         auth_token: impl Into<String>,
         user_agent: impl Into<String>,
     ) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
+        let client = NetworkPolicy::direct()
+            .http_client_builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
@@ -190,11 +193,33 @@ impl TwitchClient {
         default_cookie_header: Option<String>,
         endpoints: TwitchEndpoints,
     ) -> Self {
+        Self::with_network(
+            client,
+            auth_token,
+            user_agent,
+            default_cookie_header,
+            endpoints,
+            &NetworkPolicy::direct(),
+        )
+    }
+
+    /// Builds a client whose requests to Twitch-supplied URLs also follow
+    /// `network`. `client` must have been built from the same policy.
+    #[must_use]
+    pub fn with_network(
+        client: reqwest::Client,
+        auth_token: impl Into<String>,
+        user_agent: impl Into<String>,
+        default_cookie_header: Option<String>,
+        endpoints: TwitchEndpoints,
+        network: &NetworkPolicy,
+    ) -> Self {
         let allow_loopback_remote_endpoints = endpoints_include_loopback_http(&endpoints);
-        let remote_client = hardened_remote_client(allow_loopback_remote_endpoints);
+        let remote_client = hardened_remote_client(allow_loopback_remote_endpoints, network);
         Self {
             client,
             remote_client,
+            network: network.clone(),
             allow_loopback_remote_endpoints,
             auth_token: auth_token.into().trim().to_string(),
             default_cookie_header: default_cookie_header
@@ -220,6 +245,13 @@ impl TwitchClient {
     #[must_use]
     pub fn auth_token(&self) -> &str {
         &self.auth_token
+    }
+
+    /// How this client reaches the network. The other transports use the same
+    /// policy, so one value covers every connection.
+    #[must_use]
+    pub fn network(&self) -> &NetworkPolicy {
+        &self.network
     }
 
     #[must_use]
@@ -881,6 +913,18 @@ impl TwitchClient {
         Ok(game_directory_logins_from_typed(response))
     }
 
+    /// Live channels of a game, most viewed first, whether or not Drops are on.
+    pub async fn fetch_live_channels_typed(
+        &self,
+        game_slug: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, TwitchClientError> {
+        let response: GameDirectoryData = self
+            .post_gql_typed(&operations::live_game_directory(game_slug, limit))
+            .await?;
+        Ok(game_directory_logins_from_typed(response))
+    }
+
     pub async fn fetch_drop_catalog_typed(
         &self,
     ) -> Result<Vec<DropCatalogCampaign>, TwitchClientError> {
@@ -1361,16 +1405,25 @@ impl fmt::Display for DnsPolicyError {
 
 impl std::error::Error for DnsPolicyError {}
 
-fn hardened_remote_client(allow_loopback_http: bool) -> Result<reqwest::Client, ()> {
-    reqwest::Client::builder()
+fn hardened_remote_client(
+    allow_loopback_http: bool,
+    network: &NetworkPolicy,
+) -> Result<reqwest::Client, ()> {
+    let builder = network
+        .http_client_builder()
         .timeout(REMOTE_REQUEST_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .dns_resolver(Arc::new(ValidatedDnsResolver {
+        .redirect(reqwest::redirect::Policy::none());
+    // The resolver looks names up on this host, which would leak them. Through a
+    // proxy the proxy resolves them, so the resolved-address check cannot apply;
+    // the endpoint syntax checks and the disabled redirects still do.
+    let builder = if network.proxy_scheme().is_some() {
+        builder
+    } else {
+        builder.dns_resolver(Arc::new(ValidatedDnsResolver {
             allow_loopback_http,
         }))
-        .build()
-        .map_err(|_| ())
+    };
+    builder.build().map_err(|_| ())
 }
 
 pub(crate) fn endpoints_include_loopback_http(endpoints: &TwitchEndpoints) -> bool {

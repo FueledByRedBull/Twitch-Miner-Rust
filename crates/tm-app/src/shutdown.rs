@@ -19,11 +19,16 @@ pub(crate) async fn shutdown_background_tasks(
     tasks: BackgroundTasks,
 ) {
     let _ = stop_tx.send(true);
+    // A reload in progress owns the transport handles until it finishes or is
+    // cancelled, so it is joined first and the transports are read afterwards.
+    if let Some(task) = tasks.config_watch {
+        await_shutdown_task("config-watch", task).await;
+    }
     let mut waits = tokio::task::JoinSet::new();
     for (name, task) in [
-        ("eventsub", tasks.eventsub),
-        ("pubsub", tasks.pubsub),
-        ("presence-poll", tasks.presence_poll),
+        ("eventsub", tasks.eventsub.take()),
+        ("pubsub", tasks.pubsub.take()),
+        ("presence-poll", tasks.presence_poll.take()),
         ("context", tasks.context),
         ("minute", tasks.minute),
         ("drop", tasks.drop),
@@ -31,6 +36,7 @@ pub(crate) async fn shutdown_background_tasks(
         ("streak-cache", tasks.streak_cache),
         ("streak-recovery", tasks.streak_recovery),
         ("session-watch", tasks.session_watch),
+        ("earnings-watch", tasks.earnings_watch),
     ] {
         if let Some(task) = task {
             waits.spawn(async move {
@@ -119,6 +125,7 @@ mod tests {
     };
 
     use super::{await_shutdown_task, await_shutdown_task_with_grace, shutdown_background_tasks};
+    use crate::tasks::TransportSlot;
     use crate::BackgroundTasks;
 
     struct DropProbe(Arc<AtomicBool>);
@@ -209,9 +216,9 @@ mod tests {
         shutdown_background_tasks(
             stop_tx,
             BackgroundTasks {
-                eventsub: Some(stopping),
-                pubsub: Some(aborted),
-                presence_poll: Some(completed),
+                eventsub: TransportSlot::new(Some(stopping)),
+                pubsub: TransportSlot::new(Some(aborted)),
+                presence_poll: TransportSlot::new(Some(completed)),
                 context: None,
                 minute: None,
                 drop: None,
@@ -219,6 +226,8 @@ mod tests {
                 streak_cache: None,
                 streak_recovery: None,
                 session_watch: None,
+                earnings_watch: None,
+                config_watch: None,
             },
         )
         .await;
