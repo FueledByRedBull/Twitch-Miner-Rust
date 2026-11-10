@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Get-Metadata {
-    $metadata = (cargo metadata --locked --no-deps --format-version 1 2>&1) -join "`n"
+    $metadata = (cargo metadata --locked --no-deps --format-version 1) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw 'Unable to read Cargo package metadata.'
     }
