@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.3.8 - Unreleased
+## 0.3.9 - Unreleased
+
+- The Windows packaging script reads only Cargo's standard output as package
+  metadata, so a release tag build no longer stops when Cargo or rustup prints a
+  notice.
+
+## 0.3.8 - 2026-11-10
 
 - The miner rereads its configuration file every 30 seconds and applies what it
   can without a restart, including adding and removing channels. A file that fails
@@ -40,13 +46,16 @@
 - A new workflow builds static binaries for Linux (x86_64, ARM64, ARMv7) and macOS
   (x86_64, ARM64) with checksums and build provenance. A systemd unit, an OpenRC
   script, and a Windows scheduled task installer are in `deploy/`.
-- The new settings are not written into an existing configuration file, so 0.3.7 can
+- The new settings are not written into an existing configuration file, so 0.3.6 can
   still read it after a rollback unless you set one of them.
 - A PubSub or Hermes connection that stalls during its handshake now gives up after
   30 seconds and tries again. Before, it could wait minutes for the system's TCP
   timeout while that connection's topics went unheard.
 
-## 0.3.7 - Unreleased
+## 0.3.7 - Not released
+
+Deployed and soaked, then superseded by 0.3.8 after a PubSub reconnect left it
+unhealthy for six minutes. It was never tagged; these changes ship in 0.3.8.
 
 - Channels with an active Drop campaign now request every segment their media
   playlist lists each minute, not only the newest one, because Twitch stopped
