@@ -171,7 +171,7 @@ fn text_and_json_output_cover_each_mode() {
 #[test]
 fn tracker_reports_session_today_and_ledger_health() {
     let tracker = EarningsTracker::default();
-    tracker.configure(Some(chrono_tz::UTC), DayTotal::default());
+    tracker.configure(Some(Timezone::UTC), DayTotal::default());
     tracker.note_reward(&reward(NOV_2 + HOUR, "alice", "WATCH", 10));
     tracker.note_reward(&reward(NOV_2 + 2 * HOUR, "alice", "CLAIM", 50));
     tracker.note_dropped(2);
@@ -201,7 +201,7 @@ fn tracker_reports_session_today_and_ledger_health() {
 #[test]
 fn tracker_keeps_only_watch_and_claim_in_the_recent_window() {
     let tracker = EarningsTracker::default();
-    tracker.configure(Some(chrono_tz::UTC), DayTotal::default());
+    tracker.configure(Some(Timezone::UTC), DayTotal::default());
     tracker.note_reward(&reward(NOV_2, "alice", "WATCH", 10));
     tracker.note_reward(&reward(NOV_2 + 60, "alice", "CLAIM", 50));
     tracker.note_reward(&reward(NOV_2 + 120, "alice", "WATCH_STREAK", 300));

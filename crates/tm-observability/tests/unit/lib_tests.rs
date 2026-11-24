@@ -1,6 +1,10 @@
 use super::*;
 use std::fs;
 
+fn system_time(rfc3339: &str) -> SystemTime {
+    SystemTime::try_from(rfc3339.parse::<Timestamp>().unwrap()).unwrap()
+}
+
 #[test]
 fn anonymizer_name_is_stable() {
     let mut anonymizer = Anonymizer::new(true);
@@ -231,7 +235,7 @@ fn report_line_omits_level_and_operation_envelope() {
 
 #[test]
 fn current_log_timestamp_uses_requested_timezone() {
-    let athens = "Europe/Athens".parse::<Tz>().unwrap();
+    let athens = parse_timezone("Europe/Athens").unwrap();
     for (utc, expected) in [
         ("2026-01-05T20:19:40Z", "2026-01-05 22:19:40 +02:00"),
         ("2026-09-05T20:19:40Z", "2026-09-05 23:19:40 +03:00"),
@@ -240,9 +244,9 @@ fn current_log_timestamp_uses_requested_timezone() {
         ("2026-10-25T00:59:59Z", "2026-10-25 03:59:59 +03:00"),
         ("2026-10-25T01:00:00Z", "2026-10-25 03:00:00 +02:00"),
     ] {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(utc).unwrap().into();
+        let timestamp = system_time(utc);
         assert_eq!(
-            format_timestamp(timestamp, Some(athens), "%Y-%m-%d %H:%M:%S %:z"),
+            format_timestamp(timestamp, Some(&athens), "%Y-%m-%d %H:%M:%S %:z"),
             expected
         );
     }
@@ -357,7 +361,7 @@ fn capture_log(include_fields: bool, json: bool, emit: impl FnOnce()) -> String 
         .with_writer(log.clone())
         .event_format(GoStyleEventFormat {
             show_seconds: false,
-            timezone: Some(chrono_tz::UTC),
+            timezone: Some(Timezone::UTC),
             console_username: None,
             include_fields,
             json,
@@ -434,18 +438,63 @@ fn local_day_bounds_follow_the_zone_including_dst_days() {
     let at = |unix: u64| UNIX_EPOCH + Duration::from_secs(unix);
     // 2026-11-02T12:00:00Z
     assert_eq!(
-        local_day_bounds(at(1_793_620_800), Some(chrono_tz::UTC)),
+        local_day_bounds(at(1_793_620_800), Some(&Timezone::UTC)),
         Some((1_793_577_600, 1_793_664_000))
     );
-    let new_york: Tz = "America/New_York".parse().unwrap();
+    let new_york = parse_timezone("America/New_York").unwrap();
     // Spring-forward day 2026-03-08 is 23 hours; fall-back day 2026-11-01 is 25.
-    let (start, end) = local_day_bounds(at(1_772_974_800), Some(new_york)).unwrap();
+    let (start, end) = local_day_bounds(at(1_772_974_800), Some(&new_york)).unwrap();
     assert_eq!(end - start, 23 * 3_600);
-    let (start, end) = local_day_bounds(at(1_793_520_000), Some(new_york)).unwrap();
+    let (start, end) = local_day_bounds(at(1_793_520_000), Some(&new_york)).unwrap();
     assert_eq!(end - start, 25 * 3_600);
     // A day boundary belongs to the day it starts.
     assert_eq!(
-        local_day_bounds(at(1_793_577_600), Some(chrono_tz::UTC)).map(|bounds| bounds.0),
+        local_day_bounds(at(1_793_577_600), Some(&Timezone::UTC)).map(|bounds| bounds.0),
         Some(1_793_577_600)
+    );
+}
+
+#[test]
+fn local_day_bounds_are_none_when_midnight_is_skipped() {
+    // Brazil started daylight saving at midnight on 2018-11-04: 00:00 became 01:00.
+    let sao_paulo = parse_timezone("America/Sao_Paulo").unwrap();
+    let noon = system_time("2018-11-04T15:00:00Z");
+    assert_eq!(local_day_bounds(noon, Some(&sao_paulo)), None);
+}
+
+#[test]
+fn local_day_bounds_take_the_earlier_midnight_when_it_repeats() {
+    // Cuba ended daylight saving on 2025-11-02 at 01:00, so 00:00-01:00 happened twice.
+    let havana = parse_timezone("America/Havana").unwrap();
+    let noon = system_time("2025-11-02T17:00:00Z");
+    let (start, end) = local_day_bounds(noon, Some(&havana)).unwrap();
+    // The day starts at the first 00:00 (CDT, UTC-4) and lasts 25 hours.
+    assert_eq!(start, 1_762_056_000);
+    assert_eq!(end - start, 25 * 3_600);
+}
+
+#[test]
+fn bundled_zone_names_resolve_without_system_zoneinfo() {
+    // Only the bundled database is compiled in, so this holds in the scratch image.
+    for name in ["UTC", "Europe/Athens", "America/New_York", "Asia/Tokyo"] {
+        assert!(parse_timezone(name).is_some(), "{name}");
+    }
+    assert!(parse_timezone("Not/AZone").is_none());
+}
+
+#[test]
+fn zone_names_match_case_insensitively() {
+    assert_eq!(
+        parse_timezone("europe/athens"),
+        parse_timezone("Europe/Athens")
+    );
+}
+
+#[test]
+fn out_of_range_time_formats_as_invalid() {
+    let far_future = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(20_000 * 365 * 86_400);
+    assert_eq!(
+        format_timestamp(far_future, Some(&Timezone::UTC), "%Y-%m-%d"),
+        "invalid-time"
     );
 }

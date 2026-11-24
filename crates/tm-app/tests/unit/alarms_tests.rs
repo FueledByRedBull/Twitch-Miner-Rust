@@ -249,7 +249,7 @@ fn drops_alarm_ignores_unknown_inventory_and_suspended_time() {
 
 #[test]
 fn report_day_is_yesterday_and_only_due_once() {
-    let utc = Some(chrono_tz::UTC);
+    let utc = Some(&Timezone::UTC);
     let due = report_day_due(NOON_NOV_2, utc, None).unwrap();
     assert_eq!(
         due,
@@ -280,16 +280,16 @@ fn report_day_is_yesterday_and_only_due_once() {
 
 #[test]
 fn report_day_follows_the_configured_timezone() {
-    let athens: Tz = "Europe/Athens".parse().unwrap();
+    let athens = tm_observability::parse_timezone("Europe/Athens").unwrap();
     // 2026-11-01T23:30:00Z is already Nov 2 01:30 in Athens (UTC+2), so Nov 1 is yesterday.
     let now = NOV_2 - 30 * 60;
-    let day = report_day_due(now, Some(athens), None).unwrap();
+    let day = report_day_due(now, Some(&athens), None).unwrap();
     assert_eq!(day.label, "2026-11-01");
     assert_eq!(day.start, NOV_1 - 2 * HOUR);
     assert_eq!(day.end, NOV_2 - 2 * HOUR);
     // In UTC the same instant is still Nov 1, so yesterday is Oct 31.
     assert_eq!(
-        report_day_due(now, Some(chrono_tz::UTC), None)
+        report_day_due(now, Some(&Timezone::UTC), None)
             .unwrap()
             .label,
         "2026-10-31"
@@ -304,11 +304,11 @@ fn report_marker_survives_a_restart_and_ignores_garbage() {
     // A new process reads the marker back and does not report the day again.
     let marker = read_report_marker(dir.path());
     assert_eq!(marker.as_deref(), Some("2026-11-01"));
-    assert!(report_day_due(NOON_NOV_2, Some(chrono_tz::UTC), marker.as_deref()).is_none());
+    assert!(report_day_due(NOON_NOV_2, Some(&Timezone::UTC), marker.as_deref()).is_none());
     // The next local day is due again.
     assert!(report_day_due(
         NOON_NOV_2 + 24 * HOUR,
-        Some(chrono_tz::UTC),
+        Some(&Timezone::UTC),
         marker.as_deref()
     )
     .is_some());
@@ -348,7 +348,7 @@ fn daily_report_totals_yesterday_by_reason_and_top_three_channels() {
             reward(NOV_2, "after", "WATCH", 999),
         ],
     );
-    let day = report_day_due(NOON_NOV_2, Some(chrono_tz::UTC), None).unwrap();
+    let day = report_day_due(NOON_NOV_2, Some(&Timezone::UTC), None).unwrap();
     let report = build_daily_report(dir.path(), &day).unwrap();
     assert_eq!(report.label, "2026-11-01");
     assert_eq!(report.total_points, 375);
@@ -397,7 +397,7 @@ fn context_for(dir: &Path, anonymize: bool) -> EarningsWatchContext {
         ),
         health: HealthTracker::default(),
         work_dir: dir.to_path_buf(),
-        timezone: Some(chrono_tz::UTC),
+        timezone: Some(Timezone::UTC),
     }
 }
 

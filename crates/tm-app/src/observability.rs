@@ -37,11 +37,11 @@ pub(crate) struct AppObservability {
     anonymizer: Arc<Mutex<Anonymizer>>,
     pending_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     notification_slots: Arc<tokio::sync::Semaphore>,
-    timezone: Option<chrono_tz::Tz>,
+    timezone: Option<tm_observability::Timezone>,
     ledger: Option<LedgerHandle>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 // These independent presentation/privacy flags mirror config fields. Named fields avoid
 // positional-boolean mistakes without inventing enums for simple on/off policy.
 #[allow(clippy::struct_excessive_bools)]
@@ -50,7 +50,7 @@ pub(crate) struct AppObservabilitySettings {
     pub(crate) emoji: bool,
     pub(crate) show_claimed_bonus: bool,
     pub(crate) show_game: bool,
-    pub(crate) timezone: Option<chrono_tz::Tz>,
+    pub(crate) timezone: Option<tm_observability::Timezone>,
 }
 
 impl AppObservability {
@@ -192,7 +192,7 @@ impl AppObservability {
             if let Some(value) = value {
                 let value = tm_observability::format_timestamp(
                     value.into(),
-                    self.timezone,
+                    self.timezone.as_ref(),
                     "%Y-%m-%d %H:%M:%S %:z",
                 );
                 let _ = write!(message, " | {label} {value}");
@@ -688,7 +688,7 @@ pub(crate) fn build_observability(
             timezone: config
                 .timezone
                 .as_deref()
-                .and_then(|value| value.parse().ok()),
+                .and_then(tm_observability::parse_timezone),
         },
     )
     .with_webhook(live.webhook))

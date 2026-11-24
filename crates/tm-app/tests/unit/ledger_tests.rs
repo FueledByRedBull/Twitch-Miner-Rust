@@ -147,8 +147,12 @@ async fn handle_records_through_the_writer_and_drains_on_stop() {
     let dir = tempfile::tempdir().unwrap();
     let tracker = EarningsTracker::default();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let (handle, task) =
-        LedgerHandle::start(dir.path(), Some(chrono_tz::UTC), stop_rx, tracker.clone());
+    let (handle, task) = LedgerHandle::start(
+        dir.path(),
+        Some(tm_observability::Timezone::UTC),
+        stop_rx,
+        tracker.clone(),
+    );
     let now = unix_now_infallible();
     for offset in 0..5 {
         handle.record(record(now + offset, "alice", "WATCH", 10));
@@ -169,8 +173,12 @@ async fn handle_records_through_the_writer_and_drains_on_stop() {
     // A later start reads today's rewards back, so a restart keeps the total.
     let restarted = EarningsTracker::default();
     let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let (_handle, _task) =
-        LedgerHandle::start(dir.path(), Some(chrono_tz::UTC), stop_rx, restarted.clone());
+    let (_handle, _task) = LedgerHandle::start(
+        dir.path(),
+        Some(tm_observability::Timezone::UTC),
+        stop_rx,
+        restarted.clone(),
+    );
     let status = restarted.status(now);
     assert_eq!(status.session_points, Some(0));
     assert_eq!(status.today_points, Some(50));
@@ -201,8 +209,12 @@ async fn write_failures_are_counted_and_do_not_stop_the_writer() {
     fs::write(dir.path().join(LEDGER_DIR), "in the way").unwrap();
     let tracker = EarningsTracker::default();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let (handle, task) =
-        LedgerHandle::start(dir.path(), Some(chrono_tz::UTC), stop_rx, tracker.clone());
+    let (handle, task) = LedgerHandle::start(
+        dir.path(),
+        Some(tm_observability::Timezone::UTC),
+        stop_rx,
+        tracker.clone(),
+    );
     handle.record(record(FIRST_OF_NOVEMBER, "alice", "WATCH", 10));
     handle.record(record(FIRST_OF_NOVEMBER + 1, "alice", "WATCH", 10));
     stop_tx.send(true).unwrap();
@@ -226,7 +238,7 @@ fn observability_with_ledger(
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let (ledger, task) = LedgerHandle::start(
         dir,
-        Some(chrono_tz::UTC),
+        Some(tm_observability::Timezone::UTC),
         stop_rx,
         HealthTracker::default().earnings(),
     );

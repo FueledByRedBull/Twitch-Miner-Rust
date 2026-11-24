@@ -1266,7 +1266,7 @@ mod tests {
                 emoji: true,
                 show_claimed_bonus: true,
                 show_game: true,
-                timezone: Some(chrono_tz::Europe::Athens),
+                timezone: tm_observability::parse_timezone("Europe/Athens"),
             },
         );
         let streamer = Streamer {

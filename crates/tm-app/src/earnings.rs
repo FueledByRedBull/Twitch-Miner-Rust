@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
-use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
+use tm_observability::Timezone;
 
 use crate::ledger::{read_range, LedgerRecord};
 
@@ -56,7 +56,7 @@ pub(crate) struct DayTotal {
 
 #[derive(Default)]
 struct TrackerState {
-    timezone: Option<Tz>,
+    timezone: Option<Timezone>,
     session_points: i64,
     today: DayTotal,
     recent: VecDeque<(u64, i64)>,
@@ -75,7 +75,7 @@ pub(crate) struct EarningsTracker {
 }
 
 impl EarningsTracker {
-    pub(crate) fn configure(&self, timezone: Option<Tz>, today: DayTotal) {
+    pub(crate) fn configure(&self, timezone: Option<Timezone>, today: DayTotal) {
         let mut state = self.lock();
         state.timezone = timezone;
         state.today = today;
@@ -87,7 +87,7 @@ impl EarningsTracker {
         if record.ts >= state.today.end {
             let bounds = tm_observability::local_day_bounds(
                 UNIX_EPOCH + Duration::from_secs(record.ts),
-                state.timezone,
+                state.timezone.as_ref(),
             );
             if let Some((start, end)) = bounds {
                 state.today = DayTotal {
@@ -165,7 +165,11 @@ impl EarningsTracker {
 
 /// Points already in the ledger for the local day containing `now`, so the
 /// status block survives restarts.
-pub(crate) fn today_total(work_dir: &Path, now: u64, timezone: Option<Tz>) -> Result<DayTotal> {
+pub(crate) fn today_total(
+    work_dir: &Path,
+    now: u64,
+    timezone: Option<&Timezone>,
+) -> Result<DayTotal> {
     let Some((start, end)) =
         tm_observability::local_day_bounds(UNIX_EPOCH + Duration::from_secs(now), timezone)
     else {

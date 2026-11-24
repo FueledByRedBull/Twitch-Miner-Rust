@@ -8,8 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
-chrono-tz = "0.10.4"
+# The runtime image has no zoneinfo, so the IANA database is bundled.
+jiff = { version = "1.0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
