@@ -20,9 +20,11 @@ pub(crate) fn time_now() -> tm_runtime::RuntimeTime {
     tm_runtime::RuntimeTime::now_utc()
 }
 
-pub(crate) fn configured_timezone(config: &tm_config::ConfigFile) -> Option<chrono_tz::Tz> {
+pub(crate) fn configured_timezone(
+    config: &tm_config::ConfigFile,
+) -> Option<tm_observability::Timezone> {
     config
         .timezone
         .as_deref()
-        .and_then(|value| value.parse().ok())
+        .and_then(tm_observability::parse_timezone)
 }

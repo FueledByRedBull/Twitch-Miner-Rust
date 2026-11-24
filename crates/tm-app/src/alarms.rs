@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
-use chrono_tz::Tz;
+use tm_observability::Timezone;
 
 use crate::earnings::{summarize, EarningsGrouping};
 use crate::ledger::{create_private_dir, read_range, LEDGER_DIR};
@@ -193,7 +193,7 @@ pub(crate) struct ReportDay {
 /// Dates compare as text because `YYYY-MM-DD` sorts chronologically.
 pub(crate) fn report_day_due(
     now: u64,
-    timezone: Option<Tz>,
+    timezone: Option<&Timezone>,
     marker: Option<&str>,
 ) -> Option<ReportDay> {
     let at = |unix: u64| UNIX_EPOCH + Duration::from_secs(unix);
@@ -292,7 +292,7 @@ pub(crate) struct EarningsWatchContext {
     pub(crate) observability: AppObservability,
     pub(crate) health: HealthTracker,
     pub(crate) work_dir: PathBuf,
-    pub(crate) timezone: Option<Tz>,
+    pub(crate) timezone: Option<Timezone>,
 }
 
 pub(crate) fn spawn_earnings_watch_loop(
@@ -419,7 +419,7 @@ async fn send_daily_report_if_due(
     drop_minutes: Option<i64>,
     marker: &mut Option<String>,
 ) {
-    let Some(day) = report_day_due(now, context.timezone, marker.as_deref()) else {
+    let Some(day) = report_day_due(now, context.timezone.as_ref(), marker.as_deref()) else {
         return;
     };
     let work_dir = context.work_dir.clone();

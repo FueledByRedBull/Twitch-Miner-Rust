@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{Local, Utc};
-use chrono_tz::Tz;
+use jiff::civil::Time;
+use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tm_domain::Streamer;
@@ -496,10 +497,7 @@ pub fn init_tracing(options: &TracingInitOptions) -> Result<(), ObservabilityErr
 
     let event_format = GoStyleEventFormat {
         show_seconds: options.settings.show_seconds,
-        timezone: options
-            .timezone
-            .as_deref()
-            .and_then(|value| value.parse().ok()),
+        timezone: options.timezone.as_deref().and_then(parse_timezone),
         console_username: (options.settings.console_username && !options.settings.anonymize_logs)
             .then(|| options.username.trim().to_string())
             .filter(|value| !value.is_empty()),
@@ -549,7 +547,7 @@ pub fn open_log_file(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GoStyleEventFormat {
     show_seconds: bool,
-    timezone: Option<Tz>,
+    timezone: Option<Timezone>,
     console_username: Option<String>,
     include_fields: bool,
     json: bool,
@@ -582,8 +580,11 @@ where
             str::to_string,
         );
         if self.json {
-            let timestamp =
-                format_timestamp(SystemTime::now(), self.timezone, "%Y-%m-%dT%H:%M:%S%.3f%:z");
+            let timestamp = format_timestamp(
+                SystemTime::now(),
+                self.timezone.as_ref(),
+                "%Y-%m-%dT%H:%M:%S%.3f%:z",
+            );
             let line = format_json_line(
                 &timestamp,
                 format_level(*event.metadata().level()),
@@ -598,7 +599,7 @@ where
             .console_username
             .as_deref()
             .map_or(String::new(), |username| format!(" [{username}]"));
-        let timestamp = current_log_timestamp(self.show_seconds, self.timezone);
+        let timestamp = current_log_timestamp(self.show_seconds, self.timezone.as_ref());
         let line = if report_line {
             format_report_line(&timestamp, &body)
         } else {
@@ -959,7 +960,17 @@ fn random_initial_points(minimum: i64, maximum: i64) -> i64 {
     minimum + i64::try_from(seed % range).unwrap_or_default()
 }
 
-fn current_log_timestamp(show_seconds: bool, timezone: Option<Tz>) -> String {
+/// A time zone: a name from the bundled IANA database, or the system zone.
+pub type Timezone = TimeZone;
+
+/// Look up an IANA zone name such as `Europe/Athens`. The database is bundled,
+/// so this works on hosts without zoneinfo files.
+#[must_use]
+pub fn parse_timezone(name: &str) -> Option<Timezone> {
+    jiff::tz::db().get(name).ok()
+}
+
+fn current_log_timestamp(show_seconds: bool, timezone: Option<&Timezone>) -> String {
     let format = if show_seconds {
         "%H:%M:%S %d/%m/%y"
     } else {
@@ -969,16 +980,25 @@ fn current_log_timestamp(show_seconds: bool, timezone: Option<Tz>) -> String {
     format_timestamp(SystemTime::now(), timezone, format)
 }
 
+fn zone_or_system(timezone: Option<&Timezone>) -> Timezone {
+    timezone.cloned().unwrap_or_else(TimeZone::system)
+}
+
 /// Format a displayed event time using the same timezone policy as log headers.
+/// A time outside the supported range (years -9999 to 9999) prints as
+/// `invalid-time`.
 #[must_use]
-pub fn format_timestamp(timestamp: SystemTime, timezone: Option<Tz>, format: &str) -> String {
-    let timestamp: chrono::DateTime<Utc> = timestamp.into();
-    match timezone {
-        Some(timezone) => timestamp
-            .with_timezone(&timezone)
-            .format(format)
+pub fn format_timestamp(
+    timestamp: SystemTime,
+    timezone: Option<&Timezone>,
+    format: &str,
+) -> String {
+    match Timestamp::try_from(timestamp) {
+        Ok(instant) => instant
+            .to_zoned_datetime(zone_or_system(timezone))
+            .strftime(format)
             .to_string(),
-        None => timestamp.with_timezone(&Local).format(format).to_string(),
+        Err(_) => "invalid-time".to_string(),
     }
 }
 
@@ -986,29 +1006,26 @@ pub fn format_timestamp(timestamp: SystemTime, timezone: Option<Tz>, format: &st
 /// using the same timezone policy as [`format_timestamp`]. Returns `None` when
 /// local midnight does not exist (a daylight-saving gap at midnight).
 #[must_use]
-pub fn local_day_bounds(timestamp: SystemTime, timezone: Option<Tz>) -> Option<(u64, u64)> {
-    let instant: chrono::DateTime<Utc> = timestamp.into();
-    match timezone {
-        Some(zone) => day_bounds_in(&zone, instant),
-        None => day_bounds_in(&Local, instant),
-    }
+pub fn local_day_bounds(timestamp: SystemTime, timezone: Option<&Timezone>) -> Option<(u64, u64)> {
+    let zone = zone_or_system(timezone);
+    let day = Timestamp::try_from(timestamp)
+        .ok()?
+        .to_zoned_datetime(zone.clone())
+        .date();
+    let start = midnight_in(&zone, day)?;
+    let end = midnight_in(&zone, day.tomorrow().ok()?)?;
+    Some((u64::try_from(start).ok()?, u64::try_from(end).ok()?))
 }
 
-fn day_bounds_in<Z: chrono::TimeZone>(
-    zone: &Z,
-    instant: chrono::DateTime<Utc>,
-) -> Option<(u64, u64)> {
-    let day = instant.with_timezone(zone).date_naive();
-    let start = zone
-        .from_local_datetime(&day.and_hms_opt(0, 0, 0)?)
-        .earliest()?;
-    let end = zone
-        .from_local_datetime(&day.succ_opt()?.and_hms_opt(0, 0, 0)?)
-        .earliest()?;
-    Some((
-        u64::try_from(start.timestamp()).ok()?,
-        u64::try_from(end.timestamp()).ok()?,
-    ))
+/// The earliest instant of local midnight, or `None` inside a gap.
+fn midnight_in(zone: &Timezone, day: jiff::civil::Date) -> Option<i64> {
+    let midnight = day.to_datetime(Time::midnight());
+    let offset = match zone.to_ambiguous_timestamp(midnight).offset() {
+        AmbiguousOffset::Unambiguous { offset } => offset,
+        AmbiguousOffset::Fold { before, .. } => before,
+        AmbiguousOffset::Gap { .. } => return None,
+    };
+    Some(offset.to_timestamp(midnight).ok()?.as_second())
 }
 
 #[cfg(test)]

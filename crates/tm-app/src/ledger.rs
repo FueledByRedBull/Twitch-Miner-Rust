@@ -276,11 +276,11 @@ impl LedgerHandle {
     /// stays correct across restarts.
     pub(crate) fn start(
         work_dir: &Path,
-        timezone: Option<chrono_tz::Tz>,
+        timezone: Option<tm_observability::Timezone>,
         stop: tokio::sync::watch::Receiver<bool>,
         tracker: EarningsTracker,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let today = today_total(work_dir, unix_now_infallible(), timezone).unwrap_or_else(|error| {
+        let today = today_total(work_dir, unix_now_infallible(), timezone.as_ref()).unwrap_or_else(|error| {
             tracing::warn!(task = "ledger", error_class = "read", %error, "could not read today's earnings from the ledger");
             DayTotal::default()
         });

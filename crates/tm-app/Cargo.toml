@@ -9,7 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-chrono-tz = "0.10.4"
 clap.workspace = true
 reqwest.workspace = true
 serde.workspace = true

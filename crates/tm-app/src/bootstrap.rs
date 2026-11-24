@@ -539,9 +539,9 @@ pub(crate) fn validate_timezone_override(raw: Option<&str>) -> Option<TimezoneVa
     let zone = raw
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))?;
-    match zone.parse::<chrono_tz::Tz>() {
-        Ok(_) => Some(TimezoneValidation::Valid(zone.to_string())),
-        Err(_) => Some(TimezoneValidation::Invalid(zone.to_string())),
+    match tm_observability::parse_timezone(zone) {
+        Some(_) => Some(TimezoneValidation::Valid(zone.to_string())),
+        None => Some(TimezoneValidation::Invalid(zone.to_string())),
     }
 }
 
